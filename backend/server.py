@@ -286,6 +286,38 @@ async def download_template_route():
     )
 
 
+@api_router.get("/stock-master/download/export")
+async def export_stock_master(user=Depends(get_current_user)):
+    """Export all Stock Master items to CSV in the standard column order."""
+    items = await db.stock_master.find({}, {"_id": 0}).sort("created_at", 1).to_list(100000)
+    buf = io.StringIO()
+    import csv
+    writer = csv.writer(buf)
+    writer.writerow(TEMPLATE_COLUMNS)
+    for idx, it in enumerate(items, start=1):
+        writer.writerow([
+            idx,
+            it.get("model", ""),
+            it.get("part_no", ""),
+            it.get("old_part_no", ""),
+            it.get("make_part_no", ""),
+            it.get("oem", ""),
+            it.get("description_1", ""),
+            it.get("description_2", ""),
+            it.get("remarks", ""),
+            it.get("make", ""),
+            it.get("item_category", ""),
+            "",  # image (skip base64 data in export)
+        ])
+    buf.seek(0)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="stock_master_export_{ts}.csv"'},
+    )
+
+
 @api_router.get("/stock-master/{item_id}", response_model=StockMaster)
 async def get_stock_master(item_id: str, user=Depends(get_current_user)):
     item = await db.stock_master.find_one({"id": item_id}, {"_id": 0})

@@ -99,6 +99,23 @@ export default function StockMasterPage() {
     }
   };
 
+  const bulkExport = async () => {
+    try {
+      const res = await api.get("/stock-master/download/export", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `stock_master_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success(`Exported ${items.length} items`);
+    } catch (err) {
+      toast.error("Could not export");
+    }
+  };
+
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-master-page">
       <div className="flex items-center justify-between mb-6">
@@ -106,9 +123,12 @@ export default function StockMasterPage() {
           <div className="label-sm mb-2">Catalog</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Master</h1>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
             <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
+          </Button>
+          <Button onClick={bulkExport} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-export-button">
+            <Export size={16} weight="bold" className="mr-2" /> Bulk Export
           </Button>
           <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={bulkUpload} className="hidden" data-testid="bulk-upload-input" />
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
