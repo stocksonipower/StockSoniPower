@@ -111,22 +111,37 @@ export default function StockMasterPage() {
         />
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th>Image</th>
-              <th>Part No.</th>
-              <th>Make</th>
-              <th>Model</th>
-              <th>Description</th>
-              <th>Category</th>
-              <th className="text-right">Actions</th>
+              <th className="w-14">SL NO</th>
+              <th>MODEL</th>
+              <th>PART NO</th>
+              <th>OLD NO</th>
+              <th>MAKE PART NO</th>
+              <th>DESCRIPTION 1</th>
+              <th>DESCRIPTION 2</th>
+              <th>REMARKS</th>
+              <th>MAKE</th>
+              <th>CATEGORY</th>
+              <th>IMAGE</th>
+              <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((i) => (
+            {items.map((i, idx) => (
               <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
+                <td className="font-mono text-slate-500">{idx + 1}</td>
+                <td className="font-mono text-slate-600">{i.model || "—"}</td>
+                <td className="font-mono font-semibold">{i.part_no}</td>
+                <td className="font-mono text-slate-600">{i.old_part_no || "—"}</td>
+                <td className="font-mono text-slate-600">{i.make_part_no || "—"}</td>
+                <td className="text-slate-700 max-w-[200px] truncate">{i.description_1 || "—"}</td>
+                <td className="text-slate-700 max-w-[200px] truncate">{i.description_2 || "—"}</td>
+                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks || "—"}</td>
+                <td>{i.make}</td>
+                <td>{i.item_category || "—"}</td>
                 <td>
                   {i.image ? (
                     <img src={i.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
@@ -136,12 +151,7 @@ export default function StockMasterPage() {
                     </div>
                   )}
                 </td>
-                <td className="font-mono font-semibold">{i.part_no}</td>
-                <td>{i.make}</td>
-                <td className="font-mono text-slate-600">{i.model || "—"}</td>
-                <td className="text-slate-600 max-w-xs truncate">{i.description_1 || "—"}</td>
-                <td>{i.item_category || "—"}</td>
-                <td className="text-right">
+                <td className="text-right whitespace-nowrap">
                   <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
                     <Pencil size={14} />
                   </button>
@@ -152,7 +162,7 @@ export default function StockMasterPage() {
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-12 text-slate-500">No items found.</td></tr>
+              <tr><td colSpan={12} className="text-center py-12 text-slate-500">No items found.</td></tr>
             )}
           </tbody>
         </table>
@@ -164,14 +174,14 @@ export default function StockMasterPage() {
             <DialogTitle className="text-2xl font-black">{editing ? "Edit Item" : "New Item"}</DialogTitle>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
-            <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
             <Field label="Model" val={form.model} on={(v) => setForm({ ...form, model: v })} testid="form-model" />
-            <Field label="Old Part No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
+            <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
+            <Field label="Old No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
             <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
-            <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
             <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
             <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
+            <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
+            <Field label="Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
             <div className="col-span-2">
               <Label className="label-sm">Remarks</Label>
               <Textarea value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} className="mt-2 rounded-sm" data-testid="form-remarks" />
