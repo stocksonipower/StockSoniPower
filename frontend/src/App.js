@@ -39,7 +39,7 @@ function App() {
           <Route path="/" element={<Protected><Dashboard /></Protected>} />
           <Route path="/stock-master" element={<Protected><StockMasterPage /></Protected>} />
           <Route path="/locations" element={<Protected><LocationsPage /></Protected>} />
-          <Route path="/stock-in" element={<Protected><StockTransactionPage type="IN" /></Protected>} />
+          <Route path="/stock-in" element={<Protected><StockInPage /></Protected>} />
           <Route path="/stock-out" element={<Protected><StockTransactionPage type="OUT" /></Protected>} />
           <Route path="/balance" element={<Protected><StockBalancePage /></Protected>} />
           <Route path="/transactions" element={<Protected><TransactionsPage /></Protected>} />
