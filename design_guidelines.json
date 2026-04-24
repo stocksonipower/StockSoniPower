@@ -1,0 +1,90 @@
+{
+  "theme": "Light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "design_philosophy": "Objective, rigid, and function-first. Every design decision serves clarity and data density for warehouse operations. Color is functional only. 95% of UI is monochrome. Strict grid alignment.",
+  "colors": {
+    "background": {
+      "primary": "#FFFFFF",
+      "secondary": "#F8F9FA",
+      "tertiary": "#F1F5F9"
+    },
+    "text": {
+      "primary": "#0F172A",
+      "secondary": "#475569",
+      "muted": "#64748B"
+    },
+    "accent": {
+      "primary": "#1D4ED8",
+      "primary_hover": "#1E40AF",
+      "danger": "#DC2626",
+      "warning": "#F59E0B",
+      "success": "#16A34A"
+    },
+    "border": "#E2E8F0"
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Chivo, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl tracking-tight font-black text-slate-900",
+      "h2": "text-2xl tracking-tight font-bold text-slate-900",
+      "h3": "text-xl tracking-tight font-bold text-slate-800",
+      "body": "text-sm md:text-base leading-relaxed text-slate-700",
+      "data_label": "text-xs tracking-[0.2em] uppercase font-bold text-slate-500",
+      "part_number": "text-sm font-mono tracking-tight text-slate-800"
+    }
+  },
+  "layout": {
+    "strategy": "The 'Control Room' Grid",
+    "spacing": "Dense and compact. Use p-4 or p-6 for containers. Grid gaps should be gap-4 or gap-6.",
+    "borders": "Expose the skeleton. Use Grid Borders style with sharp or max 4px border-radius (rounded-sm). Use 1px solid borders (border-slate-200) to define structure without relying on shadows.",
+    "surfaces": "Flat solid surfaces. No glassmorphism. Use 'Tinted Grey' backgrounds to establish hierarchy over pure white where necessary."
+  },
+  "components": {
+    "buttons": "Flat, sharp corners (rounded-sm), high contrast. Primary buttons use accent color (bg-blue-700 text-white hover:bg-blue-800), secondary use monochrome outline with hover inversion.",
+    "inputs": "Shadcn UI base, sharp corners (rounded-sm), clear focus states (focus-visible:ring-2 focus-visible:ring-blue-700 focus-visible:ring-offset-1).",
+    "tables": "High density, border-collapse. Subtle borders on rows. Use monospace font for part numbers and quantities. Sticky headers with slate-50 background.",
+    "cards": "Cardless or flat cards with 1px border (border-slate-200). No soft shadows. If shadows are needed, use a hard 1px offset shadow for tactile feel.",
+    "alerts": "Use full width or clear block alerts for low stock. High contrast (e.g., Warning Yellow background with Black text, or red-50 background with red-700 text)."
+  },
+  "motion": {
+    "hover": "Instant or very fast transitions (100ms ease) for high-efficiency feel.",
+    "interactions": "Subtle background color shifts on table rows and buttons."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "style": "Regular or Bold weight (not duotone) to match the crisp, functional Swiss style. Use yarn add @phosphor-icons/react."
+  },
+  "media": {
+    "images": [
+      {
+        "category": "auth_background",
+        "url": "https://images.pexels.com/photos/14554082/pexels-photo-14554082.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Bright modern warehouse with metal containers for login page background. Add a bg-white/80 or bg-white/90 backdrop-blur-sm overlay to ensure the login form is highly readable."
+      },
+      {
+        "category": "logo",
+        "url": "https://images.unsplash.com/photo-1693164282323-393c6ce2b708?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDB8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMGxvZ28lMjBibGFja3xlbnwwfHx8fDE3NzcwNTI1NzB8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract geometric logo for the brand. Use small size (e.g., h-8 w-8 rounded-sm overflow-hidden mix-blend-multiply)."
+      }
+    ]
+  },
+  "testing": {
+    "rules": "All interactive and key informational elements MUST include a data-testid attribute. Use kebab-case and role-based naming (e.g., data-testid='stock-in-submit-button', data-testid='part-number-input')."
+  },
+  "instructions_to_main_agent": [
+    "Write all files in .js / .jsx, NOT .tsx.",
+    "Strictly adhere to the Light theme and Swiss High-Contrast archetype.",
+    "Avoid gradients, soft shadows, and rounded borders > 4px (use rounded-none or rounded-sm). Everything should feel like a precision tool.",
+    "For the dashboard grid, use tight gaps (gap-4 or gap-6) and maximize screen real estate. Every widget should have a clear 1px border (border-slate-200).",
+    "Use JetBrains Mono (font-mono) for all Part Numbers, Box Numbers, and SKUs to ensure easy visual scanning in tables.",
+    "Include data-testid on ALL interactive elements (buttons, inputs, dropdowns, table rows) using kebab-case and role-based naming.",
+    "For the Stock In/Out forms, ensure the cascading dropdowns are clearly laid out, perhaps in a 2-column or 3-column grid for space efficiency.",
+    "For the Low Stock Alerts, use the danger or warning colors aggressively to draw the eye (e.g., solid red badge or text-red-700 font-bold).",
+    "Use Shadcn components but customize their Tailwind classes to match this rigid, sharp design.",
+    "Navigation should be a sticky top nav or a dense left sidebar with a solid background and 1px border separating it from the main content. Ensure the header has a solid background (bg-white)."
+  ]
+}
