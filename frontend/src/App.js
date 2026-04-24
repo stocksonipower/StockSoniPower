@@ -7,6 +7,7 @@ import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import StockMasterPage from "./pages/StockMasterPage";
 import LocationsPage from "./pages/LocationsPage";
+import StockInPage from "./pages/StockInPage";
 import StockTransactionPage from "./pages/StockTransactionPage";
 import StockBalancePage from "./pages/StockBalancePage";
 import TransactionsPage from "./pages/TransactionsPage";

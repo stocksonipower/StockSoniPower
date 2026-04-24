@@ -713,6 +713,67 @@ async def _validate_txn(p):
     return item, godown, rack, box
 
 
+class StockInLookupRequest(BaseModel):
+    part_nos: List[str]
+
+
+@api_router.post("/stock-in/lookup")
+async def stock_in_lookup(req: StockInLookupRequest, user=Depends(get_current_user)):
+    """Given a list of part numbers, return stock master details + current locations with qty.
+    One entry per (part_no, make). Items with <=1 location first, multi-location items last."""
+    results = []
+    seen_keys = set()
+    for raw in req.part_nos:
+        part_no = (raw or "").strip()
+        if not part_no:
+            continue
+        items = await db.stock_master.find({"part_no": part_no}, {"_id": 0}).to_list(100)
+        if not items:
+            if part_no in seen_keys:
+                continue
+            seen_keys.add(part_no)
+            results.append({"part_no": part_no, "not_found": True, "locations": []})
+            continue
+        for item in items:
+            key = f"{part_no}|{item.get('make','')}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            pipeline = [
+                {"$match": {"part_no": part_no, "make": item.get("make", "")}},
+                {"$group": {
+                    "_id": {
+                        "godown_id": "$godown_id", "godown_name": "$godown_name",
+                        "rack_id": "$rack_id", "rack_no": "$rack_no",
+                        "box_id": "$box_id", "box_no": "$box_no",
+                    },
+                    "quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+                }},
+                {"$match": {"quantity": {"$gt": 0}}},
+                {"$sort": {"_id.godown_name": 1, "_id.rack_no": 1, "_id.box_no": 1}},
+            ]
+            raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
+            locations = [{**r["_id"], "quantity": r["quantity"]} for r in raw_locs]
+            results.append({
+                "not_found": False,
+                "part_no": part_no,
+                "make": item.get("make", ""),
+                "model": item.get("model", ""),
+                "old_part_no": item.get("old_part_no", ""),
+                "make_part_no": item.get("make_part_no", ""),
+                "oem": item.get("oem", ""),
+                "description_1": item.get("description_1", ""),
+                "description_2": item.get("description_2", ""),
+                "remarks": item.get("remarks", ""),
+                "item_category": item.get("item_category", ""),
+                "image": item.get("image", ""),
+                "locations": locations,
+            })
+    # Single/zero-location items first, multi-location after
+    results.sort(key=lambda r: (1 if len(r.get("locations", [])) > 1 else 0, len(r.get("locations", []))))
+    return results
+
+
 @api_router.post("/stock-in")
 async def stock_in(payload: StockInCreate, user=Depends(get_current_user)):
     item, godown, rack, box = await _validate_txn(payload)
