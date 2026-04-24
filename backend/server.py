@@ -713,26 +713,48 @@ async def _validate_txn(p):
     return item, godown, rack, box
 
 
+class StockInLookupEntry(BaseModel):
+    part_no: str
+    make: Optional[str] = None
+
+
 class StockInLookupRequest(BaseModel):
-    part_nos: List[str]
+    # Accept either explicit entries (part_no + optional make) or just part_nos for backward compat
+    entries: Optional[List[StockInLookupEntry]] = None
+    part_nos: Optional[List[str]] = None
 
 
 @api_router.post("/stock-in/lookup")
 async def stock_in_lookup(req: StockInLookupRequest, user=Depends(get_current_user)):
-    """Given a list of part numbers, return stock master details + current locations with qty.
+    """Given entries of (part_no, make?), return stock master details + current locations with qty.
     One entry per (part_no, make). Items with <=1 location first, multi-location items last."""
+    # Normalize input
+    lookups = []  # list of (part_no, make_or_None)
+    if req.entries:
+        for e in req.entries:
+            pn = (e.part_no or "").strip()
+            mk = (e.make or "").strip() or None
+            if pn:
+                lookups.append((pn, mk))
+    elif req.part_nos:
+        for pn in req.part_nos:
+            pn = (pn or "").strip()
+            if pn:
+                lookups.append((pn, None))
+
     results = []
     seen_keys = set()
-    for raw in req.part_nos:
-        part_no = (raw or "").strip()
-        if not part_no:
-            continue
-        items = await db.stock_master.find({"part_no": part_no}, {"_id": 0}).to_list(100)
+    for part_no, make_filter in lookups:
+        query = {"part_no": part_no}
+        if make_filter:
+            query["make"] = make_filter
+        items = await db.stock_master.find(query, {"_id": 0}).to_list(100)
         if not items:
-            if part_no in seen_keys:
+            key = f"{part_no}|{make_filter or ''}"
+            if key in seen_keys:
                 continue
-            seen_keys.add(part_no)
-            results.append({"part_no": part_no, "not_found": True, "locations": []})
+            seen_keys.add(key)
+            results.append({"part_no": part_no, "make": make_filter or "", "not_found": True, "locations": []})
             continue
         for item in items:
             key = f"{part_no}|{item.get('make','')}"
@@ -769,7 +791,6 @@ async def stock_in_lookup(req: StockInLookupRequest, user=Depends(get_current_us
                 "image": item.get("image", ""),
                 "locations": locations,
             })
-    # Single/zero-location items first, multi-location after
     results.sort(key=lambda r: (1 if len(r.get("locations", [])) > 1 else 0, len(r.get("locations", []))))
     return results
 
