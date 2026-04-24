@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { toast } from "sonner";
-import { Plus, Trash, Buildings, Stack, Archive, Pencil, Check, X } from "@phosphor-icons/react";
+import { Plus, Trash, Buildings, Stack, Archive, Pencil, Check, X, UploadSimple, DownloadSimple } from "@phosphor-icons/react";
 
 export default function LocationsPage() {
   const [godowns, setGodowns] = useState([]);
@@ -17,6 +17,37 @@ export default function LocationsPage() {
   const [newBox, setNewBox] = useState({ box_no: "", box_category: "" });
 
   const [editing, setEditing] = useState({ kind: null, id: null, data: {} });
+
+  const godownFileRef = useRef(null);
+  const rackFileRef = useRef(null);
+  const boxFileRef = useRef(null);
+
+  const downloadCsv = async (path, filename) => {
+    try {
+      const res = await api.get(path, { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a"); a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Template downloaded");
+    } catch { toast.error("Could not download template"); }
+  };
+
+  const bulkImport = async (e, path, reload, extra = "") => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData(); fd.append("file", file);
+    try {
+      const { data } = await api.post(path, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      let msg = `Inserted ${data.inserted}, skipped ${data.skipped} of ${data.total_rows} rows`;
+      if (data.missing_godowns?.length) msg += ` • Missing godowns: ${data.missing_godowns.join(", ")}`;
+      if (data.missing_parents?.length) msg += ` • Missing parents: ${data.missing_parents.slice(0, 3).join(", ")}${data.missing_parents.length > 3 ? "…" : ""}`;
+      toast.success(msg);
+      reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail));
+    } finally { e.target.value = ""; }
+  };
 
   const loadGodowns = async () => setGodowns((await api.get("/godowns")).data);
   const loadRacks = async (gid) => setRacks((await api.get("/racks", { params: gid ? { godown_id: gid } : {} })).data);
@@ -105,6 +136,14 @@ export default function LocationsPage() {
         {/* ====== GODOWNS ====== */}
         <ColumnCard
           title="Godowns" icon={Buildings} count={godowns.length}
+          toolbar={
+            <>
+              <input ref={godownFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                onChange={(e) => bulkImport(e, "/godowns/bulk-upload", loadGodowns)} data-testid="godown-bulk-upload-input" />
+              <ToolbarBtn onClick={() => downloadCsv("/godowns/download/template", "godowns_template.csv")} icon={DownloadSimple} label="Template" testid="godown-template-btn" />
+              <ToolbarBtn onClick={() => godownFileRef.current?.click()} icon={UploadSimple} label="Import" testid="godown-import-btn" />
+            </>
+          }
           form={
             <div className="flex gap-2">
               <Input value={newGodown} onChange={(e) => setNewGodown(e.target.value)} placeholder="Godown name" className="rounded-sm" data-testid="new-godown-input" onKeyDown={(e) => e.key === "Enter" && addGodown()} />
@@ -161,6 +200,14 @@ export default function LocationsPage() {
           title="Racks" icon={Stack} count={racks.length}
           disabled={!selectedGodown}
           disabledText="Select a godown"
+          toolbar={
+            <>
+              <input ref={rackFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                onChange={(e) => bulkImport(e, "/racks/bulk-upload", () => selectedGodown && loadRacks(selectedGodown))} data-testid="rack-bulk-upload-input" />
+              <ToolbarBtn onClick={() => downloadCsv("/racks/download/template", "racks_template.csv")} icon={DownloadSimple} label="Template" testid="rack-template-btn" />
+              <ToolbarBtn onClick={() => rackFileRef.current?.click()} icon={UploadSimple} label="Import" testid="rack-import-btn" />
+            </>
+          }
           form={
             <div className="flex gap-2">
               <Input value={newRack.rack_no} onChange={(e) => setNewRack({ ...newRack, rack_no: e.target.value })} placeholder="Rack no." className="rounded-sm" disabled={!selectedGodown} data-testid="new-rack-no-input" />
@@ -226,6 +273,14 @@ export default function LocationsPage() {
           title="Boxes" icon={Archive} count={boxes.length}
           disabled={!selectedRack}
           disabledText="Select a rack"
+          toolbar={
+            <>
+              <input ref={boxFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                onChange={(e) => bulkImport(e, "/boxes/bulk-upload", () => selectedRack && loadBoxes(selectedRack))} data-testid="box-bulk-upload-input" />
+              <ToolbarBtn onClick={() => downloadCsv("/boxes/download/template", "boxes_template.csv")} icon={DownloadSimple} label="Template" testid="box-template-btn" />
+              <ToolbarBtn onClick={() => boxFileRef.current?.click()} icon={UploadSimple} label="Import" testid="box-import-btn" />
+            </>
+          }
           form={
             <div className="flex gap-2">
               <Input value={newBox.box_no} onChange={(e) => setNewBox({ ...newBox, box_no: e.target.value })} placeholder="Box no." className="rounded-sm" disabled={!selectedRack} data-testid="new-box-no-input" />
@@ -288,19 +343,33 @@ export default function LocationsPage() {
   );
 }
 
-function ColumnCard({ title, icon: Icon, count, form, disabled, disabledText, children }) {
+function ColumnCard({ title, icon: Icon, count, form, disabled, disabledText, toolbar, children }) {
   return (
     <div className="bg-white border border-slate-200 rounded-sm flex flex-col h-[calc(100vh-220px)]">
-      <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-3">
+      <div className="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
         <Icon size={18} weight="bold" className="text-slate-700" />
         <h2 className="font-bold text-slate-900">{title}</h2>
-        <span className="ml-auto text-xs font-mono text-slate-500">{count}</span>
+        <span className="text-xs font-mono text-slate-500">{count}</span>
+        <div className="ml-auto flex gap-1">{toolbar}</div>
       </div>
       <div className="p-3 border-b border-slate-200">{form}</div>
       <div className="flex-1 overflow-y-auto">
         {disabled ? <div className="p-8 text-center text-sm text-slate-400">{disabledText}</div> : children}
       </div>
     </div>
+  );
+}
+
+function ToolbarBtn({ onClick, icon: Icon, label, testid }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-sm border border-slate-200"
+      data-testid={testid}
+      title={label}
+    >
+      <Icon size={12} weight="bold" /> {label}
+    </button>
   );
 }
 
