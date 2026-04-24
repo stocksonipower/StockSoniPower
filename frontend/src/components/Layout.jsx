@@ -16,7 +16,7 @@ import {
 const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, testid: "nav-dashboard" },
   { to: "/stock-master", label: "Stock Master", icon: Package, testid: "nav-stock-master" },
-  { to: "/locations", label: "Locations", icon: Buildings, testid: "nav-locations" },
+  { to: "/locations", label: "Location Master", icon: Buildings, testid: "nav-locations" },
   { to: "/stock-in", label: "Stock In", icon: ArrowDown, testid: "nav-stock-in" },
   { to: "/stock-out", label: "Stock Out", icon: ArrowUp, testid: "nav-stock-out" },
   { to: "/balance", label: "Stock Balance", icon: Scales, testid: "nav-balance" },

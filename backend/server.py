@@ -438,6 +438,15 @@ async def list_godowns(user=Depends(get_current_user)):
     return await db.godowns.find({}, {"_id": 0}).sort("created_at", 1).to_list(500)
 
 
+@api_router.put("/godowns/{godown_id}", response_model=Godown)
+async def update_godown(godown_id: str, payload: GodownCreate, user=Depends(get_current_user)):
+    res = await db.godowns.update_one({"id": godown_id}, {"$set": {"godown_name": payload.godown_name}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Godown not found")
+    godown = await db.godowns.find_one({"id": godown_id}, {"_id": 0})
+    return godown
+
+
 @api_router.delete("/godowns/{godown_id}")
 async def delete_godown(godown_id: str, user=Depends(get_current_user)):
     await db.godowns.delete_one({"id": godown_id})
@@ -461,6 +470,23 @@ async def list_racks(godown_id: Optional[str] = None, user=Depends(get_current_u
     return await db.racks.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
 
 
+class RackUpdate(BaseModel):
+    rack_no: str
+    total_boxes: int = 0
+
+
+@api_router.put("/racks/{rack_id}", response_model=Rack)
+async def update_rack(rack_id: str, payload: RackUpdate, user=Depends(get_current_user)):
+    res = await db.racks.update_one(
+        {"id": rack_id},
+        {"$set": {"rack_no": payload.rack_no, "total_boxes": payload.total_boxes}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Rack not found")
+    rack = await db.racks.find_one({"id": rack_id}, {"_id": 0})
+    return rack
+
+
 @api_router.delete("/racks/{rack_id}")
 async def delete_rack(rack_id: str, user=Depends(get_current_user)):
     await db.racks.delete_one({"id": rack_id})
@@ -482,6 +508,23 @@ async def create_box(payload: BoxCreate, user=Depends(get_current_user)):
 async def list_boxes(rack_id: Optional[str] = None, user=Depends(get_current_user)):
     query = {"rack_id": rack_id} if rack_id else {}
     return await db.boxes.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+
+
+class BoxUpdate(BaseModel):
+    box_no: str
+    box_category: Optional[str] = ""
+
+
+@api_router.put("/boxes/{box_id}", response_model=Box)
+async def update_box(box_id: str, payload: BoxUpdate, user=Depends(get_current_user)):
+    res = await db.boxes.update_one(
+        {"id": box_id},
+        {"$set": {"box_no": payload.box_no, "box_category": payload.box_category or ""}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Box not found")
+    box = await db.boxes.find_one({"id": box_id}, {"_id": 0})
+    return box
 
 
 @api_router.delete("/boxes/{box_id}")
