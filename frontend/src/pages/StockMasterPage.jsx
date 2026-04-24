@@ -8,10 +8,10 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon } from "@phosphor-icons/react";
+import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple } from "@phosphor-icons/react";
 
 const emptyForm = {
-  model: "", part_no: "", old_part_no: "", make_part_no: "",
+  model: "", part_no: "", old_part_no: "", make_part_no: "", oem: "",
   description_1: "", description_2: "", remarks: "",
   make: "", item_category: "", image: "",
 };
@@ -73,12 +73,29 @@ export default function StockMasterPage() {
       const { data } = await api.post("/stock-master/bulk-upload", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      toast.success(`Inserted ${data.inserted}, skipped ${data.skipped}`);
+      toast.success(`Inserted ${data.inserted}, skipped ${data.skipped} of ${data.total_rows} rows`);
       load();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail));
     } finally {
       if (excelInput.current) excelInput.current.value = "";
+    }
+  };
+
+  const downloadTemplate = async () => {
+    try {
+      const res = await api.get("/stock-master/download/template", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "stock_master_template.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Template downloaded");
+    } catch (err) {
+      toast.error("Could not download template");
     }
   };
 
@@ -90,12 +107,15 @@ export default function StockMasterPage() {
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Master</h1>
         </div>
         <div className="flex gap-2">
+          <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
+            <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
+          </Button>
           <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={bulkUpload} className="hidden" data-testid="bulk-upload-input" />
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
-            <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Upload
+            <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
           </Button>
           <Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
-            <Plus size={16} weight="bold" className="mr-2" /> New Item
+            <Plus size={16} weight="bold" className="mr-2" /> Add New Item
           </Button>
         </div>
       </div>
@@ -120,6 +140,7 @@ export default function StockMasterPage() {
               <th>PART NO</th>
               <th>OLD NO</th>
               <th>MAKE PART NO</th>
+              <th>OEM</th>
               <th>DESCRIPTION 1</th>
               <th>DESCRIPTION 2</th>
               <th>REMARKS</th>
@@ -137,6 +158,7 @@ export default function StockMasterPage() {
                 <td className="font-mono font-semibold">{i.part_no}</td>
                 <td className="font-mono text-slate-600">{i.old_part_no || "—"}</td>
                 <td className="font-mono text-slate-600">{i.make_part_no || "—"}</td>
+                <td className="font-mono text-slate-600">{i.oem || "—"}</td>
                 <td className="text-slate-700 max-w-[200px] truncate">{i.description_1 || "—"}</td>
                 <td className="text-slate-700 max-w-[200px] truncate">{i.description_2 || "—"}</td>
                 <td className="text-slate-600 max-w-[180px] truncate">{i.remarks || "—"}</td>
@@ -162,7 +184,7 @@ export default function StockMasterPage() {
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={12} className="text-center py-12 text-slate-500">No items found.</td></tr>
+              <tr><td colSpan={13} className="text-center py-12 text-slate-500">No items found.</td></tr>
             )}
           </tbody>
         </table>
@@ -178,6 +200,7 @@ export default function StockMasterPage() {
             <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
             <Field label="Old No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
             <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
+            <Field label="OEM" val={form.oem} on={(v) => setForm({ ...form, oem: v })} testid="form-oem" />
             <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
             <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
             <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />

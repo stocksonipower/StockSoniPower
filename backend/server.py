@@ -15,6 +15,7 @@ import bcrypt
 import jwt
 import pandas as pd
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -102,6 +103,7 @@ class StockMasterBase(BaseModel):
     part_no: str
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
+    oem: Optional[str] = ""
     description_1: Optional[str] = ""
     description_2: Optional[str] = ""
     remarks: Optional[str] = ""
@@ -248,6 +250,42 @@ async def list_stock_master(search: Optional[str] = None, user=Depends(get_curre
     return items
 
 
+@api_router.get("/stock-master/lookup/makes")
+async def get_makes_for_part(part_no: str = Query(...), user=Depends(get_current_user)):
+    makes = await db.stock_master.distinct("make", {"part_no": part_no})
+    return {"makes": makes}
+
+
+@api_router.get("/stock-master/lookup/item")
+async def get_item_by_part_make(part_no: str, make: str, user=Depends(get_current_user)):
+    item = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+
+@api_router.get("/stock-master/download/template")
+async def download_template_route():
+    sample_rows = [
+        ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900", "OEM-88421",
+         "Fuel Pump Assembly", "With gasket", "Qty per box 2", "Cummins", "Engine Parts", ""],
+        ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900", "OEM-88421",
+         "Fuel Pump Assembly", "With gasket", "Qty per box 1", "Tata", "Engine Parts", ""],
+    ]
+    buf = io.StringIO()
+    import csv
+    writer = csv.writer(buf)
+    writer.writerow(TEMPLATE_COLUMNS)
+    for r in sample_rows:
+        writer.writerow(r)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="stock_master_template.csv"'},
+    )
+
+
 @api_router.get("/stock-master/{item_id}", response_model=StockMaster)
 async def get_stock_master(item_id: str, user=Depends(get_current_user)):
     item = await db.stock_master.find_one({"id": item_id}, {"_id": 0})
@@ -280,18 +318,30 @@ async def delete_stock_master(item_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 
-@api_router.get("/stock-master/lookup/makes")
-async def get_makes_for_part(part_no: str = Query(...), user=Depends(get_current_user)):
-    makes = await db.stock_master.distinct("make", {"part_no": part_no})
-    return {"makes": makes}
+# Column header → internal field mapping (case + space insensitive)
+COLUMN_ALIASES = {
+    "sl no": None, "sl.no": None, "slno": None, "s no": None, "sr no": None,
+    "model": "model",
+    "part no": "part_no", "part_no": "part_no", "partno": "part_no", "part number": "part_no",
+    "old no": "old_part_no", "old part no": "old_part_no", "old_part_no": "old_part_no",
+    "make part no": "make_part_no", "make_part_no": "make_part_no", "makepartno": "make_part_no",
+    "oem": "oem", "oem no": "oem", "oem_no": "oem", "oem number": "oem",
+    "description 1": "description_1", "description_1": "description_1", "description1": "description_1", "desc 1": "description_1",
+    "description 2": "description_2", "description_2": "description_2", "description2": "description_2", "desc 2": "description_2",
+    "remarks": "remarks", "remark": "remarks",
+    "make": "make",
+    "category": "item_category", "item category": "item_category", "item_category": "item_category",
+    "image": "image",
+}
+
+TEMPLATE_COLUMNS = [
+    "SL NO", "MODEL", "PART NO", "OLD NO", "MAKE PART NO", "OEM",
+    "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS", "MAKE", "CATEGORY", "IMAGE"
+]
 
 
-@api_router.get("/stock-master/lookup/item")
-async def get_item_by_part_make(part_no: str, make: str, user=Depends(get_current_user)):
-    item = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0})
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return item
+def _normalize_col(c: str) -> str:
+    return " ".join(str(c).strip().lower().split())
 
 
 @api_router.post("/stock-master/bulk-upload")
@@ -299,46 +349,47 @@ async def bulk_upload(file: UploadFile = File(...), user=Depends(get_current_use
     content = await file.read()
     try:
         if file.filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
+            df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
         else:
-            df = pd.read_excel(io.BytesIO(content))
+            df = pd.read_excel(io.BytesIO(content), dtype=str, keep_default_na=False)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"File parse error: {e}")
-    required_cols = {"part_no", "make"}
-    if not required_cols.issubset({c.lower() for c in df.columns}):
-        raise HTTPException(status_code=400, detail="Excel must have part_no and make columns")
-    df.columns = [c.lower() for c in df.columns]
-    inserted, skipped = 0, 0
-    for _, row in df.iterrows():
-        part_no = str(row.get("part_no", "")).strip()
-        make = str(row.get("make", "")).strip()
-        if not part_no or not make or part_no == "nan" or make == "nan":
+
+    # Map incoming columns to internal fields
+    col_map = {}  # original column name -> internal field
+    for col in df.columns:
+        key = _normalize_col(col)
+        if key in COLUMN_ALIASES and COLUMN_ALIASES[key]:
+            col_map[col] = COLUMN_ALIASES[key]
+
+    mapped_fields = set(col_map.values())
+    if "part_no" not in mapped_fields or "make" not in mapped_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="File must contain PART NO and MAKE columns. Download the template for the correct format.",
+        )
+
+    inserted, skipped, errors = 0, 0, []
+    for idx, row in df.iterrows():
+        data = {"model": "", "part_no": "", "old_part_no": "", "make_part_no": "", "oem": "",
+                "description_1": "", "description_2": "", "remarks": "",
+                "make": "", "item_category": "", "image": ""}
+        for orig_col, field in col_map.items():
+            val = row.get(orig_col, "")
+            data[field] = str(val).strip() if val is not None else ""
+        part_no = data["part_no"]
+        make = data["make"]
+        if not part_no or not make:
             skipped += 1
             continue
         if await db.stock_master.find_one({"part_no": part_no, "make": make}):
             skipped += 1
             continue
-        doc = {
-            "id": str(uuid.uuid4()),
-            "model": str(row.get("model", "") or ""),
-            "part_no": part_no,
-            "old_part_no": str(row.get("old_part_no", "") or ""),
-            "make_part_no": str(row.get("make_part_no", "") or ""),
-            "description_1": str(row.get("description_1", "") or ""),
-            "description_2": str(row.get("description_2", "") or ""),
-            "remarks": str(row.get("remarks", "") or ""),
-            "make": make,
-            "item_category": str(row.get("item_category", "") or ""),
-            "image": "",
-            "created_at": now_iso(),
-        }
-        # Clean nan strings
-        for k in list(doc.keys()):
-            if doc[k] == "nan":
-                doc[k] = ""
+        doc = {"id": str(uuid.uuid4()), **data, "created_at": now_iso()}
         await db.stock_master.insert_one(doc)
         inserted += 1
-    return {"inserted": inserted, "skipped": skipped}
+
+    return {"inserted": inserted, "skipped": skipped, "total_rows": len(df)}
 
 
 # -------------------- GODOWN / RACK / BOX --------------------
@@ -433,6 +484,7 @@ async def stock_in(payload: StockInCreate, user=Depends(get_current_user)):
         "model": item.get("model", ""),
         "old_part_no": item.get("old_part_no", ""),
         "make_part_no": item.get("make_part_no", ""),
+        "oem": item.get("oem", ""),
         "description_1": item.get("description_1", ""),
         "description_2": item.get("description_2", ""),
         "remarks": item.get("remarks", ""),
@@ -469,6 +521,7 @@ async def stock_out(payload: StockOutCreate, user=Depends(get_current_user)):
         "model": item.get("model", ""),
         "old_part_no": item.get("old_part_no", ""),
         "make_part_no": item.get("make_part_no", ""),
+        "oem": item.get("oem", ""),
         "description_1": item.get("description_1", ""),
         "description_2": item.get("description_2", ""),
         "remarks": item.get("remarks", ""),
