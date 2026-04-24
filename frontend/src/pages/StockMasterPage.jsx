@@ -8,7 +8,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple } from "@phosphor-icons/react";
+import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown } from "@phosphor-icons/react";
 
 const emptyForm = {
   model: "", part_no: "", old_part_no: "", make_part_no: "", oem: "",
@@ -99,7 +99,7 @@ export default function StockMasterPage() {
     }
   };
 
-  const bulkExport = async () => {
+  const handleExport = async () => {
     try {
       const res = await api.get("/stock-master/download/export", { responseType: "blob" });
       const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
@@ -127,8 +127,8 @@ export default function StockMasterPage() {
           <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
             <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
           </Button>
-          <Button onClick={bulkExport} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-export-button">
-            <Export size={16} weight="bold" className="mr-2" /> Bulk Export
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="export-button">
+            <FileArrowDown size={16} weight="bold" className="mr-2" /> Export
           </Button>
           <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={bulkUpload} className="hidden" data-testid="bulk-upload-input" />
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
