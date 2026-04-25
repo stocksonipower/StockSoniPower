@@ -37,7 +37,25 @@ Build a warehouse stock management system with:
 - Stock Balance, Low Stock alerts, Transactions history with pagination + filter
 - Live data consistency: `_enrich_items` overwrites snapshotted master/location fields with latest values on every read
 
-### Phase 1 — User Management & Auth Security (2026-02-25, COMPLETE)
+### Phase 2 — In-App Notifications & Activity Log (2026-02-25, COMPLETE, 14/14 tests pass)
+- New `notifications` collection with `_notify(...)` helper (failures swallowed, never break the underlying op)
+- **Visibility rules**:
+  - `audience="admin"` → admins only (auth events, user CRUD)
+  - `audience="module"` → admins + staff with `module_access[module] != False`
+  - `audience="user"` → only `target_user_id`
+- **Triggers**: `auth.login`, `auth.lockout`, `user.created`, `user.updated`, `user.deactivated` (DELETE + PUT is_active=false), `user.reactivated`, `stock_master.created`, `stock_master.deleted`, `receipt_note.created`, `stock_in.recorded` (racking record), `issue_note.created`, `stock_out.recorded` (picking record)
+- **Endpoints**:
+  - `GET /api/notifications?unread_only=&limit=` — returns `{items, unread_count}` + `X-Unread-Count` header, sorted desc by created_at
+  - `GET /api/notifications/unread-count`
+  - `POST /api/notifications/mark-read` — `{ids:[...] | null}` (null/empty = mark all visible as read)
+- **Frontend `NotificationBell.jsx`**:
+  - Sticky topbar in Layout (`backdrop-blur`, right-aligned)
+  - Unread count badge (caps at 99+)
+  - Dropdown: per-type icon + colour, title, message, relative time-ago, unread blue dot, hover, click-to-mark-read
+  - "Mark all read" button (auto-disables when nothing unread)
+  - Click-outside dismiss; polls every 30s + on `window.focus`
+
+### Phase 1 — User Management & Auth Security (2026-02-25, COMPLETE, 16/16 tests pass)
 - **Public `/auth/register` removed** (returns 404)
 - **5-failed-login lockout**: 423 response, 15-min `lockout_until`, auto-cleared on admin reactivation or successful login
 - **`last_login` tracking** on every successful login
@@ -57,14 +75,13 @@ Build a warehouse stock management system with:
 
 ### Backend Tests
 - `/app/backend/tests/test_user_management.py` — 16/16 PASS (lockout, RBAC, CRUD, force-reset, module middleware)
+- `/app/backend/tests/test_notifications.py` — 14/14 PASS (list, unread count, triggers, staff visibility, mark-read variants)
 
 ## Backlog / Next Tasks
-- **P1 — Phase 2: In-App Notifications & Activity Log**
-  - Backend: `notifications` collection; hook on Stock In/Out, all Note creates, logins/lockouts
-  - Frontend: bell icon in Layout with unread count + dropdown
 - **P1 — Phase 3: Workflow Assignment Gating**
   - Optional `assigned_to` user dropdown on Receipt Note / Issue Note creation
   - Restrict Racking/Picking creation to assignee (or any user when null)
+  - Send a `user`-audience notification to the assignee on assignment
 - **P2**: Barcode/QR generation for scan-based Stock In/Out
 - **P2**: Refactor `server.py` (~3000 lines) into routers under `/app/backend/routes/`
 - **P2**: Date-range filters on Transactions

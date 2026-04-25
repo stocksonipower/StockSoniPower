@@ -642,6 +642,11 @@ async def deactivate_user(user_id: str, admin=Depends(require_admin)):
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     await db.users.update_one({"id": user_id}, {"$set": {"is_active": False, "deactivated_at": now_iso()}})
+    await _notify(
+        actor=admin, type="user.deactivated", title="User deactivated",
+        message=f"{admin.get('email')} deactivated {target.get('email')}.",
+        audience="admin", ref_collection="users", ref_id=user_id,
+    )
     return {"ok": True, "deactivated": True}
 
 
