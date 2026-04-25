@@ -120,6 +120,7 @@ class StockMasterCreate(StockMasterBase):
 class StockMaster(StockMasterBase):
     id: str
     created_at: str
+    in_use: Optional[bool] = False
 
 
 class GodownCreate(BaseModel):
@@ -260,6 +261,15 @@ async def list_stock_master(
     total = await db.stock_master.count_documents(query)
     skip = (page - 1) * page_size
     items = await db.stock_master.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    # Mark which items have transactions recorded against them (part_no + make pair)
+    used_pairs = set()
+    if items:
+        async for t in db.transactions.aggregate([
+            {"$group": {"_id": {"part_no": "$part_no", "make": "$make"}}},
+        ]):
+            used_pairs.add((t["_id"]["part_no"], t["_id"]["make"]))
+        for it in items:
+            it["in_use"] = (it.get("part_no"), it.get("make")) in used_pairs
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -344,9 +354,17 @@ async def update_stock_master(item_id: str, payload: StockMasterCreate, user=Dep
 
 @api_router.delete("/stock-master/{item_id}")
 async def delete_stock_master(item_id: str, user=Depends(get_current_user)):
-    res = await db.stock_master.delete_one({"id": item_id})
-    if res.deleted_count == 0:
+    item = await db.stock_master.find_one({"id": item_id}, {"_id": 0})
+    if not item:
         raise HTTPException(status_code=404, detail="Not found")
+    # Block delete if any transaction (IN/OUT) exists for this part_no + make
+    txn = await db.transactions.find_one({"part_no": item.get("part_no"), "make": item.get("make")})
+    if txn:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete — transactions are recorded against {item.get('part_no')} / {item.get('make')}. Remove or reassign those transactions first.",
+        )
+    await db.stock_master.delete_one({"id": item_id})
     return {"ok": True}
 
 

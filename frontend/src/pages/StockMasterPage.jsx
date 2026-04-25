@@ -160,8 +160,12 @@ export default function StockMasterPage() {
 
   const del = async (id) => {
     if (!window.confirm("Delete this item?")) return;
-    await api.delete(`/stock-master/${id}`);
-    toast.success("Deleted"); load();
+    try {
+      await api.delete(`/stock-master/${id}`);
+      toast.success("Deleted"); load();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Cannot delete this item");
+    }
   };
 
   const bulkUpload = async (e) => {
@@ -314,7 +318,13 @@ export default function StockMasterPage() {
                   <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
                     <Pencil size={14} />
                   </button>
-                  <button onClick={() => del(i.id)} className="p-1.5 hover:bg-red-50 text-red-700 rounded-sm" data-testid={`delete-${i.id}`}>
+                  <button
+                    onClick={() => del(i.id)}
+                    disabled={!!i.in_use}
+                    title={i.in_use ? "Cannot delete — transactions are recorded against this item" : "Delete"}
+                    className={`p-1.5 rounded-sm ${i.in_use ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                    data-testid={`delete-${i.id}`}
+                  >
                     <Trash size={14} />
                   </button>
                 </td>
