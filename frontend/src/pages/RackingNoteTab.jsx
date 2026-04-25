@@ -13,6 +13,8 @@ import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
 } from "@phosphor-icons/react";
+import { useAuth } from "../lib/auth";
+import { AssigneeBadge } from "../components/AssigneeSelect";
 
 const PAGE_SIZE = 5000;
 
@@ -57,6 +59,7 @@ export default function RackingNoteTab() {
 
 /* ---------- LIST VIEW ---------- */
 function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
+  const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -122,6 +125,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               <th>RECEIPT NOTE NO</th>
               <th className="text-right">ITEMS TOTAL</th>
               <th className="text-right">QUANTITY TOTAL</th>
+              <th>ASSIGNED TO</th>
               <th>STATUS</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -130,6 +134,17 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
             {rows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
+              const assigneeId = r.parent_assigned_to_user_id;
+              const assigneeName = r.parent_assigned_to_name;
+              const assigneeEmail = r.parent_assigned_to_email;
+              const isLockedToOther = !!assigneeId && assigneeId !== me?.id && !isAdmin;
+              const lock = recorded || isLockedToOther;
+              const editTitle = recorded ? "Cannot edit — already recorded"
+                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
+              const deleteTitle = recorded ? "Cannot delete — already recorded"
+                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Delete");
+              const recordTitle = recorded ? "Already recorded"
+                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Record as Stock In");
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
@@ -148,6 +163,9 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
+                    <AssigneeBadge name={assigneeName} email={assigneeEmail} testid={`rkn-assignee-${r.rkn_no}`} />
+                  </td>
+                  <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
                       {recorded ? "Recorded" : "Draft"}
@@ -156,27 +174,28 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   <td className="text-right whitespace-nowrap">
                     <button
                       onClick={() => onEdit(r)}
-                      disabled={recorded}
-                      title={recorded ? "Cannot edit — already recorded" : "Edit"}
-                      className={`p-1.5 rounded-sm mr-1 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                      disabled={lock}
+                      title={editTitle}
+                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`rkn-edit-${r.rkn_no}`}
                     >
                       <Pencil size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(r)}
-                      disabled={recorded}
-                      title={recorded ? "Cannot delete — already recorded" : "Delete"}
-                      className={`p-1.5 rounded-sm mr-2 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      disabled={lock}
+                      title={deleteTitle}
+                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`rkn-delete-${r.rkn_no}`}
                     >
                       <Trash size={14} />
                     </button>
                     <Button
                       onClick={() => handleRecord(r)}
-                      disabled={recorded || recordingId === r.id}
+                      disabled={lock || recordingId === r.id}
                       size="sm"
-                      className={`rounded-sm h-7 text-xs ${recorded ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                      title={recordTitle}
+                      className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
                       data-testid={`rkn-record-${r.rkn_no}`}
                     >
                       <CheckCircle size={12} weight="bold" className="mr-1" />
@@ -187,7 +206,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               );
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No racking notes. Click 'Create New Racking Note' to begin."}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No racking notes. Click 'Create New Racking Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
@@ -225,6 +244,10 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
               <Detail k="Status" v={rkn.status} />
               <Detail k="Created By" v={rkn.created_by || "—"} />
               <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
+              <div>
+                <div className="label-sm">Assigned To (from Receipt Note)</div>
+                <div className="mt-1"><AssigneeBadge name={rkn.parent_assigned_to_name} email={rkn.parent_assigned_to_email} /></div>
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="data-table w-full text-xs">

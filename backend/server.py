@@ -165,6 +165,44 @@ async def _notify(
         logger.warning(f"_notify failed: {e}")
 
 
+# -------------------- ASSIGNMENT HELPERS (Phase 3) --------------------
+async def _resolve_assignee(user_id: Optional[str], module: str) -> dict:
+    """Validate and resolve an assignee user_id into name/email fields. Returns {} if user_id is empty."""
+    if not user_id:
+        return {"assigned_to_user_id": None, "assigned_to_name": "", "assigned_to_email": ""}
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=400, detail="Assigned user not found")
+    if u.get("is_active") is False:
+        raise HTTPException(status_code=400, detail="Cannot assign to a deactivated user")
+    if u.get("role") != "admin":
+        access = u.get("module_access") or {}
+        if access.get(module, True) is False:
+            raise HTTPException(status_code=400, detail=f"User does not have access to '{module}' module")
+    return {
+        "assigned_to_user_id": u["id"],
+        "assigned_to_name": u.get("name") or u.get("email", ""),
+        "assigned_to_email": u.get("email", ""),
+    }
+
+
+def _enforce_assignee(parent_note: dict, user: dict, action: str):
+    """Raise 403 if note is assigned to someone else and current user is neither admin nor the assignee.
+    No-op if note is unassigned or current user is admin or matches assignee."""
+    if user.get("role") == "admin":
+        return
+    a = parent_note.get("assigned_to_user_id")
+    if not a:
+        return  # unassigned -> any user with module access can act
+    if a == user.get("id"):
+        return
+    name = parent_note.get("assigned_to_name") or parent_note.get("assigned_to_email") or "another user"
+    raise HTTPException(
+        status_code=403,
+        detail=f"Cannot {action}: this note is assigned to {name}.",
+    )
+
+
 # -------------------- MODELS --------------------
 class UserRegister(BaseModel):
     email: EmailStr
@@ -298,6 +336,7 @@ class ReceiptNoteCreate(BaseModel):
     invoice_no: Optional[str] = ""
     invoice_date: Optional[str] = ""  # ISO "YYYY-MM-DD"
     items: List[ReceiptNoteItem] = []
+    assigned_to_user_id: Optional[str] = None  # null = unassigned (anyone with module access can rack)
 
 
 class ReceiptNote(BaseModel):
@@ -313,6 +352,9 @@ class ReceiptNote(BaseModel):
     racked_at: Optional[str] = None
     created_at: str
     created_by: str = ""
+    assigned_to_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = ""
+    assigned_to_email: Optional[str] = ""
 
 
 class RackingNoteItem(BaseModel):
@@ -372,6 +414,7 @@ class IssueNoteItem(BaseModel):
 class IssueNoteCreate(BaseModel):
     issued_to: str = ""
     items: List[IssueNoteItem] = []
+    assigned_to_user_id: Optional[str] = None
 
 
 class IssueNote(BaseModel):
@@ -386,6 +429,9 @@ class IssueNote(BaseModel):
     picked_at: Optional[str] = None
     created_at: str
     created_by: str = ""
+    assigned_to_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = ""
+    assigned_to_email: Optional[str] = ""
 
 
 class PickingNoteItem(BaseModel):
@@ -653,6 +699,30 @@ async def deactivate_user(user_id: str, admin=Depends(require_admin)):
 @api_router.get("/meta/modules")
 async def list_modules(user=Depends(get_current_user)):
     return {"modules": list(APP_MODULES)}
+
+
+@api_router.get("/users/assignable")
+async def list_assignable_users(module: Optional[str] = None, user=Depends(get_current_user)):
+    """List active users that can be assigned to a workflow note. Auth-only (any logged-in user).
+    Optional `module` filter returns only users whose module_access permits that module
+    (admins always included)."""
+    rows = await db.users.find(
+        {"is_active": {"$ne": False}},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "role": 1, "module_access": 1},
+    ).sort("name", 1).to_list(5000)
+    out = []
+    for u in rows:
+        if module and u.get("role") != "admin":
+            access = u.get("module_access") or {}
+            if access.get(module, True) is False:
+                continue
+        out.append({
+            "id": u["id"],
+            "email": u.get("email", ""),
+            "name": u.get("name", ""),
+            "role": u.get("role", "staff"),
+        })
+    return out
 
 
 # -------------------- NOTIFICATIONS API --------------------
@@ -1612,6 +1682,8 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
         if it.quantity is None or it.quantity <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
 
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_in")
+
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
 
@@ -1635,6 +1707,7 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "status": "RACKING_PENDING",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
+            **assignee,
         }
         try:
             await db.receipt_notes.insert_one(doc)
@@ -1645,6 +1718,14 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
                 message=f"{user.get('email')} created {rn_no} with {len(doc['items'])} item(s) — racking pending.",
                 audience="module", ref_collection="receipt_notes", ref_id=doc["id"],
             )
+            if assignee.get("assigned_to_user_id"):
+                await _notify(
+                    actor=user, type="receipt_note.assigned", module="stock_in",
+                    title=f"Assigned to you: {rn_no}",
+                    message=f"{user.get('email')} assigned Receipt Note {rn_no} to you for racking.",
+                    audience="user", target_user_id=assignee["assigned_to_user_id"],
+                    ref_collection="receipt_notes", ref_id=doc["id"],
+                )
             return doc
         except DuplicateKeyError as e:
             # Concurrent insert grabbed the same serial — retry with the next one
@@ -1695,6 +1776,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     existing = await db.receipt_notes.find_one({"id": rn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
+    _enforce_assignee(existing, user, "edit this receipt note")
     if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
         raise HTTPException(status_code=409, detail="Cannot edit — racking notes have been created against this receipt note. Delete those racking notes first.")
     if not payload.items or len(payload.items) == 0:
@@ -1706,13 +1788,25 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
         if it.quantity is None or it.quantity <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_in")
     update = {
         "invoice_no": (payload.invoice_no or "").strip(),
         "invoice_date": (payload.invoice_date or "").strip(),
         "items": [it.model_dump() for it in payload.items],
         "updated_at": now_iso(),
+        **assignee,
     }
     await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
+    # Notify newly-assigned user (only if assignee actually changed)
+    new_aid = assignee.get("assigned_to_user_id")
+    if new_aid and new_aid != existing.get("assigned_to_user_id"):
+        await _notify(
+            actor=user, type="receipt_note.assigned", module="stock_in",
+            title=f"Assigned to you: {existing.get('rn_no', '')}",
+            message=f"{user.get('email')} assigned Receipt Note {existing.get('rn_no', '')} to you for racking.",
+            audience="user", target_user_id=new_aid,
+            ref_collection="receipt_notes", ref_id=rn_id,
+        )
     doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     return doc
 
@@ -1722,6 +1816,7 @@ async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
     existing = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
+    _enforce_assignee(existing, user, "delete this receipt note")
     # Block delete if any racking note (DRAFT or RECORDED) references it
     if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
         raise HTTPException(status_code=409, detail="Cannot delete — racking notes exist for this receipt note. Delete them first.")
@@ -1909,6 +2004,28 @@ async def _enrich_note_items(notes: list):
     return notes
 
 
+async def _enrich_with_parent_assignee(rows: list, parent_collection: str, parent_id_field: str):
+    """Add parent_assigned_to_user_id / _name / _email onto each row by joining against a parent collection."""
+    if not rows:
+        return rows
+    parent_ids = list({r.get(parent_id_field) for r in rows if r.get(parent_id_field)})
+    if not parent_ids:
+        return rows
+    coll = getattr(db, parent_collection)
+    pmap = {}
+    async for p in coll.find(
+        {"id": {"$in": parent_ids}},
+        {"_id": 0, "id": 1, "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1},
+    ):
+        pmap[p["id"]] = p
+    for r in rows:
+        p = pmap.get(r.get(parent_id_field), {})
+        r["parent_assigned_to_user_id"] = p.get("assigned_to_user_id")
+        r["parent_assigned_to_name"] = p.get("assigned_to_name", "") or ""
+        r["parent_assigned_to_email"] = p.get("assigned_to_email", "") or ""
+    return rows
+
+
 async def _aggregate_other_rkn_qty(rn_id: str, exclude_rkn_id: Optional[str] = None) -> dict:
     """Sum the qty per (part_no, make) across all OTHER racking notes for an RN."""
     q = {"receipt_note_id": rn_id}
@@ -1987,6 +2104,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_curre
     rn = await db.receipt_notes.find_one({"id": payload.receipt_note_id}, {"_id": 0})
     if not rn:
         raise HTTPException(status_code=400, detail="Receipt note not found")
+    _enforce_assignee(rn, user, "create a racking note for this receipt")
     if rn.get("status") == "FULLY_RACKED":
         raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
     _validate_racking_items(payload.items)
@@ -2040,6 +2158,7 @@ async def list_racking_notes(
     skip = (page - 1) * page_size
     rows = await db.racking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
+    await _enrich_with_parent_assignee(rows, "receipt_notes", "receipt_note_id")
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -2053,6 +2172,7 @@ async def get_racking_note(rkn_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Racking note not found")
     await _enrich_note_items([doc])
+    await _enrich_with_parent_assignee([doc], "receipt_notes", "receipt_note_id")
     return doc
 
 
@@ -2063,6 +2183,8 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
         raise HTTPException(status_code=404, detail="Racking note not found")
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot edit — this racking note has already been recorded as Stock In")
+    rn_parent = await db.receipt_notes.find_one({"id": existing.get("receipt_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(rn_parent, user, "edit this racking note")
     _validate_racking_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
@@ -2085,6 +2207,8 @@ async def delete_racking_note(rkn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Racking note not found")
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock In")
+    rn_parent = await db.receipt_notes.find_one({"id": existing.get("receipt_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(rn_parent, user, "delete this racking note")
     await db.racking_notes.delete_one({"id": rkn_id})
     if existing.get("receipt_note_id"):
         await _recompute_rn_status(existing["receipt_note_id"])
@@ -2098,6 +2222,8 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Racking note not found")
     if rkn.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Already recorded")
+    rn_parent = await db.receipt_notes.find_one({"id": rkn.get("receipt_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(rn_parent, user, "record this racking note")
     items = rkn.get("items", [])
     if not items:
         raise HTTPException(status_code=400, detail="No items to record")
@@ -2234,6 +2360,7 @@ async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] 
 async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_user)):
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items)
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     from pymongo.errors import DuplicateKeyError
@@ -2253,6 +2380,7 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             "status": "PICKING_PENDING",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
+            **assignee,
         }
         try:
             await db.issue_notes.insert_one(doc)
@@ -2263,6 +2391,14 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
                 message=f"{user.get('email')} created {in_no} for '{doc['issued_to'] or '—'}' with {len(doc['items'])} item(s) — picking pending.",
                 audience="module", ref_collection="issue_notes", ref_id=doc["id"],
             )
+            if assignee.get("assigned_to_user_id"):
+                await _notify(
+                    actor=user, type="issue_note.assigned", module="stock_out",
+                    title=f"Assigned to you: {in_no}",
+                    message=f"{user.get('email')} assigned Issue Note {in_no} to you for picking.",
+                    audience="user", target_user_id=assignee["assigned_to_user_id"],
+                    ref_collection="issue_notes", ref_id=doc["id"],
+                )
             return doc
         except DuplicateKeyError as e:
             last_err = e
@@ -2310,24 +2446,38 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     existing = await db.issue_notes.find_one({"id": in_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Issue note not found")
+    _enforce_assignee(existing, user, "edit this issue note")
     if await db.picking_notes.find_one({"issue_note_id": in_id}):
         raise HTTPException(status_code=409, detail="Cannot edit — picking notes have been created. Delete those first.")
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items, exclude_in_id=in_id)
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     update = {
         "issued_to": (payload.issued_to or "").strip(),
         "items": [it.model_dump() for it in payload.items],
         "updated_at": now_iso(),
+        **assignee,
     }
     await db.issue_notes.update_one({"id": in_id}, {"$set": update})
+    new_aid = assignee.get("assigned_to_user_id")
+    if new_aid and new_aid != existing.get("assigned_to_user_id"):
+        await _notify(
+            actor=user, type="issue_note.assigned", module="stock_out",
+            title=f"Assigned to you: {existing.get('in_no', '')}",
+            message=f"{user.get('email')} assigned Issue Note {existing.get('in_no', '')} to you for picking.",
+            audience="user", target_user_id=new_aid,
+            ref_collection="issue_notes", ref_id=in_id,
+        )
     doc = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     return doc
 
 
 @api_router.delete("/issue-notes/{in_id}")
 async def delete_issue_note(in_id: str, user=Depends(get_current_user)):
-    if not await db.issue_notes.find_one({"id": in_id}):
+    existing = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
+    if not existing:
         raise HTTPException(status_code=404, detail="Issue note not found")
+    _enforce_assignee(existing, user, "delete this issue note")
     if await db.picking_notes.find_one({"issue_note_id": in_id}):
         raise HTTPException(status_code=409, detail="Cannot delete — picking notes exist for this issue note. Delete them first.")
     await db.issue_notes.delete_one({"id": in_id})
@@ -2555,6 +2705,7 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
     inn = await db.issue_notes.find_one({"id": payload.issue_note_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
+    _enforce_assignee(inn, user, "create a picking note for this issue")
     if inn.get("status") == "FULLY_PICKED":
         raise HTTPException(status_code=409, detail="This issue note is already fully picked")
     _validate_picking_items(payload.items)
@@ -2607,6 +2758,7 @@ async def list_picking_notes(
     skip = (page - 1) * page_size
     rows = await db.picking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
+    await _enrich_with_parent_assignee(rows, "issue_notes", "issue_note_id")
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -2620,6 +2772,7 @@ async def get_picking_note(pn_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Picking note not found")
     await _enrich_note_items([doc])
+    await _enrich_with_parent_assignee([doc], "issue_notes", "issue_note_id")
     return doc
 
 
@@ -2630,6 +2783,8 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
         raise HTTPException(status_code=404, detail="Picking note not found")
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot edit — already recorded as Stock Out")
+    in_parent = await db.issue_notes.find_one({"id": existing.get("issue_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(in_parent, user, "edit this picking note")
     _validate_picking_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
@@ -2652,6 +2807,8 @@ async def delete_picking_note(pn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Picking note not found")
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock Out")
+    in_parent = await db.issue_notes.find_one({"id": existing.get("issue_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(in_parent, user, "delete this picking note")
     await db.picking_notes.delete_one({"id": pn_id})
     if existing.get("issue_note_id"):
         await _recompute_in_status(existing["issue_note_id"])
@@ -2665,6 +2822,8 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Picking note not found")
     if pn.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Already recorded")
+    in_parent = await db.issue_notes.find_one({"id": pn.get("issue_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(in_parent, user, "record this picking note")
     items = pn.get("items", [])
     if not items:
         raise HTTPException(status_code=400, detail="No items to record")

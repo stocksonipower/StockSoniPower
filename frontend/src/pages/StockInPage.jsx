@@ -16,6 +16,8 @@ import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, Stack,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
+import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { useAuth } from "../lib/auth";
 
 /* ==============================================================
    STOCK IN  ·  Receipt Note tab
@@ -102,6 +104,7 @@ function ReceiptNoteTab() {
 const PAGE_SIZE = 5000;
 
 function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
+  const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -154,6 +157,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               <th>INVOICE NO</th>
               <th className="text-right">ITEMS</th>
               <th className="text-right">TOTAL QUANTITY</th>
+              <th>ASSIGNED TO</th>
               <th>STATUS</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -164,6 +168,14 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               const isFully = r.status === "FULLY_RACKED";
               const isPartial = r.status === "PARTIALLY_RACKED";
               const hasRacking = isFully || isPartial; // any RKN exists -> edit/delete blocked
+              const isAssignedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
+              const lockEdit = hasRacking || isAssignedToOther;
+              const editTitle = hasRacking
+                ? "Cannot edit — racking notes exist for this receipt"
+                : (isAssignedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
+              const deleteTitle = hasRacking
+                ? "Cannot delete — racking notes exist for this receipt"
+                : (isAssignedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
               const statusLabel = isFully ? "Fully Racked" : (isPartial ? "Partially Racked" : "Racking Pending");
               const statusClass = isFully
                 ? "bg-green-100 text-green-800"
@@ -186,6 +198,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
+                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`rn-assignee-${r.rn_no}`} />
+                  </td>
+                  <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusClass}`}
                       data-testid={`rn-status-${r.rn_no}`}>
                       {statusLabel}
@@ -194,18 +209,18 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td className="text-right whitespace-nowrap">
                     <button
                       onClick={() => onEdit(r)}
-                      disabled={hasRacking}
-                      title={hasRacking ? "Cannot edit — racking notes exist for this receipt" : "Edit"}
-                      className={`p-1.5 rounded-sm mr-1 ${hasRacking ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                      disabled={lockEdit}
+                      title={editTitle}
+                      className={`p-1.5 rounded-sm mr-1 ${lockEdit ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`rn-edit-${r.rn_no}`}
                     >
                       <Pencil size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(r)}
-                      disabled={hasRacking}
-                      title={hasRacking ? "Cannot delete — racking notes exist for this receipt" : "Delete"}
-                      className={`p-1.5 rounded-sm ${hasRacking ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      disabled={lockEdit}
+                      title={deleteTitle}
+                      className={`p-1.5 rounded-sm ${lockEdit ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`rn-delete-${r.rn_no}`}
                     >
                       <Trash size={14} />
@@ -215,7 +230,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               );
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
@@ -255,6 +270,10 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
               <Detail k="Invoice No" v={rn.invoice_no || "—"} />
               <Detail k="Created By" v={rn.created_by || "—"} />
               <Detail k="Created At" v={new Date(rn.created_at).toLocaleString()} />
+              <div className="col-span-2">
+                <div className="label-sm">Assigned To</div>
+                <div className="mt-1"><AssigneeBadge name={rn.assigned_to_name} email={rn.assigned_to_email} /></div>
+              </div>
             </div>
             <div>
               <div className="label-sm mb-2">Items ({(rn.items || []).length})</div>
@@ -309,6 +328,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([emptyItem()]);
   const [addCount, setAddCount] = useState(""); // bulk-add quantity
   const [saving, setSaving] = useState(false);
+  const [assignedToUserId, setAssignedToUserId] = useState("");
 
   // Inline "Create New Master" dialog
   const [masterDialog, setMasterDialog] = useState(null); // { rowIdx, part_no }
@@ -320,6 +340,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       setRnDate(editing.rn_date || "");
       setInvoiceNo(editing.invoice_no || "");
       setInvoiceDate(editing.invoice_date || "");
+      setAssignedToUserId(editing.assigned_to_user_id || "");
       // Hydrate items with empty makes lists; lookup runs in a separate effect once part_nos are set
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "",
@@ -411,6 +432,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       const payload = {
         invoice_no: invoiceNo.trim(),
         invoice_date: invoiceDate || "",
+        assigned_to_user_id: assignedToUserId || null,
         items: items.map((it) => ({
           part_no: it.part_no.trim(),
           make: it.make.trim(),
@@ -468,6 +490,14 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             placeholder="e.g. INV-1024"
             className="mt-2 rounded-sm font-mono"
             data-testid="rn-invoice-no-input"
+          />
+        </div>
+        <div className="col-span-2 lg:col-span-2">
+          <AssigneeSelect
+            value={assignedToUserId}
+            onChange={setAssignedToUserId}
+            module="stock_in"
+            testid="rn-assignee"
           />
         </div>
       </div>

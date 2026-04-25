@@ -15,6 +15,8 @@ import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
   Pencil, CheckCircle, MapPin, Package, ArrowsSplit,
 } from "@phosphor-icons/react";
+import { useAuth } from "../lib/auth";
+import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 
 const PAGE_SIZE = 5000;
 
@@ -81,6 +83,7 @@ function IssueNoteTab() {
 }
 
 function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
+  const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -127,6 +130,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               <th>ISSUED TO</th>
               <th className="text-right">ITEMS</th>
               <th className="text-right">TOTAL QUANTITY</th>
+              <th>ASSIGNED TO</th>
               <th>STATUS</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -137,6 +141,12 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               const isFully = r.status === "FULLY_PICKED";
               const isPartial = r.status === "PARTIALLY_PICKED";
               const hasPicking = isFully || isPartial;
+              const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
+              const lock = hasPicking || lockedToOther;
+              const editTitle = hasPicking ? "Cannot edit — picking notes exist"
+                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
+              const deleteTitle = hasPicking ? "Cannot delete — picking notes exist"
+                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
               const label = isFully ? "Fully Picked" : (isPartial ? "Partially Picked" : "Picking Pending");
               const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
@@ -152,18 +162,21 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
+                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`in-assignee-${r.in_no}`} />
+                  </td>
+                  <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`in-status-${r.in_no}`}>{label}</span>
                   </td>
                   <td className="text-right whitespace-nowrap">
-                    <button onClick={() => onEdit(r)} disabled={hasPicking}
-                      title={hasPicking ? "Cannot edit — picking notes exist" : "Edit"}
-                      className={`p-1.5 rounded-sm mr-1 ${hasPicking ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                    <button onClick={() => onEdit(r)} disabled={lock}
+                      title={editTitle}
+                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`in-edit-${r.in_no}`}>
                       <Pencil size={14} />
                     </button>
-                    <button onClick={() => handleDelete(r)} disabled={hasPicking}
-                      title={hasPicking ? "Cannot delete — picking notes exist" : "Delete"}
-                      className={`p-1.5 rounded-sm ${hasPicking ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                    <button onClick={() => handleDelete(r)} disabled={lock}
+                      title={deleteTitle}
+                      className={`p-1.5 rounded-sm ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`in-delete-${r.in_no}`}>
                       <Trash size={14} />
                     </button>
@@ -172,7 +185,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No issue notes. Click 'Create New Issue Note' to begin."}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No issue notes. Click 'Create New Issue Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
@@ -202,6 +215,10 @@ function IssueNoteDetailDialog({ inn, onClose }) {
               <Detail k="Issued To" v={inn.issued_to || "—"} />
               <Detail k="Status" v={inn.status} />
               <Detail k="Created At" v={new Date(inn.created_at).toLocaleString()} />
+              <div className="col-span-2">
+                <div className="label-sm">Assigned To</div>
+                <div className="mt-1"><AssigneeBadge name={inn.assigned_to_name} email={inn.assigned_to_email} /></div>
+              </div>
             </div>
             <table className="data-table w-full">
               <thead>
@@ -236,12 +253,14 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([emptyIssueItem()]);
   const [addCount, setAddCount] = useState("");
   const [saving, setSaving] = useState(false);
+  const [assignedToUserId, setAssignedToUserId] = useState("");
 
   useEffect(() => {
     if (isEdit) {
       setInNo(editing.in_no || "");
       setInDate(editing.in_date || "");
       setIssuedTo(editing.issued_to || "");
+      setAssignedToUserId(editing.assigned_to_user_id || "");
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "", make: it.make || "", quantity: it.quantity ?? "",
         makes: it.make ? [{ make: it.make, available_qty: 0 }] : [], partLooked: !!it.part_no, available_qty: 0,
@@ -333,6 +352,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     try {
       const payload = {
         issued_to: issuedTo.trim(),
+        assigned_to_user_id: assignedToUserId || null,
         items: items.map((it) => ({ part_no: it.part_no.trim(), make: it.make.trim(), quantity: parseFloat(it.quantity) })),
       };
       const { data } = isEdit
@@ -369,6 +389,14 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           <Label className="label-sm">Issued To *</Label>
           <Input value={issuedTo} onChange={(e) => setIssuedTo(e.target.value)} placeholder="User / department"
             className="mt-2 rounded-sm" data-testid="in-issued-to-input" />
+        </div>
+        <div className="col-span-2">
+          <AssigneeSelect
+            value={assignedToUserId}
+            onChange={setAssignedToUserId}
+            module="stock_out"
+            testid="in-assignee"
+          />
         </div>
       </div>
 
@@ -470,6 +498,7 @@ function PickingNoteTab() {
 }
 
 function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
+  const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -527,6 +556,7 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               <th>ISSUED TO</th>
               <th className="text-right">ITEMS</th>
               <th className="text-right">QUANTITY</th>
+              <th>ASSIGNED TO</th>
               <th>STATUS</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -535,6 +565,17 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
             {rows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
+              const aId = r.parent_assigned_to_user_id;
+              const aName = r.parent_assigned_to_name;
+              const aEmail = r.parent_assigned_to_email;
+              const lockedToOther = !!aId && aId !== me?.id && !isAdmin;
+              const lock = recorded || lockedToOther;
+              const editTitle = recorded ? "Cannot edit — already recorded"
+                : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Edit");
+              const deleteTitle = recorded ? "Cannot delete — already recorded"
+                : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Delete");
+              const recordTitle = recorded ? "Already recorded"
+                : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out");
               return (
                 <tr key={r.id} data-testid={`pn-row-${r.pn_no}`}>
                   <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
@@ -548,23 +589,29 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
+                    <AssigneeBadge name={aName} email={aEmail} testid={`pn-assignee-${r.pn_no}`} />
+                  </td>
+                  <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`} data-testid={`pn-status-${r.pn_no}`}>
                       {recorded ? "Recorded" : "Draft"}
                     </span>
                   </td>
                   <td className="text-right whitespace-nowrap">
-                    <button onClick={() => onEdit(r)} disabled={recorded}
-                      className={`p-1.5 rounded-sm mr-1 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                    <button onClick={() => onEdit(r)} disabled={lock}
+                      title={editTitle}
+                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`pn-edit-${r.pn_no}`}>
                       <Pencil size={14} />
                     </button>
-                    <button onClick={() => handleDelete(r)} disabled={recorded}
-                      className={`p-1.5 rounded-sm mr-2 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                    <button onClick={() => handleDelete(r)} disabled={lock}
+                      title={deleteTitle}
+                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`pn-delete-${r.pn_no}`}>
                       <Trash size={14} />
                     </button>
-                    <Button onClick={() => handleRecord(r)} disabled={recorded || recordingId === r.id} size="sm"
-                      className={`rounded-sm h-7 text-xs ${recorded ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                    <Button onClick={() => handleRecord(r)} disabled={lock || recordingId === r.id} size="sm"
+                      title={recordTitle}
+                      className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
                       data-testid={`pn-record-${r.pn_no}`}>
                       <CheckCircle size={12} weight="bold" className="mr-1" />
                       {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock Out")}
@@ -574,7 +621,7 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               );
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No picking notes. Click 'Create New Picking Note' to begin."}</td></tr>
+              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No picking notes. Click 'Create New Picking Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
@@ -604,6 +651,10 @@ function PickingNoteDetailDialog({ pn, onClose }) {
               <Detail k="Status" v={pn.status} />
               <Detail k="Created By" v={pn.created_by || "—"} />
               <Detail k="Created At" v={new Date(pn.created_at).toLocaleString()} />
+              <div>
+                <div className="label-sm">Assigned To (from Issue Note)</div>
+                <div className="mt-1"><AssigneeBadge name={pn.parent_assigned_to_name} email={pn.parent_assigned_to_email} /></div>
+              </div>
             </div>
             <table className="data-table w-full text-xs">
               <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th className="text-right">QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>

@@ -1,0 +1,63 @@
+{
+  "summary": "Phase 3 — Workflow Assignment Gating tested end-to-end. BACKEND: 10/10 PASS in /app/backend/tests/test_phase3_assignment.py — covers GET /api/users/assignable (auth, module filter), Receipt Note assignment (create/update/delete blocking, admin bypass, unassigned allows-anyone, invalid assignee 400), Issue Note assignment, Picking Note enforcement (POST + /record), Racking Note inherits parent RN assignment (POST + GET enrichment with parent_assigned_to_*). FRONTEND verified live: created admin-provisioned staff users 'AliceFE' (assignee) and 'BobFE' (non-assignee). Logged in UI as Bob → Stock In page shows the RN row with 'ASSIGNED TO @ ALICEFE' badge (data-testid=rn-assignee-RN/26-27/012); rn-edit and rn-delete buttons are DISABLED with tooltip 'Locked — assigned to AliceFE'. Logged in as Alice → same row, both buttons ENABLED (not disabled). Receipt Note detail dialog renders 'Assigned' label + AliceFE badge correctly. AssigneeSelect/AssigneeBadge components are wired across StockInPage, StockOutPage, RackingNoteTab with the spec'd testids (rn-assignee-{rn_no}, in-assignee-{in_no}, rkn-assignee-{rkn_no}, pn-assignee-{pn_no}). All cleanup performed via API. NO regressions detected in Phase 1/2.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Receipt Note detail dialog", "issues": ["Console warning: 'Missing Description or aria-describedby={undefined} for {DialogContent}' — Radix accessibility warning, not blocking but should be addressed by adding DialogDescription (or aria-describedby) on rn-detail-dialog and similar dialogs."]}
+    ]
+  },
+  "tested_scenarios": [
+    {"id": "be_assignable_users_endpoint", "result": "PASS"},
+    {"id": "be_assignable_users_module_filter_excludes_disabled", "result": "PASS"},
+    {"id": "be_receipt_note_create_with_assignee_persists_name_email", "result": "PASS"},
+    {"id": "be_receipt_note_invalid_assignee_returns_400", "result": "PASS"},
+    {"id": "be_receipt_note_non_assignee_blocked_403_with_message", "result": "PASS", "detail": "detail contains 'assigned'"},
+    {"id": "be_receipt_note_assignee_can_edit", "result": "PASS"},
+    {"id": "be_receipt_note_unassigned_allows_anyone", "result": "PASS"},
+    {"id": "be_receipt_note_admin_bypass", "result": "PASS"},
+    {"id": "be_issue_note_assignment_blocks_other_staff", "result": "PASS"},
+    {"id": "be_picking_note_blocked_for_other_when_in_assigned", "result": "PASS", "detail": "POST /api/picking-notes 403 for Bob, 200 for Alice; POST /record also enforced (403/200)"},
+    {"id": "be_racking_note_blocked_for_other_when_rn_assigned", "result": "PASS", "detail": "GET enrichment returns parent_assigned_to_user_id + parent_assigned_to_name"},
+    {"id": "fe_login_as_staff_and_load_stock_in", "result": "PASS"},
+    {"id": "fe_rn_assignee_badge_renders_with_correct_testid_and_name", "result": "PASS", "detail": "data-testid='rn-assignee-RN/26-27/012' visible with text '@ AliceFE'"},
+    {"id": "fe_rn_edit_button_disabled_for_non_assignee_staff", "result": "PASS"},
+    {"id": "fe_rn_delete_button_disabled_for_non_assignee_staff", "result": "PASS"},
+    {"id": "fe_rn_lock_tooltip_text", "result": "PASS", "detail": "title attribute = 'Locked — assigned to AliceFE'"},
+    {"id": "fe_rn_edit_delete_enabled_for_assignee_staff", "result": "PASS", "detail": "After re-login as AliceFE, both buttons enabled (is_disabled()=False)"},
+    {"id": "fe_rn_detail_dialog_shows_assigned_to_badge", "result": "PASS", "detail": "Dialog text contains 'Assigned' and 'AliceFE'"},
+    {"id": "fe_assignee_select_present_on_rn_form", "result": "CODE_VERIFIED", "detail": "StockInPage.jsx L496-500 wires <AssigneeSelect testid='rn-assignee' /> in form header"},
+    {"id": "fe_in_assignee_select_and_badge_present", "result": "CODE_VERIFIED", "detail": "StockOutPage.jsx L165 (badge) + L394-398 (select with testid='in-assignee')"},
+    {"id": "fe_rkn_pn_parent_assignee_badges_present", "result": "CODE_VERIFIED", "detail": "RackingNoteTab.jsx L166 → rkn-assignee-{rkn_no}; StockOutPage.jsx L592 → pn-assignee-{pn_no}; both detail dialogs render parent_assigned_to_name"},
+    {"id": "regression_phase1_phase2_login_dashboard_navigation", "result": "PASS", "detail": "Admin login still works, NotificationBell still renders (badge=49 visible)"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_phase3_assignment.py",
+    "/app/test_reports/pytest/phase3_assignment_results.xml"
+  ],
+  "action_items": [
+    "(LOW) Add aria-describedby/DialogDescription on rn-detail-dialog and similar Radix DialogContent components to silence the a11y console warning. Not blocking; cosmetic only.",
+    "(NICE-TO-HAVE) Add a regression backend test that re-confirms _enrich_with_parent_assignee on GET /api/picking-notes (existing test only checks /api/racking-notes). Code path is symmetric and verified by code-review."
+  ],
+  "critical_code_review_comments": [
+    "_resolve_assignee + _enforce_assignee in server.py centralize assignment validation cleanly — they handle missing user, inactive user, and module-access checks consistently. ✅",
+    "GET /api/users/assignable correctly uses get_current_user (not require_admin), so any authenticated user can fetch the dropdown options — needed because non-admin Stock In users still need to see the list when admins assign. ✅",
+    "_enrich_with_parent_assignee batches a single users.find({_id: $in:[...]}) call rather than N+1 — good perf pattern. ✅",
+    "AssigneeSelect.jsx UNASSIGNED sentinel value 'unassigned' is converted to null on submit; this matches backend's null-as-unassigned semantics. ✅",
+    "StockInPage rn-edit/rn-delete disable logic checks `assigned_to_user_id && assigned_to_user_id !== currentUser.id && currentUser.role !== 'admin'` — correct. Same pattern in RackingNoteTab and StockOutPage. ✅",
+    "Receipt Note PUT correctly emits user-audience notification on assignee change (notification audience='user', target_user_id=new_assignee). ✅",
+    "Minor: Some Radix DialogContent components emit 'Missing Description' a11y warnings — fix by adding <DialogDescription> or aria-describedby. Non-blocking."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (10/10 Phase 3 tests)", "frontend": "100% (all assignment gating UI flows verified live)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working). Created ad-hoc staff alice-fe-{uuid}@phase3.com / alice12345 and bob-fe-{uuid}@phase3.com / bob12345 during the test, both cleaned up via DELETE /api/users.",
+  "seed_data_creation": "Per-test fixtures in test_phase3_assignment.py create temp users (alice/bob), a PHASE3 stock-master row, godowns/racks, and chained RN→RKN→IN→PN documents — all torn down in fixture finally blocks. Frontend test additionally created an RN/26-27/012 doc which was deleted at the end. No persistent test data left behind.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 3 is fully green. The 3 pre-existing failures in test_racking_notes.py (RACKED vs FULLY_RACKED string mismatch) are unrelated to Phase 3 and remain — main agent acknowledged this. If Phase 3 needs a retest, just run `pytest backend/tests/test_phase3_assignment.py -v` (10 tests, ~7s). Frontend assignment-gating UI was verified by logging in as a non-assignee staff (Bob) and confirming rn-edit/rn-delete are disabled with tooltip 'Locked — assigned to {name}', then re-login as the assignee (Alice) and confirming buttons re-enable. Same pattern applies to in-/rkn-/pn-assignee testids; only RN was exercised live for time, others are CODE_VERIFIED via grep of testids in StockOutPage.jsx + RackingNoteTab.jsx.",
+  "rca_of_the_issue": "N/A — no bugs found. Phase 3 implementation is complete and correct."
+}
