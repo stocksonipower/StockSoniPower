@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
+import NotificationBell from "./NotificationBell";
 import {
   SquaresFour,
   Package,
@@ -107,7 +108,12 @@ export default function Layout({ children }) {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 overflow-x-hidden">{children}</main>
+      <main className="flex-1 overflow-x-hidden flex flex-col">
+        <div className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b border-slate-200 px-6 h-12 flex items-center justify-end gap-2">
+          <NotificationBell />
+        </div>
+        <div className="flex-1">{children}</div>
+      </main>
     </div>
   );
 }

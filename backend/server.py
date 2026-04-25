@@ -112,6 +112,59 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# -------------------- NOTIFICATIONS HELPER --------------------
+# Notifications are stored in `notifications` collection. Each row has:
+#   id, created_at, actor_id, actor_name, actor_email,
+#   type, module, title, message,
+#   ref_collection, ref_id,
+#   audience: "admin" | "module" | "user",
+#   target_user_id  (only when audience=="user"),
+#   read_by: [user_id, ...]
+#
+# Visibility rules (computed at GET time):
+#   - audience=="admin"  → admins only
+#   - audience=="module" → admins + staff with module_access[module] != False
+#   - audience=="user"   → only the target user
+NOTIFICATION_AUDIENCES = ("admin", "module", "user")
+
+
+async def _notify(
+    actor: Optional[dict],
+    type: str,
+    title: str,
+    message: str = "",
+    *,
+    module: Optional[str] = None,
+    audience: str = "admin",
+    target_user_id: Optional[str] = None,
+    ref_collection: Optional[str] = None,
+    ref_id: Optional[str] = None,
+):
+    """Insert a notification row. Failures are swallowed (notifications must never break a real operation)."""
+    try:
+        if audience not in NOTIFICATION_AUDIENCES:
+            audience = "admin"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "created_at": now_iso(),
+            "actor_id": (actor or {}).get("id"),
+            "actor_name": (actor or {}).get("name") or (actor or {}).get("email") or "system",
+            "actor_email": (actor or {}).get("email"),
+            "type": type,
+            "module": module,
+            "title": title,
+            "message": message,
+            "ref_collection": ref_collection,
+            "ref_id": ref_id,
+            "audience": audience,
+            "target_user_id": target_user_id,
+            "read_by": [],
+        }
+        await db.notifications.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"_notify failed: {e}")
+
+
 # -------------------- MODELS --------------------
 class UserRegister(BaseModel):
     email: EmailStr
@@ -406,11 +459,29 @@ async def login(payload: UserLogin):
             update["lockout_until"] = until
             update["failed_login_attempts"] = 0
         await db.users.update_one({"id": user["id"]}, {"$set": update})
+        if attempts >= 5:
+            # Lockout triggered → notify admins
+            await _notify(
+                actor={"id": user["id"], "name": user.get("name"), "email": email},
+                type="auth.lockout",
+                title="Account locked",
+                message=f"{email} was locked for 15 minutes after 5 failed login attempts.",
+                audience="admin",
+                ref_collection="users", ref_id=user["id"],
+            )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     # Success: reset counters, set last_login
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"failed_login_attempts": 0, "last_login": now_iso()}, "$unset": {"lockout_until": ""}},
+    )
+    await _notify(
+        actor={"id": user["id"], "name": user.get("name"), "email": email},
+        type="auth.login",
+        title="User signed in",
+        message=f"{user.get('name') or email} signed in.",
+        audience="admin",
+        ref_collection="users", ref_id=user["id"],
     )
     token = create_access_token(user["id"], email)
     return {
@@ -494,6 +565,11 @@ async def create_user(payload: UserCreate, admin=Depends(require_admin)):
         "created_by": admin.get("email"),
     }
     await db.users.insert_one(doc)
+    await _notify(
+        actor=admin, type="user.created", title="New user created",
+        message=f"{admin.get('email')} created user {email} ({payload.role}).",
+        audience="admin", ref_collection="users", ref_id=user_id,
+    )
     return _user_to_public(doc)
 
 
@@ -539,6 +615,21 @@ async def update_user(user_id: str, payload: UserUpdate, admin=Depends(require_a
         raise HTTPException(status_code=400, detail="Nothing to update")
     await db.users.update_one({"id": user_id}, {"$set": update})
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    # Targeted user-level notification for status changes; admin feed for everything else
+    if "is_active" in update:
+        await _notify(
+            actor=admin,
+            type="user.deactivated" if update["is_active"] is False else "user.reactivated",
+            title=("User deactivated" if update["is_active"] is False else "User reactivated"),
+            message=f"{admin.get('email')} {'deactivated' if update['is_active'] is False else 'reactivated'} {target.get('email')}.",
+            audience="admin", ref_collection="users", ref_id=user_id,
+        )
+    elif update:
+        await _notify(
+            actor=admin, type="user.updated", title="User updated",
+            message=f"{admin.get('email')} updated {target.get('email')} ({', '.join(k for k in update.keys() if k != 'password_hash')}).",
+            audience="admin", ref_collection="users", ref_id=user_id,
+        )
     return _user_to_public(fresh)
 
 
@@ -559,6 +650,81 @@ async def list_modules(user=Depends(get_current_user)):
     return {"modules": list(APP_MODULES)}
 
 
+# -------------------- NOTIFICATIONS API --------------------
+def _notif_visibility_filter(user: dict) -> dict:
+    """Build a Mongo filter that matches only notifications the given user can see."""
+    is_admin = user.get("role") == "admin"
+    if is_admin:
+        # Admins see everything
+        return {}
+    access = user.get("module_access") or {}
+    # Modules the staff user is allowed to see
+    allowed_modules = [m for m in APP_MODULES if access.get(m, True) is not False]
+    return {
+        "$or": [
+            {"audience": "user", "target_user_id": user["id"]},
+            {"audience": "module", "module": {"$in": allowed_modules}},
+        ]
+    }
+
+
+def _notif_to_public(n: dict, user_id: str) -> dict:
+    return {
+        "id": n["id"],
+        "created_at": n.get("created_at"),
+        "actor_id": n.get("actor_id"),
+        "actor_name": n.get("actor_name"),
+        "actor_email": n.get("actor_email"),
+        "type": n.get("type"),
+        "module": n.get("module"),
+        "title": n.get("title", ""),
+        "message": n.get("message", ""),
+        "ref_collection": n.get("ref_collection"),
+        "ref_id": n.get("ref_id"),
+        "audience": n.get("audience"),
+        "read": user_id in (n.get("read_by") or []),
+    }
+
+
+@api_router.get("/notifications")
+async def list_notifications(
+    response: Response,
+    unread_only: bool = False,
+    limit: int = Query(50, ge=1, le=500),
+    user=Depends(get_current_user),
+):
+    q = _notif_visibility_filter(user)
+    if unread_only:
+        q = {**q, "read_by": {"$nin": [user["id"]]}}
+    rows = await db.notifications.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    unread = await db.notifications.count_documents({**_notif_visibility_filter(user), "read_by": {"$nin": [user["id"]]}})
+    response.headers["X-Unread-Count"] = str(unread)
+    response.headers["Access-Control-Expose-Headers"] = "X-Unread-Count"
+    return {"items": [_notif_to_public(r, user["id"]) for r in rows], "unread_count": unread}
+
+
+@api_router.get("/notifications/unread-count")
+async def unread_count(user=Depends(get_current_user)):
+    q = {**_notif_visibility_filter(user), "read_by": {"$nin": [user["id"]]}}
+    n = await db.notifications.count_documents(q)
+    return {"unread_count": n}
+
+
+class MarkReadRequest(BaseModel):
+    ids: Optional[List[str]] = None  # if None or empty → mark ALL visible as read
+
+
+@api_router.post("/notifications/mark-read")
+async def mark_read(payload: MarkReadRequest, user=Depends(get_current_user)):
+    base = _notif_visibility_filter(user)
+    if payload.ids:
+        q = {**base, "id": {"$in": payload.ids}}
+    else:
+        q = base
+    res = await db.notifications.update_many(q, {"$addToSet": {"read_by": user["id"]}})
+    return {"updated": res.modified_count}
+
+
 # -------------------- STOCK MASTER --------------------
 @api_router.post("/stock-master", response_model=StockMaster)
 async def create_stock_master(payload: StockMasterCreate, user=Depends(get_current_user)):
@@ -574,6 +740,12 @@ async def create_stock_master(payload: StockMasterCreate, user=Depends(get_curre
     doc["created_at"] = now_iso()
     await db.stock_master.insert_one(doc)
     doc.pop("_id", None)
+    await _notify(
+        actor=user, type="stock_master.created", module="stock_master",
+        title="Stock master item added",
+        message=f"{user.get('email')} added {part_no} / {make}.",
+        audience="module", ref_collection="stock_master", ref_id=doc["id"],
+    )
     return doc
 
 
@@ -706,6 +878,12 @@ async def delete_stock_master(item_id: str, user=Depends(get_current_user)):
             detail=f"Cannot delete — transactions are recorded against {item.get('part_no')} / {item.get('make')}. Remove or reassign those transactions first.",
         )
     await db.stock_master.delete_one({"id": item_id})
+    await _notify(
+        actor=user, type="stock_master.deleted", module="stock_master",
+        title="Stock master item deleted",
+        message=f"{user.get('email')} deleted {item.get('part_no')} / {item.get('make')}.",
+        audience="module", ref_collection="stock_master", ref_id=item_id,
+    )
     return {"ok": True}
 
 
@@ -1456,6 +1634,12 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
         try:
             await db.receipt_notes.insert_one(doc)
             doc.pop("_id", None)
+            await _notify(
+                actor=user, type="receipt_note.created", module="stock_in",
+                title=f"Receipt Note {rn_no}",
+                message=f"{user.get('email')} created {rn_no} with {len(doc['items'])} item(s) — racking pending.",
+                audience="module", ref_collection="receipt_notes", ref_id=doc["id"],
+            )
             return doc
         except DuplicateKeyError as e:
             # Concurrent insert grabbed the same serial — retry with the next one
@@ -1965,6 +2149,13 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
     # Recording an RKN doesn't change RN status (the qty was already counted at save time).
     if rkn.get("receipt_note_id"):
         await _recompute_rn_status(rkn["receipt_note_id"])
+    total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    await _notify(
+        actor=user, type="stock_in.recorded", module="stock_in",
+        title=f"Stock In recorded ({rkn['rkn_no']})",
+        message=f"{user.get('email')} recorded {len(tx_docs)} item(s), total qty {total_qty} into stock from {rkn.get('receipt_note_no') or 'RN'}.",
+        audience="module", ref_collection="racking_notes", ref_id=rkn_id,
+    )
     return {"ok": True, "transactions_created": len(tx_docs)}
 
 
@@ -2061,6 +2252,12 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
         try:
             await db.issue_notes.insert_one(doc)
             doc.pop("_id", None)
+            await _notify(
+                actor=user, type="issue_note.created", module="stock_out",
+                title=f"Issue Note {in_no}",
+                message=f"{user.get('email')} created {in_no} for '{doc['issued_to'] or '—'}' with {len(doc['items'])} item(s) — picking pending.",
+                audience="module", ref_collection="issue_notes", ref_id=doc["id"],
+            )
             return doc
         except DuplicateKeyError as e:
             last_err = e
@@ -2515,6 +2712,13 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
     await db.picking_notes.update_one({"id": pn_id}, {"$set": {"status": "RECORDED", "recorded_at": now}})
     if pn.get("issue_note_id"):
         await _recompute_in_status(pn["issue_note_id"])
+    total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    await _notify(
+        actor=user, type="stock_out.recorded", module="stock_out",
+        title=f"Stock Out recorded ({pn['pn_no']})",
+        message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{pn.get('issued_to') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
+        audience="module", ref_collection="picking_notes", ref_id=pn_id,
+    )
     return {"ok": True, "transactions_created": len(tx_docs)}
 
 
