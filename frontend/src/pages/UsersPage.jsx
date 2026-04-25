@@ -185,7 +185,11 @@ export default function UsersPage() {
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
-    exportToExcel(filteredRows, userColumns, `Users_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...userColumns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Users_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
   return (
@@ -206,7 +210,7 @@ export default function UsersPage() {
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="users-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" />
-            Export to Excel
+            Export
           </Button>
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="users-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
@@ -223,6 +227,7 @@ export default function UsersPage() {
         <table className="data-table w-full">
           <thead>
             <tr>
+              <th className="w-16">Sl No</th>
               <ColumnHeader {...getColumnHeaderProps("name")} label="Name" testid="users-col-name" />
               <ColumnHeader {...getColumnHeaderProps("email")} label="Email" testid="users-col-email" />
               <ColumnHeader {...getColumnHeaderProps("role")} label="Role" testid="users-col-role" />
@@ -234,14 +239,15 @@ export default function UsersPage() {
           </thead>
           <tbody>
             {filteredRows.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-12 text-slate-500">{rows.length === 0 ? "No users found." : "No users match the current filters."}</td></tr>
-            ) : filteredRows.map((u) => {
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{rows.length === 0 ? "No users found." : "No users match the current filters."}</td></tr>
+            ) : filteredRows.map((u, i) => {
               const locked = isLocked(u);
               const moduleCount = u.role === "admin"
                 ? MODULE_KEYS.length
                 : MODULE_KEYS.filter((k) => (u.module_access || {})[k] !== false).length;
               return (
                 <tr key={u.id} data-testid={`user-row-${u.id}`}>
+                  <td className="font-mono text-slate-500">{i + 1}</td>
                   <td className="font-semibold text-slate-900">{u.name || "—"}</td>
                   <td className="font-mono text-xs text-slate-700">{u.email}</td>
                   <td>

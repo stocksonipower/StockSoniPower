@@ -76,7 +76,11 @@ export default function TransactionsPage() {
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
     const tabName = filter === "IN" ? "Stock_In" : filter === "OUT" ? "Stock_Out" : "Transactions";
-    exportToExcel(filteredRows, columns, `${tabName}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `${tabName}_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
   return (
@@ -88,7 +92,7 @@ export default function TransactionsPage() {
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="transactions-export-button">
-            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export to Excel
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="transactions-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -109,6 +113,7 @@ export default function TransactionsPage() {
           <table className="data-table w-full">
             <thead>
               <tr>
+                <th className="w-14">Sl No</th>
                 <ColumnHeader {...getColumnHeaderProps("date")} label="Date" testid="tx-col-date" />
                 <ColumnHeader {...getColumnHeaderProps("time")} label="Time" testid="tx-col-time" />
                 <ColumnHeader {...getColumnHeaderProps("type")} label="Type" testid="tx-col-type" />
@@ -124,10 +129,11 @@ export default function TransactionsPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredRows.map((t) => {
+              {filteredRows.map((t, i) => {
                 const doc = pickDocumentNo(t);
                 return (
                   <tr key={t.id} data-testid={`tx-row-${t.id}`}>
+                    <td className="font-mono text-slate-500">{i + 1}</td>
                     <td className="text-xs font-mono text-slate-500">{fmtDateOnly(t.created_at)}</td>
                     <td className="text-xs font-mono text-slate-500">{fmtTimeOnly(t.created_at)}</td>
                     <td>
@@ -158,7 +164,7 @@ export default function TransactionsPage() {
                 );
               })}
               {filteredRows.length === 0 && (
-                <tr><td colSpan={12} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (txns.length === 0 ? "No transactions." : "No rows match the current filters.")}</td></tr>
+                <tr><td colSpan={13} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (txns.length === 0 ? "No transactions." : "No rows match the current filters.")}</td></tr>
               )}
             </tbody>
           </table>

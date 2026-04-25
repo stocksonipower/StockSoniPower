@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -14,10 +14,13 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs"
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, Stack,
+  DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import { useAuth } from "../lib/auth";
+import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import { exportToExcel } from "../lib/exportExcel";
 
 /* ==============================================================
    STOCK IN  ·  Receipt Note tab
@@ -135,35 +138,67 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  const statusLabel = (r) => r.status === "FULLY_RACKED" ? "Fully Racked" : (r.status === "PARTIALLY_RACKED" ? "Partially Racked" : "Racking Pending");
+
+  const columns = useMemo(() => [
+    { key: "rn_date", label: "Receipt Note Date", value: (r) => fmtDate(r.rn_date) },
+    { key: "rn_no", label: "Receipt Note No", value: (r) => r.rn_no || "" },
+    { key: "invoice_date", label: "Invoice Date", value: (r) => fmtDate(r.invoice_date) },
+    { key: "invoice_no", label: "Invoice No", value: (r) => r.invoice_no || "" },
+    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
+    { key: "total_qty", label: "Total Quantity", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "status", label: "Status", value: statusLabel },
+  ], []);
+
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Receipt_Notes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div className="mt-4" data-testid="rn-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No receipt notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> receipt notes</>}
+          {total === 0 ? "No receipt notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> receipt notes</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rn-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Receipt Note
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rn-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="rn-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rn-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Receipt Note
+          </Button>
+        </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>RECEIPT NOTE DATE</th>
-              <th>RECEIPT NOTE NO</th>
-              <th>INVOICE DATE</th>
-              <th>INVOICE NO</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">TOTAL QUANTITY</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rn-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("rn_no")} label="RECEIPT NOTE NO" testid="rn-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("invoice_date")} label="INVOICE DATE" testid="rn-col-inv-date" />
+              <ColumnHeader {...getColumnHeaderProps("invoice_no")} label="INVOICE NO" testid="rn-col-inv-no" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="rn-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("total_qty")} align="right" label="TOTAL QUANTITY" testid="rn-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rn-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="rn-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const isFully = r.status === "FULLY_RACKED";
               const isPartial = r.status === "PARTIALLY_RACKED";
@@ -176,13 +211,13 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               const deleteTitle = hasRacking
                 ? "Cannot delete — racking notes exist for this receipt"
                 : (isAssignedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
-              const statusLabel = isFully ? "Fully Racked" : (isPartial ? "Partially Racked" : "Racking Pending");
+              const sLabel = isFully ? "Fully Racked" : (isPartial ? "Partially Racked" : "Racking Pending");
               const statusClass = isFully
                 ? "bg-green-100 text-green-800"
                 : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
                 <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.rn_date)}</td>
                   <td>
                     <button
@@ -203,7 +238,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusClass}`}
                       data-testid={`rn-status-${r.rn_no}`}>
-                      {statusLabel}
+                      {sLabel}
                     </span>
                   </td>
                   <td className="text-right whitespace-nowrap">
@@ -229,8 +264,8 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

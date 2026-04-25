@@ -18,13 +18,13 @@ const COLUMNS = [
   { key: "remarks_others", label: "REMARKS OTHERS", className: "text-slate-600 max-w-[160px] truncate" },
   { key: "make", label: "MAKE", className: "" },
   { key: "item_category", label: "ITEM CATEGORY", className: "" },
-  { key: "reorder_level", label: "REORDER LEVEL", className: "font-mono" },
+  { key: "reorder_level", label: "REORDER LEVEL", className: "font-mono", isNumeric: true, total: true },
   { key: "image", label: "IMAGE", className: "", isImage: true },
   { key: "godown_name", label: "GODOWN", className: "" },
   { key: "rack_no", label: "RACK NO", className: "font-mono" },
   { key: "box_no", label: "BOX NO", className: "font-mono" },
   { key: "box_category", label: "BOX CATEGORY", className: "" },
-  { key: "total_quantity", label: "QTY", className: "text-right font-mono font-bold", isQty: true },
+  { key: "total_quantity", label: "QTY", className: "text-right font-mono font-bold", isQty: true, isNumeric: true, total: true },
 ];
 
 const BLANK = "(Blank)";
@@ -35,6 +35,8 @@ export default function StockBalancePage() {
   const [loading, setLoading] = useState(false);
   // colFilters: { [colKey]: Set<string of allowed values> }
   const [colFilters, setColFilters] = useState({});
+  // sort: { key, dir } | null
+  const [sort, setSort] = useState(null);
 
   const load = async (q) => {
     setLoading(true);
@@ -77,20 +79,71 @@ export default function StockBalancePage() {
 
   const filteredRows = useMemo(() => {
     const activeKeys = Object.keys(colFilters);
-    if (activeKeys.length === 0) return rows;
-    return rows.filter((row) => activeKeys.every((k) => {
-      const allowed = colFilters[k];
-      if (!allowed || allowed.size === 0) return true;
-      const col = COLUMNS.find((c) => c.key === k);
-      if (col?.isImage) {
-        const tag = row.image ? "Has image" : "No image";
-        return allowed.has(tag);
+    let out = rows;
+    if (activeKeys.length > 0) {
+      out = rows.filter((row) => activeKeys.every((k) => {
+        const allowed = colFilters[k];
+        if (!allowed || allowed.size === 0) return true;
+        const col = COLUMNS.find((c) => c.key === k);
+        if (col?.isImage) {
+          const tag = row.image ? "Has image" : "No image";
+          return allowed.has(tag);
+        }
+        const raw = row[k];
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        return allowed.has(v);
+      }));
+    }
+    if (sort && sort.key) {
+      const col = COLUMNS.find((c) => c.key === sort.key);
+      if (col) {
+        const dir = sort.dir === "desc" ? -1 : 1;
+        out = [...out].sort((a, b) => {
+          let av, bv;
+          if (col.isImage) {
+            av = a.image ? "Has image" : "No image";
+            bv = b.image ? "Has image" : "No image";
+          } else {
+            av = a[col.key];
+            bv = b[col.key];
+          }
+          if (col.isNumeric) {
+            const an = parseFloat(av);
+            const bn = parseFloat(bv);
+            const aNa = isNaN(an), bNa = isNaN(bn);
+            if (aNa && bNa) return 0;
+            if (aNa) return 1;
+            if (bNa) return -1;
+            return (an - bn) * dir;
+          }
+          const as = av === null || av === undefined ? "" : String(av);
+          const bs = bv === null || bv === undefined ? "" : String(bv);
+          return as.localeCompare(bs, undefined, { numeric: true, sensitivity: "base" }) * dir;
+        });
       }
-      const raw = row[k];
-      const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-      return allowed.has(v);
-    }));
-  }, [rows, colFilters]);
+    }
+    return out;
+  }, [rows, colFilters, sort]);
+
+  // Compute totals over the *visible* filtered rows for columns marked total: true
+  const totals = useMemo(() => {
+    const t = {};
+    COLUMNS.forEach((c) => {
+      if (!c.total) return;
+      let sum = 0;
+      filteredRows.forEach((r) => {
+        const n = parseFloat(r[c.key]);
+        if (!isNaN(n)) sum += n;
+      });
+      t[c.key] = sum;
+    });
+    return t;
+  }, [filteredRows]);
+
+  const setColumnSort = (key, dir) => {
+    if (!dir) setSort((s) => (s && s.key === key ? null : s));
+    else setSort({ key, dir });
+  };
 
   const setColFilter = (key, allowedSet) => {
     setColFilters((f) => {
@@ -154,14 +207,32 @@ export default function StockBalancePage() {
                     values={uniqueValues[c.key] || []}
                     selected={colFilters[c.key]}
                     onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
                     isImage={c.isImage}
                     isQty={c.isQty}
+                    isNumeric={c.isNumeric}
                   />
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
+            {filteredRows.length > 0 && (
+              <tr className="bg-amber-50 border-b-2 border-amber-200 sticky top-0 z-10" data-testid="totals-row">
+                <td className="font-bold text-amber-900 text-[10px] uppercase tracking-wider">TOTAL</td>
+                {COLUMNS.map((c) => {
+                  if (c.total) {
+                    return (
+                      <td key={c.key} className={`${c.isQty ? "text-right" : ""} font-mono font-black text-amber-900`} data-testid={`totals-${c.key}`}>
+                        {totals[c.key]}
+                      </td>
+                    );
+                  }
+                  return <td key={c.key} className="text-amber-900/40">—</td>;
+                })}
+              </tr>
+            )}
             {filteredRows.length === 0 ? (
               <tr>
                 <td colSpan={COLUMNS.length + 1} className="text-center py-12 text-slate-500">
@@ -216,7 +287,7 @@ export default function StockBalancePage() {
 /* ============================================================ */
 /* Excel-style column header dropdown filter                     */
 /* ============================================================ */
-function ColumnFilter({ label, values, selected, onChange, isImage, isQty }) {
+function ColumnFilter({ label, values, selected, onChange, sortDir, onSort, isImage, isQty, isNumeric }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   // Local working set
@@ -271,7 +342,14 @@ function ColumnFilter({ label, values, selected, onChange, isImage, isQty }) {
     setOpen(false);
   };
 
-  const isActive = !!(selected && selected.size > 0);
+  const isFilterActive = !!(selected && selected.size > 0);
+  const isSortActive = !!sortDir;
+  const isActive = isFilterActive || isSortActive;
+  const sortIcon = sortDir === "asc"
+    ? <span className="text-blue-700 text-[10px] font-bold ml-0.5">▲</span>
+    : sortDir === "desc"
+      ? <span className="text-blue-700 text-[10px] font-bold ml-0.5">▼</span>
+      : null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -281,11 +359,32 @@ function ColumnFilter({ label, values, selected, onChange, isImage, isQty }) {
           data-testid={`filter-trigger-${label.toLowerCase().replace(/\s+/g, "-")}`}
         >
           <span className="font-bold tracking-[0.15em]">{label}</span>
+          {sortIcon}
           <CaretDown size={10} weight="bold" className={`opacity-60 group-hover:opacity-100 ${isActive ? "opacity-100" : ""}`} />
-          {isActive && <span className="ml-1 text-[9px] bg-blue-100 text-blue-800 px-1 rounded-sm font-mono">{selected.size}</span>}
+          {isFilterActive && <span className="ml-1 text-[9px] bg-blue-100 text-blue-800 px-1 rounded-sm font-mono">{selected.size}</span>}
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-0 rounded-sm" align="start">
+        {onSort && (
+          <div className="border-b border-slate-200 flex">
+            <button
+              type="button"
+              onClick={() => { onSort(sortDir === "asc" ? null : "asc"); setOpen(false); }}
+              className={`flex-1 flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-100 ${sortDir === "asc" ? "bg-blue-50 text-blue-700 font-semibold" : "text-slate-700"}`}
+              data-testid="sort-asc"
+            >
+              ▲ Sort {isNumeric ? "Smallest → Largest" : "A → Z"}
+            </button>
+            <button
+              type="button"
+              onClick={() => { onSort(sortDir === "desc" ? null : "desc"); setOpen(false); }}
+              className={`flex-1 flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-100 ${sortDir === "desc" ? "bg-blue-50 text-blue-700 font-semibold" : "text-slate-700"}`}
+              data-testid="sort-desc"
+            >
+              ▼ Sort {isNumeric ? "Largest → Smallest" : "Z → A"}
+            </button>
+          </div>
+        )}
         <div className="p-2 border-b border-slate-200">
           <Input
             placeholder="Search values…"

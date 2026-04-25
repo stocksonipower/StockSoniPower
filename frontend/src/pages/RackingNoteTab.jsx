@@ -12,9 +12,12 @@ import {
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
+  DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
+import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
 
@@ -103,35 +106,64 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     } finally { setRecordingId(null); }
   };
 
+  const columns = useMemo(() => [
+    { key: "rkn_date", label: "Racking Note Date", value: (r) => fmtDate(r.rkn_date) },
+    { key: "rkn_no", label: "Racking Note No", value: (r) => r.rkn_no || "" },
+    { key: "rn_date", label: "Receipt Note Date", value: (r) => fmtDate(r.receipt_note_date) },
+    { key: "rn_no", label: "Receipt Note No", value: (r) => r.receipt_note_no || "" },
+    { key: "items_count", label: "Items Total", value: (r) => (r.items || []).length },
+    { key: "qty_total", label: "Quantity Total", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Racking_Notes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div className="mt-4" data-testid="rkn-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No racking notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> racking notes</>}
+          {total === 0 ? "No racking notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> racking notes</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rkn-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Racking Note
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rkn-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="rkn-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rkn-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Racking Note
+          </Button>
+        </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>RACKING NOTE DATE</th>
-              <th>RACKING NOTE NO</th>
-              <th>RECEIPT NOTE DATE</th>
-              <th>RECEIPT NOTE NO</th>
-              <th className="text-right">ITEMS TOTAL</th>
-              <th className="text-right">QUANTITY TOTAL</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("rkn_date")} label="RACKING NOTE DATE" testid="rkn-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("rkn_no")} label="RACKING NOTE NO" testid="rkn-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rkn-col-rn-date" />
+              <ColumnHeader {...getColumnHeaderProps("rn_no")} label="RECEIPT NOTE NO" testid="rkn-col-rn-no" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS TOTAL" testid="rkn-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QUANTITY TOTAL" testid="rkn-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rkn-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="rkn-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const assigneeId = r.parent_assigned_to_user_id;
@@ -147,7 +179,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Record as Stock In");
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
                   <td>
                     <button
@@ -205,8 +237,8 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No racking notes. Click 'Create New Racking Note' to begin."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

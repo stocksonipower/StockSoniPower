@@ -14,9 +14,12 @@ import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
   Pencil, CheckCircle, MapPin, Package, ArrowsSplit,
+  DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
 
@@ -109,34 +112,64 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
   };
 
+  const statusLabel = (r) => r.status === "FULLY_PICKED" ? "Fully Picked" : (r.status === "PARTIALLY_PICKED" ? "Partially Picked" : "Picking Pending");
+
+  const columns = useMemo(() => [
+    { key: "in_date", label: "Issue Note Date", value: (r) => fmtDate(r.in_date) },
+    { key: "in_no", label: "Issue Note No", value: (r) => r.in_no || "" },
+    { key: "issued_to", label: "Issued To", value: (r) => r.issued_to || "" },
+    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
+    { key: "qty_total", label: "Total Quantity", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "status", label: "Status", value: statusLabel },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Issue_Notes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="in-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No issue notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> issue notes</>}
+          {total === 0 ? "No issue notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> issue notes</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-in-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Issue Note
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="in-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="in-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-in-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Issue Note
+          </Button>
+        </div>
       </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>ISSUE NOTE DATE</th>
-              <th>ISSUE NOTE NO</th>
-              <th>ISSUED TO</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">TOTAL QUANTITY</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("in_date")} label="ISSUE NOTE DATE" testid="in-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("in_no")} label="ISSUE NOTE NO" testid="in-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("issued_to")} label="ISSUED TO" testid="in-col-issued-to" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="in-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="TOTAL QUANTITY" testid="in-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="in-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="in-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const isFully = r.status === "FULLY_PICKED";
               const isPartial = r.status === "PARTIALLY_PICKED";
@@ -151,7 +184,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
                 <tr key={r.id} data-testid={`in-row-${r.in_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.in_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`in-open-${r.in_no}`}>
@@ -184,8 +217,8 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No issue notes. Click 'Create New Issue Note' to begin."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No issue notes. Click 'Create New Issue Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -533,36 +566,66 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     finally { setRecordingId(null); }
   };
 
+  const columns = useMemo(() => [
+    { key: "pn_date", label: "Picking Note Date", value: (r) => fmtDate(r.pn_date) },
+    { key: "pn_no", label: "Picking Note No", value: (r) => r.pn_no || "" },
+    { key: "in_date", label: "Issue Note Date", value: (r) => fmtDate(r.issue_note_date) },
+    { key: "in_no", label: "Issue Note No", value: (r) => r.issue_note_no || "" },
+    { key: "issued_to", label: "Issued To", value: (r) => r.issued_to || "" },
+    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
+    { key: "qty_total", label: "Quantity", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Picking_Notes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="pn-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No picking notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> picking notes</>}
+          {total === 0 ? "No picking notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> picking notes</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-pn-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Picking Note
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="pn-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="pn-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-pn-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Picking Note
+          </Button>
+        </div>
       </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>PICKING NOTE DATE</th>
-              <th>PICKING NOTE NO</th>
-              <th>ISSUE NOTE DATE</th>
-              <th>ISSUE NOTE NO</th>
-              <th>ISSUED TO</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">QUANTITY</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("pn_date")} label="PICKING NOTE DATE" testid="pn-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("pn_no")} label="PICKING NOTE NO" testid="pn-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("in_date")} label="ISSUE NOTE DATE" testid="pn-col-in-date" />
+              <ColumnHeader {...getColumnHeaderProps("in_no")} label="ISSUE NOTE NO" testid="pn-col-in-no" />
+              <ColumnHeader {...getColumnHeaderProps("issued_to")} label="ISSUED TO" testid="pn-col-issued-to" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="pn-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QUANTITY" testid="pn-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="pn-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="pn-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const aId = r.parent_assigned_to_user_id;
@@ -578,7 +641,7 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                 : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out");
               return (
                 <tr key={r.id} data-testid={`pn-row-${r.pn_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`pn-open-${r.pn_no}`}>{r.pn_no}</button>
@@ -620,8 +683,8 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No picking notes. Click 'Create New Picking Note' to begin."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No picking notes. Click 'Create New Picking Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

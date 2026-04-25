@@ -14,9 +14,12 @@ import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
   Pencil, CheckCircle, ArrowsLeftRight, Package, MapPin,
+  DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
 
@@ -109,34 +112,64 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
   };
 
+  const statusLabel = (r) => r.status === "FULLY_TRANSFERRED" ? "Fully Transferred" : (r.status === "PARTIALLY_TRANSFERRED" ? "Partially Transferred" : "Pending");
+
+  const columns = useMemo(() => [
+    { key: "str_date", label: "Request Date", value: (r) => fmtDate(r.str_date) },
+    { key: "str_no", label: "Request No", value: (r) => r.str_no || "" },
+    { key: "purpose", label: "Purpose", value: (r) => r.purpose || "" },
+    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
+    { key: "qty_total", label: "Total Qty", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "status", label: "Status", value: statusLabel },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Transfer_Requests_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="str-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No transfer requests yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer requests</>}
+          {total === 0 ? "No transfer requests yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer requests</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-str-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Transfer Request
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="str-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="str-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-str-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Transfer Request
+          </Button>
+        </div>
       </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>REQUEST DATE</th>
-              <th>REQUEST NO</th>
-              <th>PURPOSE</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">TOTAL QTY</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("str_date")} label="REQUEST DATE" testid="str-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("str_no")} label="REQUEST NO" testid="str-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("purpose")} label="PURPOSE" testid="str-col-purpose" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="str-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="TOTAL QTY" testid="str-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="str-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="str-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const isFully = r.status === "FULLY_TRANSFERRED";
               const isPartial = r.status === "PARTIALLY_TRANSFERRED";
@@ -151,7 +184,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
                 <tr key={r.id} data-testid={`str-row-${r.str_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.str_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`str-open-${r.str_no}`}>
@@ -184,8 +217,8 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No transfer requests. Click 'Create New Transfer Request' to begin."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -620,34 +653,62 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     finally { setRecordingId(null); }
   };
 
+  const columns = useMemo(() => [
+    { key: "stn_date", label: "STN Date", value: (r) => fmtDate(r.stn_date) },
+    { key: "stn_no", label: "STN No", value: (r) => r.stn_no || "" },
+    { key: "str_no", label: "Request No", value: (r) => r.transfer_request_no || "" },
+    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
+    { key: "qty_total", label: "Qty", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...columns,
+    ];
+    exportToExcel(filteredRows, exportCols, `Transfer_Notes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="stn-list-view">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No transfer notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer notes</>}
+          {total === 0 ? "No transfer notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer notes</>}
         </div>
-        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-stn-button">
-          <Plus size={16} weight="bold" className="mr-2" /> Create New Transfer Note
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="stn-refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-stn-button">
+            <Plus size={16} weight="bold" className="mr-2" /> Create New Transfer Note
+          </Button>
+        </div>
       </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>STN DATE</th>
-              <th>STN NO</th>
-              <th>REQUEST NO</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">QTY</th>
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              <ColumnHeader {...getColumnHeaderProps("stn_date")} label="STN DATE" testid="stn-col-date" />
+              <ColumnHeader {...getColumnHeaderProps("stn_no")} label="STN NO" testid="stn-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("str_no")} label="REQUEST NO" testid="stn-col-str-no" />
+              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="stn-col-items" />
+              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QTY" testid="stn-col-qty" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="stn-col-assigned" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="stn-col-status" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const aId = r.parent_assigned_to_user_id;
@@ -660,7 +721,7 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               const recordTitle = recorded ? "Already recorded" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Transfer");
               return (
                 <tr key={r.id} data-testid={`stn-row-${r.stn_no}`}>
-                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.stn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`stn-open-${r.stn_no}`}>{r.stn_no}</button>
@@ -698,8 +759,8 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No transfer notes."}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

@@ -64,7 +64,7 @@ export default function LowStockPage() {
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="low-stock-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" />
-            Export to Excel
+            Export
           </Button>
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
