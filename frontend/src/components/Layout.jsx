@@ -51,7 +51,11 @@ export default function Layout({ children }) {
         </div>
 
         <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
-          {NAV.map((item) => {
+          {NAV.filter((item) => {
+            if (item.adminOnly) return isAdmin;
+            if (item.module) return canAccess(item.module);
+            return true;
+          }).map((item) => {
             const Icon = item.icon;
             return (
               <NavLink
@@ -75,13 +79,22 @@ export default function Layout({ children }) {
         </nav>
 
         <div className="border-t border-slate-200 p-3">
-          <div className="px-3 py-2 mb-2">
-            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Signed in</div>
-            <div className="text-sm font-semibold text-slate-900 truncate" data-testid="current-user-name">
+          <NavLink
+            to="/profile"
+            className={({ isActive }) =>
+              `block px-3 py-2 mb-2 rounded-sm transition-colors ${isActive ? "bg-slate-100" : "hover:bg-slate-100"}`
+            }
+            data-testid="nav-profile"
+          >
+            <div className="flex items-center gap-2">
+              <UserCircle size={16} weight="bold" className="text-slate-500" />
+              <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Signed in</div>
+            </div>
+            <div className="text-sm font-semibold text-slate-900 truncate mt-1" data-testid="current-user-name">
               {user?.name || user?.email}
             </div>
             <div className="text-xs text-slate-500 truncate">{user?.email}</div>
-          </div>
+          </NavLink>
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 rounded-sm transition-colors"
