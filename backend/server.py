@@ -14,7 +14,7 @@ from typing import List, Optional
 import bcrypt
 import jwt
 import pandas as pd
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query, Response
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
@@ -236,7 +236,13 @@ async def create_stock_master(payload: StockMasterCreate, user=Depends(get_curre
 
 
 @api_router.get("/stock-master", response_model=List[StockMaster])
-async def list_stock_master(search: Optional[str] = None, user=Depends(get_current_user)):
+async def list_stock_master(
+    response: Response,
+    search: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    user=Depends(get_current_user),
+):
     query = {}
     if search:
         s = search.strip()
@@ -251,7 +257,13 @@ async def list_stock_master(search: Optional[str] = None, user=Depends(get_curre
             {"make": {"$regex": s, "$options": "i"}},
             {"item_category": {"$regex": s, "$options": "i"}},
         ]}
-    items = await db.stock_master.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    total = await db.stock_master.count_documents(query)
+    skip = (page - 1) * page_size
+    items = await db.stock_master.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
     return items
 
 
@@ -992,11 +1004,31 @@ async def _get_balance(part_no, make, godown_id, rack_id, box_id) -> int:
 
 
 @api_router.get("/transactions")
-async def list_transactions(limit: int = 100, type: Optional[str] = None, user=Depends(get_current_user)):
+async def list_transactions(
+    response: Response,
+    limit: Optional[int] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10000, ge=1, le=10000),
+    type: Optional[str] = None,
+    user=Depends(get_current_user),
+):
     query = {}
     if type:
         query["type"] = type.upper()
-    return await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    total = await db.transactions.count_documents(query)
+    # Backward compat: if `limit` query param is provided, return first `limit` rows (no pagination headers consumer needed)
+    if limit is not None and limit > 0:
+        rows = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+        response.headers["X-Total-Count"] = str(total)
+        response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+        return rows
+    skip = (page - 1) * page_size
+    rows = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
 
 
 # -------------------- STOCK BALANCE --------------------

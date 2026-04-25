@@ -20,14 +20,14 @@ Build a warehouse stock management system with:
 
 ## What's Implemented (2026-02)
 - JWT auth (register/login/me) + admin seeding (`admin@stockmgmt.com / admin123`)
-- Stock Master: full CRUD, base64 image upload, uniqueness on `(part_no, make)`, multi-field global search (9 fields), CSV/Excel bulk upload, CSV export, **Refresh button + Excel-style per-column filter & sort dropdowns** (2026-02-25, 21/21 tests pass)
+- Stock Master: full CRUD, base64 image upload, uniqueness on `(part_no, make)`, multi-field global search (9 fields), CSV/Excel bulk upload, CSV export, **Refresh button + Excel-style per-column filter & sort dropdowns** (2026-02-25, 21/21 tests pass), **server-side pagination 5000/page with X-Total-Count header** (2026-02-25)
 - Lookups: `/stock-master/lookup/makes?part_no=`, `/stock-master/lookup/item?part_no=&make=`
 - Godown / Rack / Box CRUD with hierarchical filters
 - Stock In / Stock Out transactions with auto-fill and validation (qty > 0, sufficient balance on OUT)
 - Stock Balance (aggregation on transactions, IN positive / OUT negative)
 - Low Stock alerts with configurable threshold
 - Dashboard stats (items, stock, godowns, racks, boxes, low-stock count)
-- Transactions history with IN/OUT filter
+- Transactions history with IN/OUT filter, **server-side pagination 10000/page with X-Total-Count header** (2026-02-25), legacy `?limit=` preserved for Dashboard widget
 - UI: Sidebar layout, 8 routes, sharp-edge Swiss design, hover states, sonner toasts, responsive grid
 - 25/25 backend tests + frontend verified
 

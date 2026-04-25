@@ -1,15 +1,32 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
+import { Button } from "../components/ui/button";
+import { CaretLeft, CaretRight } from "@phosphor-icons/react";
+
+const PAGE_SIZE = 10000;
 
 export default function TransactionsPage() {
   const [txns, setTxns] = useState([]);
   const [filter, setFilter] = useState("ALL");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => { setPage(1); }, [filter]);
 
   useEffect(() => {
-    const params = filter === "ALL" ? { limit: 500 } : { limit: 500, type: filter };
-    api.get("/transactions", { params }).then((r) => setTxns(r.data));
-  }, [filter]);
+    setLoading(true);
+    const params = { page, page_size: PAGE_SIZE };
+    if (filter !== "ALL") params.type = filter;
+    api.get("/transactions", { params }).then((r) => {
+      setTxns(r.data);
+      const t = parseInt(r.headers["x-total-count"], 10);
+      setTotal(isNaN(t) ? r.data.length : t);
+    }).finally(() => setLoading(false));
+  }, [filter, page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="transactions-page">
@@ -62,10 +79,29 @@ export default function TransactionsPage() {
               </tr>
             ))}
             {txns.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">No transactions.</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No transactions."}</td></tr>
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Pagination footer */}
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600" data-testid="transactions-pagination">
+        <div>
+          {total === 0 ? "No transactions" : (
+            <>Showing <span className="font-semibold text-slate-900">{txns.length}</span> · <span className="font-semibold text-slate-900">{total}</span> total</>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="prev-page-button">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="next-page-button">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+        </div>
       </div>
     </div>
   );

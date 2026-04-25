@@ -8,7 +8,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise, FunnelSimple, X } from "@phosphor-icons/react";
+import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise, FunnelSimple, X, CaretLeft, CaretRight } from "@phosphor-icons/react";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
 
 const COLUMNS = [
@@ -43,18 +43,30 @@ export default function StockMasterPage() {
   // Excel-style state: per-column filter (Set of allowed values) and global sort
   const [colFilters, setColFilters] = useState({});
   const [sort, setSort] = useState({ key: null, dir: null });
+  // Pagination (page size fixed at 5000)
+  const PAGE_SIZE = 5000;
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const fileInput = useRef(null);
   const excelInput = useRef(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get("/stock-master", { params: search ? { search } : {} });
-      setItems(data);
+      const params = { page, page_size: PAGE_SIZE };
+      if (search) params.search = search;
+      const res = await api.get("/stock-master", { params });
+      setItems(res.data);
+      const t = parseInt(res.headers["x-total-count"], 10);
+      setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search]);
+  // Reset to page 1 when search changes
+  useEffect(() => { setPage(1); }, [search]);
+  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search, page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // Build unique values per column from current items
   const uniqueValues = React.useMemo(() => {
@@ -313,6 +325,30 @@ export default function StockMasterPage() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Pagination footer */}
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600" data-testid="stock-master-pagination">
+        <div>
+          {total === 0 ? "No items" : (
+            <>
+              Showing <span className="font-semibold text-slate-900">{visibleItems.length}</span>
+              {visibleItems.length !== items.length && <> of <span className="font-semibold text-slate-900">{items.length}</span> on page</>}
+              {" · "}<span className="font-semibold text-slate-900">{total}</span> total
+              {(activeFilterCount > 0) && <span className="text-slate-500"> (page filtered locally)</span>}
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="prev-page-button">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="next-page-button">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+        </div>
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
