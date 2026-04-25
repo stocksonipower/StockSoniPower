@@ -1,0 +1,60 @@
+{
+  "summary": "Iteration 7 — Stock Out (Issue Notes + Picking Notes) full-stack verification. Backend: 15/15 pytest cases PASS in /app/backend/tests/test_issue_picking_notes.py covering issue-note creation/validation, prepare endpoint with pending_qty/already_picked_qty/available_qty, cumulative qty across PNs, per-location over-stock blocking, edit/delete blocked (409) when ANY PN exists, PUT cumulative excluding self via exclude_pn_id, /record creates OUT transactions and flips PN→RECORDED only (IN status pre-determined), RECORDED PN cannot be deleted, ?not_status=FULLY_PICKED filter. Frontend: /stock-out renders 2 tabs (Issue Note + Picking Note); IN/26-27/001 row shows status 'Fully Picked' with edit/delete buttons disabled; PN/26-27/001 row shows 'Recorded' status with Record button greyed to 'Recorded' (disabled) plus edit/delete disabled; PN dropdown excludes FULLY_PICKED IN; create-IN form has all expected testids (in-no-input, in-date-input, in-issued-to-input, in-add-row-count/-button, in-part-no-{idx}); creating fresh IN/26-27/003 (qty=3) and selecting it via UI loads items via /prepare; pending hint 'Pending 3 of 3' renders correctly; AVAILABLE LOCATIONS chips render with available_qty 'ML1/R10/— (7)' and 'ML1/R3/3 (23)' confirming smoke-check (R3/3 reduced 28→23 after the 5-unit pick); +Split duplicates row (qty=0 default), pending hint shows on both rows; over-allocation client-side check fires red border + 'Over 10/3' indicator + 'Avail 7 at loc' on BOTH split rows. 0 console errors / 0 page errors throughout. Test data cleaned up via DELETE.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tested_scenarios": [
+    {"id": "be_issue_note_next_no_format", "result": "PASS", "detail": "IN/{fy}/{NNN}"},
+    {"id": "be_issue_note_validation_empty_items_400", "result": "PASS"},
+    {"id": "be_issue_note_validation_qty_zero_400", "result": "PASS"},
+    {"id": "be_prepare_returns_pending_and_available_qty", "result": "PASS"},
+    {"id": "be_partial_pick_flips_in_to_PARTIALLY_PICKED", "result": "PASS"},
+    {"id": "be_cumulative_overalloc_400_with_part_no_in_detail", "result": "PASS"},
+    {"id": "be_prepare_exclude_pn_id_restores_pending", "result": "PASS"},
+    {"id": "be_in_edit_blocked_409_when_pn_exists", "result": "PASS"},
+    {"id": "be_in_delete_blocked_409_when_pn_exists", "result": "PASS"},
+    {"id": "be_put_picking_note_excludes_self", "result": "PASS", "detail": "Edit PN to qty=4 (full IN) succeeds → IN flips FULLY_PICKED"},
+    {"id": "be_post_blocked_after_FULLY_PICKED_409", "result": "PASS"},
+    {"id": "be_record_creates_out_tx_pn_to_RECORDED_in_unchanged", "result": "PASS", "detail": "OUT tx has issue_note_no + picking_note_no; IN remains FULLY_PICKED"},
+    {"id": "be_recorded_pn_delete_blocked_409", "result": "PASS"},
+    {"id": "be_per_location_overpick_400", "result": "PASS"},
+    {"id": "be_not_status_filter_excludes_FULLY_PICKED", "result": "PASS"},
+    {"id": "fe_2_tabs_render", "result": "PASS", "detail": "tab-issue-note + tab-picking-note"},
+    {"id": "fe_in_list_FULLY_PICKED_status_badge", "result": "PASS", "detail": "'Fully Picked' on IN/26-27/001"},
+    {"id": "fe_in_edit_delete_disabled_when_pn_exists", "result": "PASS"},
+    {"id": "fe_pn_list_RECORDED_status_button_greyed", "result": "PASS", "detail": "Record button text='Recorded', disabled=true; edit/delete disabled"},
+    {"id": "fe_create_in_form_testids", "result": "PASS", "detail": "in-no-input/in-date-input/in-issued-to-input/in-add-row-count/in-add-row-button/in-part-no-0"},
+    {"id": "fe_pn_dropdown_excludes_FULLY_PICKED", "result": "PASS", "detail": "Only pending INs shown; placeholder 'No issue notes pending' when none"},
+    {"id": "fe_pn_select_in_loads_prepare_items", "result": "PASS", "detail": "Items render via /prepare/{in_id}"},
+    {"id": "fe_pn_pending_hint_per_row", "result": "PASS", "detail": "'Pending 3 of 3' on both split rows"},
+    {"id": "fe_pn_available_loc_chips_with_available_qty", "result": "PASS", "detail": "'ML1/R10/— (7)' + 'ML1/R3/3 (23)' — smoke check ✓"},
+    {"id": "fe_pn_split_row_button", "result": "PASS"},
+    {"id": "fe_pn_overalloc_indicator", "result": "PASS", "detail": "'Over 10/3' + 'Avail 7 at loc' red on both split rows"},
+    {"id": "fe_console_errors", "result": "PASS", "detail": "0 console / 0 page errors"},
+    {"id": "smoke_stock_balance_after_pick", "result": "PASS", "detail": "ML1/R3/3 shows 23 (was 28, -5 from PN/26-27/001)"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_issue_picking_notes.py",
+    "/app/test_reports/pytest/issue_picking_notes_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_validate_picking_constraints correctly enforces BOTH cumulative cap (DRAFT+RECORDED counted) AND per-location availability (only DRAFT pending picks reserved) — matches spec exactly.",
+    "_recompute_in_status idempotent and reverts FULLY_PICKED→PARTIAL/PENDING on PN delete or qty reduction; picked_at unset when not fully picked. Good.",
+    "/record does NOT touch IN status (mirrors racking-note spec); IN status determined at PN save-time via cumulative qty.",
+    "Prepare endpoint correctly uses _pick_aggregate_other_by_loc (DRAFT-only) so RECORDED picks don't double-deduct location reservation (real balance already reflects them).",
+    "Final availability re-check inside /record uses real transaction balance (not DRAFT-aware) — correct safeguard if stock changed between save and record.",
+    "Frontend client-side over-alloc indicator groups by (part_no, make) across all rows including split rows — verified red border + 'Over X/Y' shows on both.",
+    "Minor UX: when a row has both missing-location AND over-alloc, save handler shows location-missing toast first (same as racking flow). Not blocking but could combine messages.",
+    "Issue Note model issued_to is free-text; spec describes 'the user who must create the picking note' but it's stored as plain string with no FK to users — acceptable for v1, future may want a dropdown to select an existing user."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_issue_picking_notes.py (new, 15 tests covering full Issue Note + Picking Note lifecycle, cumulative validation, per-location reservation, /prepare, /record, status transitions)"
+  ],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "100% on directly-verified scenarios (tabs, lists, status badges, disabled buttons, PN form prepare/pending/chips/split/over-alloc)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working)",
+  "seed_data_creation": "Test fixtures created and cleaned up TEST_QA issue notes with seed part 3911560/CSP. UI test created IN/26-27/003 then deleted via API. Final DB state at handoff: IN/26-27/001 (FULLY_PICKED, 1 RECORDED PN/26-27/001) — unchanged from prior iteration. Stock balance ML1/R3/3 confirmed at 23 (post 5-unit pick).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Verified testids: tab-issue-note, tab-picking-note, in-list-view, pn-list-view, in-create-view, pn-create-view, create-in-button, create-pn-button, in-row-{in_no}, pn-row-{pn_no}, in-status-{in_no}, pn-status-{pn_no}, in-edit-{in_no}, in-delete-{in_no}, pn-edit-{pn_no}, pn-delete-{pn_no}, pn-record-{pn_no}, in-no-input, in-date-input, in-issued-to-input, in-add-row-count, in-add-row-button, in-part-no-{idx}, in-qty-{idx}, in-make-{idx}, in-remove-row-{idx}, pn-no-input, pn-date-input, pn-in-select, pn-in-option-{in_no}, pn-issued-to, pn-qty-{idx}, pn-godown-{idx}, pn-rack-{idx}, pn-box-{idx}, pn-split-{idx}, pn-remove-{idx}, pn-pending-hint-{idx}, pn-existing-loc-{idx}-{k}. Backend invariants enforced: cumulative qty per (part_no, make) across DRAFT+RECORDED PNs ≤ requested on IN; IN edit/delete 409 when any PN exists; /record only flips PN status; per-location availability subtracts other-DRAFT picks at same location.",
+  "rca_of_the_issue": "N/A — Stock Out feature working as designed across BE + FE. No bugs found."
+}

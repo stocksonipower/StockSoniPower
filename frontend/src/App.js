@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import StockMasterPage from "./pages/StockMasterPage";
 import LocationsPage from "./pages/LocationsPage";
 import StockInPage from "./pages/StockInPage";
+import StockOutPage from "./pages/StockOutPage";
 import StockTransactionPage from "./pages/StockTransactionPage";
 import StockBalancePage from "./pages/StockBalancePage";
 import TransactionsPage from "./pages/TransactionsPage";
@@ -40,7 +41,7 @@ function App() {
           <Route path="/stock-master" element={<Protected><StockMasterPage /></Protected>} />
           <Route path="/locations" element={<Protected><LocationsPage /></Protected>} />
           <Route path="/stock-in" element={<Protected><StockInPage /></Protected>} />
-          <Route path="/stock-out" element={<Protected><StockTransactionPage type="OUT" /></Protected>} />
+          <Route path="/stock-out" element={<Protected><StockOutPage /></Protected>} />
           <Route path="/balance" element={<Protected><StockBalancePage /></Protected>} />
           <Route path="/transactions" element={<Protected><TransactionsPage /></Protected>} />
           <Route path="/low-stock" element={<Protected><LowStockPage /></Protected>} />
