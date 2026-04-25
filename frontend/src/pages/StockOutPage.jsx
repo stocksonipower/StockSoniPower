@@ -294,6 +294,18 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0 });
   };
 
+  // Sum requested qty per (part_no, make) across all rows so multiple rows of the same part/make
+  // are validated together (mirrors backend aggregation).
+  const requestedByKey = useMemo(() => {
+    const m = {};
+    items.forEach((r) => {
+      if (!r.part_no || !r.make) return;
+      const k = `${r.part_no}||${r.make}`;
+      m[k] = (m[k] || 0) + (parseFloat(r.quantity) || 0);
+    });
+    return m;
+  }, [items]);
+
   const save = async () => {
     if (items.length === 0) { toast.error("Add at least one item"); return; }
     for (let i = 0; i < items.length; i++) {
@@ -304,6 +316,16 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
       if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock, cannot issue ${q}`);
+        return;
+      }
+    }
+    // Cross-row aggregation: sum of qty across rows for same (part,make) must not exceed available
+    for (const [k, total] of Object.entries(requestedByKey)) {
+      const [p, m] = k.split("||");
+      const row = items.find((r) => r.part_no === p && r.make === m);
+      const avail = row?.available_qty || 0;
+      if (total > avail + 1e-6) {
+        toast.error(`${p}/${m}: total requested across rows is ${total} but only ${avail} in stock`);
         return;
       }
     }
