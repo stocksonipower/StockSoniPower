@@ -39,6 +39,18 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------- HELPERS --------------------
+# Modules a Staff user can be granted/denied access to. Admin always has access.
+APP_MODULES = (
+    "stock_master",
+    "locations",
+    "stock_in",
+    "stock_out",
+    "stock_summary",
+    "low_stock",
+    "transactions",
+)
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -73,7 +85,27 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    if user.get("is_active") is False:
+        raise HTTPException(status_code=403, detail="Account deactivated. Contact your administrator.")
     return user
+
+
+async def require_admin(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+def _module_dep(module_key: str):
+    """Returns a FastAPI dependency that allows admins always, and staff only if their module_access map permits."""
+    async def _dep(user=Depends(get_current_user)):
+        if user.get("role") == "admin":
+            return user
+        access = user.get("module_access") or {}
+        if access.get(module_key, True) is False:  # default-allow if key missing
+            raise HTTPException(status_code=403, detail=f"Access denied: you don't have permission to use the '{module_key}' module")
+        return user
+    return _dep
 
 
 def now_iso() -> str:
@@ -85,6 +117,30 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     name: str
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    role: str = "staff"  # admin | staff
+    module_access: Optional[dict] = None
+    force_password_reset: bool = False
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    is_active: Optional[bool] = None
+    module_access: Optional[dict] = None
+    force_password_reset: Optional[bool] = None
+
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -323,42 +379,184 @@ class PickingNote(BaseModel):
 
 
 # -------------------- AUTH ROUTES --------------------
-@api_router.post("/auth/register", response_model=AuthResponse)
-async def register(payload: UserRegister):
-    email = payload.email.lower()
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    user_id = str(uuid.uuid4())
-    doc = {
-        "id": user_id,
-        "email": email,
-        "name": payload.name,
-        "password_hash": hash_password(payload.password),
-        "role": "user",
-        "created_at": now_iso(),
-    }
-    await db.users.insert_one(doc)
-    token = create_access_token(user_id, email)
-    return {"token": token, "user": {"id": user_id, "email": email, "name": payload.name, "role": "user"}}
-
-
 @api_router.post("/auth/login", response_model=AuthResponse)
 async def login(payload: UserLogin):
     email = payload.email.lower()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user.get("is_active") is False:
+        raise HTTPException(status_code=403, detail="Account deactivated. Contact your administrator.")
+    # Lockout check
+    lock_until = user.get("lockout_until")
+    if lock_until:
+        try:
+            until = datetime.fromisoformat(lock_until)
+        except Exception:
+            until = None
+        if until and datetime.now(timezone.utc) < until:
+            mins = max(1, int((until - datetime.now(timezone.utc)).total_seconds() // 60) + 1)
+            raise HTTPException(status_code=423, detail=f"Account locked due to repeated failed logins. Try again in ~{mins} minute(s).")
+    # Password check
+    if not verify_password(payload.password, user.get("password_hash", "")):
+        attempts = (user.get("failed_login_attempts") or 0) + 1
+        update = {"failed_login_attempts": attempts}
+        if attempts >= 5:
+            until = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+            update["lockout_until"] = until
+            update["failed_login_attempts"] = 0
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Success: reset counters, set last_login
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"failed_login_attempts": 0, "last_login": now_iso()}, "$unset": {"lockout_until": ""}},
+    )
     token = create_access_token(user["id"], email)
     return {
         "token": token,
-        "user": {"id": user["id"], "email": email, "name": user.get("name", ""), "role": user.get("role", "user")},
+        "user": {
+            "id": user["id"], "email": email,
+            "name": user.get("name", ""),
+            "role": user.get("role", "staff"),
+            "is_active": user.get("is_active", True),
+            "module_access": user.get("module_access") or {},
+            "force_password_reset": user.get("force_password_reset", False),
+        },
     }
 
 
 @api_router.get("/auth/me")
 async def me(user=Depends(get_current_user)):
     return user
+
+
+@api_router.put("/auth/me")
+async def update_my_profile(payload: ProfileUpdate, user=Depends(get_current_user)):
+    """Self-service: edit own name and/or password (cannot change own role)."""
+    update = {}
+    if payload.name is not None:
+        update["name"] = payload.name.strip()
+    if payload.password:
+        if len(payload.password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        update["password_hash"] = hash_password(payload.password)
+        update["force_password_reset"] = False
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    return {"ok": True}
+
+
+# -------------------- USER MANAGEMENT (admin only) --------------------
+def _user_to_public(user: dict) -> dict:
+    return {
+        "id": user["id"],
+        "email": user.get("email", ""),
+        "name": user.get("name", ""),
+        "role": user.get("role", "staff"),
+        "is_active": user.get("is_active", True),
+        "module_access": user.get("module_access") or {},
+        "force_password_reset": user.get("force_password_reset", False),
+        "last_login": user.get("last_login"),
+        "created_at": user.get("created_at"),
+        "lockout_until": user.get("lockout_until"),
+    }
+
+
+@api_router.get("/users")
+async def list_users(admin=Depends(require_admin)):
+    rows = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(5000)
+    return [_user_to_public(u) for u in rows]
+
+
+@api_router.post("/users")
+async def create_user(payload: UserCreate, admin=Depends(require_admin)):
+    if payload.role not in ("admin", "staff"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'staff'")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    email = payload.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already in use")
+    user_id = str(uuid.uuid4())
+    doc = {
+        "id": user_id,
+        "email": email,
+        "name": payload.name.strip(),
+        "password_hash": hash_password(payload.password),
+        "role": payload.role,
+        "is_active": True,
+        "module_access": payload.module_access or {m: True for m in APP_MODULES},
+        "force_password_reset": payload.force_password_reset,
+        "failed_login_attempts": 0,
+        "created_at": now_iso(),
+        "created_by": admin.get("email"),
+    }
+    await db.users.insert_one(doc)
+    return _user_to_public(doc)
+
+
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, payload: UserUpdate, admin=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    update = {}
+    if payload.name is not None:
+        update["name"] = payload.name.strip()
+    if payload.email is not None:
+        new_email = payload.email.lower()
+        if new_email != target.get("email"):
+            if await db.users.find_one({"email": new_email, "id": {"$ne": user_id}}):
+                raise HTTPException(status_code=400, detail="Email already in use")
+            update["email"] = new_email
+    if payload.role is not None:
+        if payload.role not in ("admin", "staff"):
+            raise HTTPException(status_code=400, detail="Role must be 'admin' or 'staff'")
+        if user_id == admin["id"] and payload.role != "admin":
+            raise HTTPException(status_code=400, detail="Cannot change your own role")
+        update["role"] = payload.role
+    if payload.password:
+        if len(payload.password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        update["password_hash"] = hash_password(payload.password)
+    if payload.is_active is not None:
+        if user_id == admin["id"] and payload.is_active is False:
+            raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+        update["is_active"] = payload.is_active
+        if payload.is_active is True:
+            # On reactivation, also clear any lockout
+            update["failed_login_attempts"] = 0
+            await db.users.update_one({"id": user_id}, {"$unset": {"lockout_until": ""}})
+    if payload.module_access is not None:
+        # only allow keys we know about; coerce values to bool
+        cleaned = {k: bool(v) for k, v in payload.module_access.items() if k in APP_MODULES}
+        update["module_access"] = cleaned
+    if payload.force_password_reset is not None:
+        update["force_password_reset"] = payload.force_password_reset
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    await db.users.update_one({"id": user_id}, {"$set": update})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return _user_to_public(fresh)
+
+
+@api_router.delete("/users/{user_id}")
+async def deactivate_user(user_id: str, admin=Depends(require_admin)):
+    """Soft delete: deactivate. Records remain attributed to the user."""
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"is_active": False, "deactivated_at": now_iso()}})
+    return {"ok": True, "deactivated": True}
+
+
+@api_router.get("/meta/modules")
+async def list_modules(user=Depends(get_current_user)):
+    return {"modules": list(APP_MODULES)}
 
 
 # -------------------- STOCK MASTER --------------------
@@ -2546,11 +2744,23 @@ async def startup():
             "name": "Admin",
             "password_hash": hash_password(admin_password),
             "role": "admin",
+            "is_active": True,
+            "module_access": {m: True for m in APP_MODULES},
+            "force_password_reset": False,
+            "failed_login_attempts": 0,
             "created_at": now_iso(),
         })
         logger.info(f"Seeded admin user: {admin_email}")
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    # Backfill new fields on every user doc
+    await db.users.update_many({"is_active": {"$exists": False}}, {"$set": {"is_active": True}})
+    await db.users.update_many({"role": "user"}, {"$set": {"role": "staff"}})
+    await db.users.update_many({"module_access": {"$exists": False}}, {"$set": {"module_access": {m: True for m in APP_MODULES}}})
+    await db.users.update_many({"force_password_reset": {"$exists": False}}, {"$set": {"force_password_reset": False}})
+    await db.users.update_many({"failed_login_attempts": {"$exists": False}}, {"$set": {"failed_login_attempts": 0}})
+    await db.users.create_index("id", unique=True)
+    await db.users.create_index("email", unique=True)
 
 
 @app.on_event("shutdown")
@@ -2559,6 +2769,45 @@ async def shutdown():
 
 
 app.include_router(api_router)
+
+
+# Module access middleware (URL-prefix based) — enforces staff per-module ACL.
+# Admin always passes. Auth/profile/users routes bypass since their dep already enforces auth/admin.
+PATH_TO_MODULE = [
+    ("/api/stock-master", "stock_master"),
+    ("/api/godowns", "locations"),
+    ("/api/racks", "locations"),
+    ("/api/boxes", "locations"),
+    ("/api/stock-in", "stock_in"),
+    ("/api/receipt-notes", "stock_in"),
+    ("/api/racking-notes", "stock_in"),
+    ("/api/stock-out", "stock_out"),
+    ("/api/issue-notes", "stock_out"),
+    ("/api/picking-notes", "stock_out"),
+    ("/api/stock-balance", "stock_summary"),
+    ("/api/low-stock", "low_stock"),
+    ("/api/transactions", "transactions"),
+]
+
+
+@app.middleware("http")
+async def module_access_middleware(request, call_next):
+    path = request.url.path
+    matched = next((m for prefix, m in PATH_TO_MODULE if path.startswith(prefix)), None)
+    if matched:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            try:
+                payload = jwt.decode(auth.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                u = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "role": 1, "module_access": 1, "is_active": 1})
+                if u and u.get("is_active") is not False and u.get("role") != "admin":
+                    access = u.get("module_access") or {}
+                    if access.get(matched, True) is False:
+                        from starlette.responses import JSONResponse as _JSON
+                        return _JSON(status_code=403, content={"detail": f"Access denied: '{matched}' module is disabled for your account"})
+            except Exception:
+                pass  # let the route's own auth dep return the appropriate error
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,

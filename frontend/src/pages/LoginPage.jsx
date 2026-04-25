@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
@@ -88,16 +88,9 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <div className="mt-6 text-sm text-slate-600">
-            No account?{" "}
-            <Link to="/register" className="font-semibold text-blue-700 hover:underline" data-testid="register-link">
-              Create one
-            </Link>
-          </div>
-
           <div className="mt-10 p-4 bg-slate-50 border border-slate-200 rounded-sm">
-            <div className="label-sm mb-1">Demo Credentials</div>
-            <div className="text-xs font-mono text-slate-700">admin@stockmgmt.com / admin123</div>
+            <div className="label-sm mb-1">Need access?</div>
+            <div className="text-xs text-slate-600">Accounts are created by your administrator. Contact them for credentials.</div>
           </div>
         </div>
       </div>

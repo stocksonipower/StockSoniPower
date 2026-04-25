@@ -11,21 +11,24 @@ import {
   ClockCounterClockwise,
   SignOut,
   Warning,
+  Users,
+  UserCircle,
 } from "@phosphor-icons/react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, testid: "nav-dashboard" },
-  { to: "/stock-master", label: "Stock Master", icon: Package, testid: "nav-stock-master" },
-  { to: "/locations", label: "Location Master", icon: Buildings, testid: "nav-locations" },
-  { to: "/stock-in", label: "Stock In", icon: ArrowDown, testid: "nav-stock-in" },
-  { to: "/stock-out", label: "Stock Out", icon: ArrowUp, testid: "nav-stock-out" },
-  { to: "/balance", label: "Stock Summary", icon: Scales, testid: "nav-balance" },
-  { to: "/transactions", label: "Transactions", icon: ClockCounterClockwise, testid: "nav-transactions" },
-  { to: "/low-stock", label: "Low Stock", icon: Warning, testid: "nav-low-stock" },
+  { to: "/stock-master", label: "Stock Master", icon: Package, testid: "nav-stock-master", module: "stock_master" },
+  { to: "/locations", label: "Location Master", icon: Buildings, testid: "nav-locations", module: "locations" },
+  { to: "/stock-in", label: "Stock In", icon: ArrowDown, testid: "nav-stock-in", module: "stock_in" },
+  { to: "/stock-out", label: "Stock Out", icon: ArrowUp, testid: "nav-stock-out", module: "stock_out" },
+  { to: "/balance", label: "Stock Summary", icon: Scales, testid: "nav-balance", module: "stock_summary" },
+  { to: "/transactions", label: "Transactions", icon: ClockCounterClockwise, testid: "nav-transactions", module: "transactions" },
+  { to: "/low-stock", label: "Low Stock", icon: Warning, testid: "nav-low-stock", module: "low_stock" },
+  { to: "/users", label: "Users", icon: Users, testid: "nav-users", adminOnly: true },
 ];
 
 export default function Layout({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, isAdmin, canAccess } = useAuth();
   const nav = useNavigate();
 
   const handleLogout = () => {
