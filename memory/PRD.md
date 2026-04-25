@@ -24,6 +24,7 @@ Build a warehouse stock management system with:
 - Lookups: `/stock-master/lookup/makes?part_no=`, `/stock-master/lookup/item?part_no=&make=`
 - Godown / Rack / Box CRUD with hierarchical filters
 - Stock In / Stock Out transactions with auto-fill and validation (qty > 0, sufficient balance on OUT)
+- **Stock In → Receipt Note tab** (2026-02-25, 31/31 tests pass): list of all receipt notes (SL/RN Date/RN No clickable/Invoice Date/Invoice No/Items) + Create New Receipt Note flow with auto RN Date (today UTC) and auto RN No formatted `RN/YY-YY/NNN` per Indian FY (Apr 1 - Mar 31) with atomic counter per FY in `db.counters`. Items grid: Part No (manual) → Make dropdown auto-populates from stock_master with 3 conditions (single/multiple/none) plus inline "+ Create New Master" dialog (Part No pre-filled). Read-only detail dialog. Receipt notes are standalone — they do NOT yet create stock transactions or require a location.
 - Stock Balance (aggregation on transactions, IN positive / OUT negative)
 - Low Stock alerts with configurable threshold
 - Dashboard stats (items, stock, godowns, racks, boxes, low-stock count)
