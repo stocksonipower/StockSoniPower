@@ -3,7 +3,7 @@ import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { toast } from "sonner";
-import { Plus, Trash, Buildings, Stack, Archive, Pencil, Check, X, UploadSimple, DownloadSimple } from "@phosphor-icons/react";
+import { Plus, Trash, Buildings, Stack, Archive, Pencil, Check, X, UploadSimple, DownloadSimple, ListNumbers } from "@phosphor-icons/react";
 
 export default function LocationsPage() {
   const [godowns, setGodowns] = useState([]);
@@ -21,6 +21,10 @@ export default function LocationsPage() {
   const godownFileRef = useRef(null);
   const rackFileRef = useRef(null);
   const boxFileRef = useRef(null);
+
+  // Range dialogs
+  const [rackRangeFor, setRackRangeFor] = useState(null);  // godown obj
+  const [boxRangeFor, setBoxRangeFor] = useState(null);    // rack obj
 
   const downloadCsv = async (path, filename) => {
     try {
@@ -66,8 +70,10 @@ export default function LocationsPage() {
   const addGodown = async () => {
     if (!newGodown.trim()) return;
     try {
-      await api.post("/godowns", { godown_name: newGodown });
-      setNewGodown(""); toast.success("Godown added"); loadGodowns();
+      const { data } = await api.post("/godowns", { godown_name: newGodown });
+      setNewGodown(""); toast.success("Godown added"); await loadGodowns();
+      // Auto-open rack range wizard for the new godown
+      setRackRangeFor(data);
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   };
   const addRack = async () => {
@@ -184,6 +190,7 @@ export default function LocationsPage() {
                         <span className="font-semibold">{g.godown_name}</span>
                       </div>
                       <div className="opacity-0 group-hover:opacity-100 flex gap-1">
+                        <IconBtn onClick={() => setRackRangeFor(g)} dark={selectedGodown === g.id} icon={ListNumbers} testid={`range-racks-${g.id}`} title="Add Rack Range" />
                         <IconBtn onClick={() => startEdit("godown", g)} dark={selectedGodown === g.id} icon={Pencil} testid={`edit-godown-${g.id}`} />
                         <IconBtn onClick={() => delGodown(g.id)} dark={selectedGodown === g.id} icon={Trash} color="red" testid={`delete-godown-${g.id}`} />
                       </div>
@@ -257,6 +264,7 @@ export default function LocationsPage() {
                         <span className={`ml-2 text-xs ${selectedRack === r.id ? "text-slate-300" : "text-slate-500"}`}>{r.total_boxes} boxes</span>
                       </div>
                       <div className="opacity-0 group-hover:opacity-100 flex gap-1">
+                        <IconBtn onClick={() => setBoxRangeFor(r)} dark={selectedRack === r.id} icon={ListNumbers} testid={`range-boxes-${r.id}`} title="Add Box Range" />
                         <IconBtn onClick={() => startEdit("rack", r)} dark={selectedRack === r.id} icon={Pencil} testid={`edit-rack-${r.id}`} />
                         <IconBtn onClick={() => delRack(r.id)} dark={selectedRack === r.id} icon={Trash} color="red" testid={`delete-rack-${r.id}`} />
                       </div>
@@ -339,9 +347,171 @@ export default function LocationsPage() {
           )}
         </ColumnCard>
       </div>
+
+      {rackRangeFor && (
+        <RackRangeDialog
+          godown={rackRangeFor}
+          onClose={() => setRackRangeFor(null)}
+          onSuccess={() => {
+            setRackRangeFor(null);
+            if (selectedGodown === rackRangeFor.id) loadRacks(selectedGodown);
+            else { setSelectedGodown(rackRangeFor.id); }
+          }}
+        />
+      )}
+
+      {boxRangeFor && (
+        <BoxRangeDialog
+          rack={boxRangeFor}
+          onClose={() => setBoxRangeFor(null)}
+          onSuccess={() => {
+            setBoxRangeFor(null);
+            if (selectedRack === boxRangeFor.id) loadBoxes(selectedRack);
+            else { setSelectedRack(boxRangeFor.id); }
+          }}
+        />
+      )}
     </div>
   );
 }
+
+/* ============= Range Dialogs ============= */
+function RackRangeDialog({ godown, onClose, onSuccess }) {
+  const [start, setStart] = useState("1");
+  const [end, setEnd] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [totalBoxes, setTotalBoxes] = useState("0");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const s = parseInt(start), e = parseInt(end);
+    if (!s || !e || e < s) { toast.error("Enter valid Start and End numbers (End ≥ Start)"); return; }
+    setSaving(true);
+    try {
+      const { data } = await api.post("/racks/range", {
+        godown_id: godown.id,
+        start: s, end: e,
+        prefix: prefix || "",
+        total_boxes: parseInt(totalBoxes) || 0,
+      });
+      toast.success(`Created ${data.inserted} rack(s)${data.skipped ? `, ${data.skipped} skipped` : ""}`);
+      onSuccess();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail));
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="rounded-sm max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-black">Add Racks to {godown.godown_name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">Enter the starting and ending rack numbers. All numbers in between will be created.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="label-sm">Starting No. *</Label>
+              <Input type="number" min="1" value={start} onChange={(e) => setStart(e.target.value)} className="mt-1 rounded-sm font-mono" autoFocus data-testid="rack-range-start" />
+            </div>
+            <div>
+              <Label className="label-sm">Ending No. *</Label>
+              <Input type="number" min="1" value={end} onChange={(e) => setEnd(e.target.value)} placeholder="e.g. 35" className="mt-1 rounded-sm font-mono" data-testid="rack-range-end" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="label-sm">Prefix (optional)</Label>
+              <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="e.g. R → R1, R2…" className="mt-1 rounded-sm" data-testid="rack-range-prefix" />
+            </div>
+            <div>
+              <Label className="label-sm">Total Boxes / Rack</Label>
+              <Input type="number" min="0" value={totalBoxes} onChange={(e) => setTotalBoxes(e.target.value)} className="mt-1 rounded-sm font-mono" data-testid="rack-range-total" />
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-sm p-2">
+            Will create racks: <span className="font-mono font-semibold">{prefix}{start || "?"}</span> through <span className="font-mono font-semibold">{prefix}{end || "?"}</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-sm">Skip</Button>
+          <Button onClick={submit} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="rack-range-submit">
+            {saving ? "Creating…" : "Create Racks"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BoxRangeDialog({ rack, onClose, onSuccess }) {
+  const [start, setStart] = useState("1");
+  const [end, setEnd] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [category, setCategory] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const s = parseInt(start), e = parseInt(end);
+    if (!s || !e || e < s) { toast.error("Enter valid Start and End numbers (End ≥ Start)"); return; }
+    setSaving(true);
+    try {
+      const { data } = await api.post("/boxes/range", {
+        rack_id: rack.id,
+        start: s, end: e,
+        prefix: prefix || "",
+        box_category: category || "",
+      });
+      toast.success(`Created ${data.inserted} box(es)${data.skipped ? `, ${data.skipped} skipped` : ""}. Categories can be edited per box.`);
+      onSuccess();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail));
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="rounded-sm max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-black">Add Boxes to Rack {rack.rack_no}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">Enter the starting and ending box numbers. Each box's category can be edited individually after creation.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="label-sm">Starting No. *</Label>
+              <Input type="number" min="1" value={start} onChange={(e) => setStart(e.target.value)} className="mt-1 rounded-sm font-mono" autoFocus data-testid="box-range-start" />
+            </div>
+            <div>
+              <Label className="label-sm">Ending No. *</Label>
+              <Input type="number" min="1" value={end} onChange={(e) => setEnd(e.target.value)} placeholder="e.g. 12" className="mt-1 rounded-sm font-mono" data-testid="box-range-end" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="label-sm">Prefix (optional)</Label>
+              <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="e.g. B → B1, B2…" className="mt-1 rounded-sm" data-testid="box-range-prefix" />
+            </div>
+            <div>
+              <Label className="label-sm">Default Category (optional)</Label>
+              <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="set per-box later" className="mt-1 rounded-sm" data-testid="box-range-category" />
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-sm p-2">
+            Will create boxes: <span className="font-mono font-semibold">{prefix}{start || "?"}</span> through <span className="font-mono font-semibold">{prefix}{end || "?"}</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-sm">Skip</Button>
+          <Button onClick={submit} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="box-range-submit">
+            {saving ? "Creating…" : "Create Boxes"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 
 function ColumnCard({ title, icon: Icon, count, form, disabled, disabledText, toolbar, children }) {
   return (
@@ -377,7 +547,7 @@ function EmptyState({ text }) {
   return <div className="p-8 text-center text-sm text-slate-400">{text}</div>;
 }
 
-function IconBtn({ onClick, icon: Icon, color = "slate", dark = false, testid }) {
+function IconBtn({ onClick, icon: Icon, color = "slate", dark = false, testid, title }) {
   const colorClass = color === "red"
     ? (dark ? "text-white hover:bg-red-600" : "text-red-700 hover:bg-red-50")
     : color === "green"
@@ -388,6 +558,7 @@ function IconBtn({ onClick, icon: Icon, color = "slate", dark = false, testid })
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       className={`p-1.5 rounded-sm ${colorClass}`}
       data-testid={testid}
+      title={title}
     >
       <Icon size={14} weight="bold" />
     </button>

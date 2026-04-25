@@ -574,6 +574,74 @@ async def boxes_bulk_upload(file: UploadFile = File(...), user=Depends(get_curre
     }
 
 
+class RackRangeRequest(BaseModel):
+    godown_id: str
+    start: int
+    end: int
+    total_boxes: int = 0
+    prefix: Optional[str] = ""  # e.g., "R" → R1, R2, ...
+
+
+@api_router.post("/racks/range")
+async def create_rack_range(payload: RackRangeRequest, user=Depends(get_current_user)):
+    godown = await db.godowns.find_one({"id": payload.godown_id})
+    if not godown:
+        raise HTTPException(status_code=400, detail="Godown not found")
+    if payload.end < payload.start:
+        raise HTTPException(status_code=400, detail="End must be >= Start")
+    if payload.end - payload.start > 999:
+        raise HTTPException(status_code=400, detail="Range too large (max 1000)")
+    inserted, skipped = 0, 0
+    for n in range(payload.start, payload.end + 1):
+        rack_no = f"{payload.prefix or ''}{n}"
+        if await db.racks.find_one({"godown_id": payload.godown_id, "rack_no": rack_no}):
+            skipped += 1
+            continue
+        await db.racks.insert_one({
+            "id": str(uuid.uuid4()),
+            "godown_id": payload.godown_id,
+            "rack_no": rack_no,
+            "total_boxes": payload.total_boxes,
+            "created_at": now_iso(),
+        })
+        inserted += 1
+    return {"inserted": inserted, "skipped": skipped}
+
+
+class BoxRangeRequest(BaseModel):
+    rack_id: str
+    start: int
+    end: int
+    box_category: Optional[str] = ""
+    prefix: Optional[str] = ""
+
+
+@api_router.post("/boxes/range")
+async def create_box_range(payload: BoxRangeRequest, user=Depends(get_current_user)):
+    rack = await db.racks.find_one({"id": payload.rack_id})
+    if not rack:
+        raise HTTPException(status_code=400, detail="Rack not found")
+    if payload.end < payload.start:
+        raise HTTPException(status_code=400, detail="End must be >= Start")
+    if payload.end - payload.start > 999:
+        raise HTTPException(status_code=400, detail="Range too large (max 1000)")
+    inserted, skipped = 0, 0
+    for n in range(payload.start, payload.end + 1):
+        box_no = f"{payload.prefix or ''}{n}"
+        if await db.boxes.find_one({"rack_id": payload.rack_id, "box_no": box_no}):
+            skipped += 1
+            continue
+        await db.boxes.insert_one({
+            "id": str(uuid.uuid4()),
+            "rack_id": payload.rack_id,
+            "box_no": box_no,
+            "box_category": payload.box_category or "",
+            "created_at": now_iso(),
+        })
+        inserted += 1
+    return {"inserted": inserted, "skipped": skipped}
+
+
 @api_router.post("/godowns", response_model=Godown)
 async def create_godown(payload: GodownCreate, user=Depends(get_current_user)):
     doc = {"id": str(uuid.uuid4()), "godown_name": payload.godown_name, "created_at": now_iso()}
