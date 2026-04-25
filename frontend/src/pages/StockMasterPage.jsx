@@ -10,6 +10,9 @@ import {
 import { toast } from "sonner";
 import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise, FunnelSimple, X, CaretLeft, CaretRight } from "@phosphor-icons/react";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
+import StockMasterImageUploader from "../components/StockMasterImageUploader";
+import AuthImage from "../components/AuthImage";
+import ImageViewerDialog from "../components/ImageViewerDialog";
 
 const COLUMNS = [
   { key: "model", label: "MODEL" },
@@ -23,14 +26,15 @@ const COLUMNS = [
   { key: "make", label: "MAKE" },
   { key: "item_category", label: "ITEM CATEGORY" },
   { key: "reorder_level", label: "REORDER LEVEL", isNumeric: true },
-  { key: "image", label: "IMAGE", isImage: true },
+  { key: "images", label: "IMAGES", isImage: true },
 ];
 
 const emptyForm = {
   model: "", part_no: "", old_part_no: "", make_part_no: "",
   description_1: "", description_2: "",
   remarks_oem: "", remarks_others: "",
-  make: "", item_category: "", reorder_level: 0, image: "",
+  make: "", item_category: "", reorder_level: 0,
+  image: "", images: [],
 };
 
 export default function StockMasterPage() {
@@ -47,7 +51,6 @@ export default function StockMasterPage() {
   const PAGE_SIZE = 5000;
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const fileInput = useRef(null);
   const excelInput = useRef(null);
 
   const load = async () => {
@@ -90,6 +93,8 @@ export default function StockMasterPage() {
     return map;
   }, [items]);
 
+  const itemHasImage = (row) => Array.isArray(row.images) && row.images.length > 0;
+
   // Apply per-column filters + global sort
   const visibleItems = React.useMemo(() => {
     const activeKeys = Object.keys(colFilters);
@@ -99,7 +104,7 @@ export default function StockMasterPage() {
         const allowed = colFilters[k];
         if (!allowed || allowed.size === 0) return true;
         const col = COLUMNS.find((c) => c.key === k);
-        if (col?.isImage) return allowed.has(row.image ? "Has image" : "No image");
+        if (col?.isImage) return allowed.has(itemHasImage(row) ? "Has image" : "No image");
         const raw = row[k];
         const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
         return allowed.has(v);
@@ -131,14 +136,14 @@ export default function StockMasterPage() {
   const activeFilterCount = Object.keys(colFilters).length;
 
   const openNew = () => { setEditing(null); setForm(emptyForm); setOpen(true); };
-  const openEdit = (i) => { setEditing(i); setForm({ ...emptyForm, ...i }); setOpen(true); };
+  const openEdit = (i) => { setEditing(i); setForm({ ...emptyForm, ...i, images: Array.isArray(i.images) ? i.images : [] }); setOpen(true); };
 
-  const handleImage = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setForm((f) => ({ ...f, image: reader.result }));
-    reader.readAsDataURL(file);
+  // Row-level image viewer
+  const [viewer, setViewer] = useState(null); // { images: string[], idx: number }
+  const openViewer = (item, idx) => {
+    const list = Array.isArray(item.images) && item.images.length > 0 ? item.images : (item.image ? [item.image] : []);
+    if (list.length === 0) return;
+    setViewer({ images: list, idx });
   };
 
   const save = async () => {
@@ -306,13 +311,32 @@ export default function StockMasterPage() {
                 <td>{i.item_category || "—"}</td>
                 <td className="font-mono text-slate-700">{i.reorder_level || 0}</td>
                 <td>
-                  {i.image ? (
-                    <img src={i.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
-                  ) : (
-                    <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400">
-                      <ImgIcon size={16} />
-                    </div>
-                  )}
+                  {(() => {
+                    const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
+                    if (list.length === 0) {
+                      return (
+                        <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400" data-testid={`image-empty-${i.id}`}>
+                          <ImgIcon size={16} />
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="relative inline-flex items-center" data-testid={`image-cell-${i.id}`}>
+                        <AuthImage
+                          path={list[0]}
+                          alt=""
+                          className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80"
+                          onClick={() => openViewer(i, 0)}
+                          testid={`image-thumb-${i.id}`}
+                        />
+                        {list.length > 1 && (
+                          <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm" data-testid={`image-count-${i.id}`}>
+                            +{list.length - 1}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className="text-right whitespace-nowrap">
                   <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
@@ -408,18 +432,13 @@ export default function StockMasterPage() {
               <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable. Type a number or use the arrows.</div>
             </div>
             <div className="col-span-2">
-              <Label className="label-sm">Image</Label>
-              <div className="flex items-center gap-4 mt-2">
-                {form.image && <img src={form.image} alt="" className="h-16 w-16 object-cover rounded-sm border border-slate-200" />}
-                <input ref={fileInput} type="file" accept="image/*" onChange={handleImage} className="hidden" data-testid="form-image-input" />
-                <Button type="button" variant="outline" onClick={() => fileInput.current?.click()} className="rounded-sm">
-                  {form.image ? "Change" : "Upload"} Image
-                </Button>
-                {form.image && (
-                  <Button type="button" variant="ghost" onClick={() => setForm({ ...form, image: "" })} className="rounded-sm text-red-700">
-                    Remove
-                  </Button>
-                )}
+              <Label className="label-sm">Images</Label>
+              <div className="mt-2">
+                <StockMasterImageUploader
+                  value={form.images}
+                  onChange={(images) => setForm((f) => ({ ...f, images }))}
+                  testid="form-images"
+                />
               </div>
             </div>
           </div>
@@ -431,6 +450,13 @@ export default function StockMasterPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImageViewerDialog
+        open={!!viewer}
+        images={viewer?.images || []}
+        startIndex={viewer?.idx || 0}
+        onClose={() => setViewer(null)}
+      />
     </div>
   );
 }

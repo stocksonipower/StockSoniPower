@@ -14,12 +14,14 @@ from typing import List, Optional
 import bcrypt
 import jwt
 import pandas as pd
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query, Response
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query, Response, Header
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
+
+from storage import init_storage, put_object, get_object, build_path
 
 
 # -------------------- DB / APP SETUP --------------------
@@ -258,7 +260,8 @@ class StockMasterBase(BaseModel):
     make: str
     item_category: Optional[str] = ""
     reorder_level: int = 0
-    image: Optional[str] = ""  # base64 data URL
+    image: Optional[str] = ""  # legacy single-image (kept for backwards compatibility) — first of `images`
+    images: List[str] = Field(default_factory=list)  # storage paths, max 5
 
 
 class StockMasterCreate(StockMasterBase):
@@ -898,6 +901,8 @@ async def create_stock_master(payload: StockMasterCreate, user=Depends(get_curre
     make = payload.make.strip()
     if not part_no or not make:
         raise HTTPException(status_code=400, detail="part_no and make are required")
+    if payload.images and len(payload.images) > 5:
+        raise HTTPException(status_code=400, detail="A maximum of 5 images is allowed per item")
     existing = await db.stock_master.find_one({"part_no": part_no, "make": make})
     if existing:
         raise HTTPException(status_code=400, detail="Item with this part_no + make already exists")
@@ -1020,6 +1025,8 @@ async def update_stock_master(item_id: str, payload: StockMasterCreate, user=Dep
     existing = await db.stock_master.find_one({"id": item_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+    if payload.images and len(payload.images) > 5:
+        raise HTTPException(status_code=400, detail="A maximum of 5 images is allowed per item")
     # Check uniqueness if part_no/make changed
     if existing["part_no"] != payload.part_no or existing["make"] != payload.make:
         conflict = await db.stock_master.find_one({"part_no": payload.part_no, "make": payload.make})
@@ -1079,6 +1086,84 @@ TEMPLATE_COLUMNS = [
 
 def _normalize_col(c: str) -> str:
     return " ".join(str(c).strip().lower().split())
+
+
+# -------------------- IMAGE UPLOAD / SERVE (Object Storage) --------------------
+_ALLOWED_IMAGE_TYPES = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+@api_router.post("/uploads/image")
+async def upload_image(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Upload a single image to object storage. Returns {path, content_type, size}."""
+    ct = (file.content_type or "").lower()
+    if ct not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type: {ct or 'unknown'}")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+    ext = _ALLOWED_IMAGE_TYPES[ct]
+    path = build_path(user["id"], ext)
+    try:
+        result = put_object(path, data, ct)
+    except Exception as e:
+        logger.error(f"Object storage upload failed: {e}")
+        raise HTTPException(status_code=502, detail="Image upload failed")
+    # Track in DB so we can soft-delete / audit later
+    await db.uploads.insert_one({
+        "id": str(uuid.uuid4()),
+        "storage_path": result["path"],
+        "content_type": ct,
+        "size": result.get("size", len(data)),
+        "uploaded_by": user["id"],
+        "uploaded_by_email": user.get("email"),
+        "is_deleted": False,
+        "created_at": now_iso(),
+    })
+    return {"path": result["path"], "content_type": ct, "size": result.get("size", len(data))}
+
+
+@api_router.get("/files/{file_path:path}")
+async def serve_file(
+    file_path: str,
+    authorization: Optional[str] = Header(None),
+    auth: Optional[str] = Query(None),
+):
+    """Serve an image stored in object storage. Auth via Bearer header OR ?auth=<token> query param.
+
+    The query-param fallback is required because <img src="..."> cannot send headers.
+    """
+    # Resolve auth header — fall back to ?auth= for <img> tags
+    auth_header = authorization or (f"Bearer {auth}" if auth else None)
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    u = await db.users.find_one({"id": decoded.get("sub")}, {"_id": 0, "password": 0})
+    if not u or u.get("is_active") is False:
+        raise HTTPException(status_code=401, detail="User not found / disabled")
+
+    # DB lookup — only serve files we know about
+    record = await db.uploads.find_one({"storage_path": file_path, "is_deleted": False})
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        data, content_type = get_object(file_path)
+    except Exception as e:
+        logger.error(f"Object storage download failed: {e}")
+        raise HTTPException(status_code=502, detail="Image download failed")
+    return Response(content=data, media_type=record.get("content_type", content_type))
 
 
 @api_router.post("/stock-master/bulk-upload")
@@ -3628,6 +3713,7 @@ async def stock_balance(search: Optional[str] = None, user=Depends(get_current_u
             "item_category": sm.get("item_category", ""),
             "reorder_level": sm.get("reorder_level", 0) or 0,
             "image": sm.get("image", ""),
+            "images": sm.get("images", []) or [],
             "godown_id": k.get("godown_id", ""),
             "godown_name": g.get("godown_name", ""),
             "rack_id": k.get("rack_id", ""),
@@ -3721,6 +3807,11 @@ async def dashboard_stats(user=Depends(get_current_user)):
 # -------------------- STARTUP --------------------
 @app.on_event("startup")
 async def startup():
+    # Initialise object storage (best-effort — log only, do not fail boot)
+    try:
+        init_storage()
+    except Exception as e:
+        logger.error(f"Object storage init failed: {e}")
     await db.users.create_index("email", unique=True)
     await db.stock_master.create_index([("part_no", 1), ("make", 1)], unique=True)
     await db.stock_master.create_index("id", unique=True)

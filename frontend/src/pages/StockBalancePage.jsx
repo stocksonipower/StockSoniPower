@@ -5,7 +5,14 @@ import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
 import { Popover, PopoverTrigger, PopoverContent } from "../components/ui/popover";
 import { ScrollArea } from "../components/ui/scroll-area";
-import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X, CaretDown } from "@phosphor-icons/react";
+import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X, CaretDown, DownloadSimple } from "@phosphor-icons/react";
+import AuthImage from "../components/AuthImage";
+import ImageViewerDialog from "../components/ImageViewerDialog";
+import { exportToExcel } from "../lib/exportExcel";
+import { toast } from "sonner";
+
+// Helper: row has any image (new images[] array OR legacy image string)
+const rowHasImage = (r) => (Array.isArray(r.images) && r.images.length > 0) || !!r.image;
 
 const COLUMNS = [
   { key: "model", label: "MODEL", className: "font-mono text-slate-700" },
@@ -86,7 +93,7 @@ export default function StockBalancePage() {
         if (!allowed || allowed.size === 0) return true;
         const col = COLUMNS.find((c) => c.key === k);
         if (col?.isImage) {
-          const tag = row.image ? "Has image" : "No image";
+          const tag = rowHasImage(row) ? "Has image" : "No image";
           return allowed.has(tag);
         }
         const raw = row[k];
@@ -101,8 +108,8 @@ export default function StockBalancePage() {
         out = [...out].sort((a, b) => {
           let av, bv;
           if (col.isImage) {
-            av = a.image ? "Has image" : "No image";
-            bv = b.image ? "Has image" : "No image";
+            av = rowHasImage(a) ? "Has image" : "No image";
+            bv = rowHasImage(b) ? "Has image" : "No image";
           } else {
             av = a[col.key];
             bv = b[col.key];
@@ -157,6 +164,29 @@ export default function StockBalancePage() {
   const activeFilterCount = Object.keys(colFilters).length;
   const dash = <span className="text-slate-300">—</span>;
 
+  // Image viewer state
+  const [viewer, setViewer] = useState(null); // { images, idx }
+
+  // Export visible (filtered) rows to Excel — covers all displayed columns
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    const exportCols = [
+      { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+      ...COLUMNS.filter((c) => !c.isImage).map((c) => ({
+        label: c.label,
+        value: (r) => {
+          const v = r[c.key];
+          return v === null || v === undefined ? "" : v;
+        },
+      })),
+      { label: "IMAGES", value: (r) => {
+        const list = Array.isArray(r.images) && r.images.length > 0 ? r.images : (r.image ? [r.image] : []);
+        return list.length > 0 ? `${list.length} image(s)` : "";
+      } },
+    ];
+    exportToExcel(filteredRows, exportCols, `Stock_Summary_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div className="p-8 max-w-[1900px] mx-auto" data-testid="balance-page">
       <div className="mb-6 flex items-end justify-between gap-4">
@@ -167,10 +197,15 @@ export default function StockBalancePage() {
             Live join of Stock Master + Locations + Transactions. Edits in any of those reflect here on next refresh.
           </p>
         </div>
-        <Button onClick={() => load(search)} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
-          <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="balance-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+          </Button>
+          <Button onClick={() => load(search)} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-3 mb-4 flex-wrap">
@@ -244,13 +279,27 @@ export default function StockBalancePage() {
                 <td className="font-mono text-slate-500">{i + 1}</td>
                 {COLUMNS.map((c) => {
                   if (c.isImage) {
+                    const list = Array.isArray(r.images) && r.images.length > 0 ? r.images : (r.image ? [r.image] : []);
                     return (
                       <td key={c.key}>
-                        {r.image ? (
-                          <img src={r.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
-                        ) : (
+                        {list.length === 0 ? (
                           <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400">
                             <ImgIcon size={14} />
+                          </div>
+                        ) : (
+                          <div className="relative inline-flex items-center" data-testid={`balance-image-${i}`}>
+                            <AuthImage
+                              path={list[0]}
+                              alt=""
+                              className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80"
+                              onClick={() => setViewer({ images: list, idx: 0 })}
+                              testid={`balance-image-thumb-${i}`}
+                            />
+                            {list.length > 1 && (
+                              <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm">
+                                +{list.length - 1}
+                              </span>
+                            )}
                           </div>
                         )}
                       </td>
@@ -280,6 +329,13 @@ export default function StockBalancePage() {
         {filteredRows.length} of {rows.length} row{rows.length === 1 ? "" : "s"}
         {activeFilterCount > 0 && " (filtered)"} • Item details and locations are pulled live from Stock Master and Location Master each time you refresh.
       </div>
+
+      <ImageViewerDialog
+        open={!!viewer}
+        images={viewer?.images || []}
+        startIndex={viewer?.idx || 0}
+        onClose={() => setViewer(null)}
+      />
     </div>
   );
 }
