@@ -49,9 +49,11 @@ export default function StockMasterPage() {
       toast.error("Part No. and Make are required");
       return;
     }
+    // Coerce reorder_level to a non-negative int for save
+    const payload = { ...form, reorder_level: Math.max(0, parseInt(form.reorder_level, 10) || 0) };
     try {
-      if (editing) await api.put(`/stock-master/${editing.id}`, form);
-      else await api.post("/stock-master", form);
+      if (editing) await api.put(`/stock-master/${editing.id}`, payload);
+      else await api.post("/stock-master", payload);
       toast.success(editing ? "Item updated" : "Item created");
       setOpen(false); load();
     } catch (err) {
@@ -240,13 +242,24 @@ export default function StockMasterPage() {
             <div>
               <Label className="label-sm">Reorder Level</Label>
               <Input
-                type="number" min="0"
-                value={form.reorder_level}
-                onChange={(e) => setForm({ ...form, reorder_level: parseInt(e.target.value) || 0 })}
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={form.reorder_level ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  // Allow empty string while typing; coerce on save
+                  setForm({ ...form, reorder_level: v === "" ? "" : Math.max(0, parseInt(v, 10) || 0) });
+                }}
+                onBlur={(e) => {
+                  if (e.target.value === "" || isNaN(parseInt(e.target.value, 10))) {
+                    setForm((f) => ({ ...f, reorder_level: 0 }));
+                  }
+                }}
                 className="mt-2 rounded-sm font-mono"
                 data-testid="form-reorder-level"
               />
-              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable.</div>
+              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable. Type a number or use the arrows.</div>
             </div>
             <div className="col-span-2">
               <Label className="label-sm">Image</Label>

@@ -109,6 +109,7 @@ class StockMasterBase(BaseModel):
     remarks_others: Optional[str] = ""
     make: str
     item_category: Optional[str] = ""
+    reorder_level: int = 0
     image: Optional[str] = ""  # base64 data URL
 
 
