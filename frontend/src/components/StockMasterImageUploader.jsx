@@ -69,17 +69,15 @@ export default function StockMasterImageUploader({ value, onChange, testid = "sm
         <div className="text-xs text-slate-500">
           {images.length} of {MAX_IMAGES} image{MAX_IMAGES === 1 ? "" : "s"}
         </div>
-        {images.length < MAX_IMAGES && (
-          <button
-            type="button"
-            onClick={() => fileInput.current?.click()}
-            disabled={uploading}
-            className="text-xs font-semibold text-blue-700 hover:underline disabled:text-slate-400"
-            data-testid={`${testid}-pick`}
-          >
-            {uploading ? "Uploading…" : "Choose files"}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => fileInput.current?.click()}
+          disabled={uploading || images.length >= MAX_IMAGES}
+          className="text-xs font-semibold text-blue-700 hover:underline disabled:text-slate-400 disabled:no-underline disabled:cursor-not-allowed"
+          data-testid={`${testid}-pick`}
+        >
+          {uploading ? "Uploading…" : (images.length >= MAX_IMAGES ? "Max reached" : "Choose files")}
+        </button>
       </div>
 
       <input

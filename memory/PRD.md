@@ -129,5 +129,23 @@ Build a warehouse stock management system with:
 - **Stock In / Stock Out / Stock Transfer list pages** (Receipt Note, Racking Note, Issue Note, Picking Note, Transfer Request, Transfer Note): each refactored to use `useTableSortFilter` + `<ColumnHeader>` for per-column Excel-style sort+filter (excluding the static SL NO column and Actions); each list now has new `Export` and `Refresh` buttons next to the Create CTA. Export downloads `.xlsx` of currently visible (filtered+sorted) rows including a "Sl No" column. Refresh re-fetches from `/api/<resource>` without a full page reload.
 - Files touched: `UsersPage.jsx`, `LowStockPage.jsx`, `TransactionsPage.jsx`, `StockBalancePage.jsx`, `StockInPage.jsx`, `RackingNoteTab.jsx`, `StockOutPage.jsx`, `StockTransferPage.jsx`
 
+## Image Storage Migration & Stock Summary Export (2026-04-25, COMPLETE — iteration_16.json 100% pass)
+- **Object Storage**: integrated **Emergent Object Storage** via `/app/backend/storage.py` (init / put / get / build_path). `EMERGENT_LLM_KEY` added to `/app/backend/.env`. Initialised on FastAPI startup. No legacy migration needed (no historical base64 images present).
+- **Backend**:
+  - `POST /api/uploads/image` — multipart upload, validates type (png/jpg/gif/webp) and size (≤10MB), persists upload metadata in `db.uploads`
+  - `GET /api/files/{file_path:path}` — serves bytes; auth via `Authorization: Bearer …` **OR** `?auth=<token>` query param (the latter is required because `<img>` tags can't send headers; AuthImage component fetches as blob to avoid putting token in URL)
+  - `StockMasterBase.images: List[str]` (max 5) — enforced in create + update routes (HTTP 400)
+  - `stock-balance` response now includes `images` array alongside legacy `image`
+- **Frontend new components**:
+  - `AuthImage.jsx` — fetches `/api/files/{path}` as blob → object URL (auto-revokes on unmount); falls back to direct `src` for legacy data:/http URLs
+  - `ImageViewerDialog.jsx` — full-screen viewer; Prev arrow hidden on first image; Next arrow hidden on last image; "Image X/Y" label centred at bottom; Close button + Esc + click-outside; ←/→ keyboard nav
+  - `StockMasterImageUploader.jsx` — 5-slot grid; drag+drop or click empty slot; per-slot view (Eye) + remove (×) buttons; toast error when >5 attempted; "Max reached" disabled state when full
+- **Stock Master**: edit dialog now uses 5-slot uploader; table image cell shows AuthImage thumbnail + `+N` badge when item has multiple images; click → ImageViewerDialog
+- **Stock Summary**:
+  - **Export button** (`balance-export-button`) — exports the currently filtered + sorted rows to `Stock_Summary_YYYY-MM-DD.xlsx` including a Sl No column, all data columns, and an IMAGES count column
+  - Image cells now use AuthImage + `+N` badge + click → viewer
+- **Files touched**: `/app/backend/storage.py` (new), `/app/backend/server.py`, `/app/frontend/src/components/AuthImage.jsx` (new), `/app/frontend/src/components/ImageViewerDialog.jsx` (new), `/app/frontend/src/components/StockMasterImageUploader.jsx` (new), `/app/frontend/src/pages/StockMasterPage.jsx`, `/app/frontend/src/pages/StockBalancePage.jsx`
+- **Tests**: `/app/backend/tests/test_image_storage.py` (13 pytest, 100% pass) + Playwright E2E (100% pass)
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
