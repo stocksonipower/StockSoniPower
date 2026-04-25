@@ -226,7 +226,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
   );
 }
 
-const emptyIssueItem = () => ({ part_no: "", make: "", quantity: "", makes: [], partLooked: false });
+const emptyIssueItem = () => ({ part_no: "", make: "", quantity: "", makes: [], partLooked: false, available_qty: 0 });
 
 function IssueNoteForm({ editing, onCancel, onSaved }) {
   const isEdit = !!editing;
@@ -244,14 +244,18 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       setIssuedTo(editing.issued_to || "");
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "", make: it.make || "", quantity: it.quantity ?? "",
-        makes: it.make ? [it.make] : [], partLooked: !!it.part_no,
+        makes: it.make ? [{ make: it.make, available_qty: 0 }] : [], partLooked: !!it.part_no, available_qty: 0,
       }));
       setItems(initial.length ? initial : [emptyIssueItem()]);
-      // Refresh makes list per row
+      // Refresh stock-aware makes list per row
       initial.forEach((row, idx) => {
         if (!row.part_no) return;
-        api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
-          .then(({ data }) => setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: data.makes || [] } : r)))
+        api.get(`/issue-notes/lookup/${encodeURIComponent(row.part_no)}`)
+          .then(({ data }) => {
+            const makesArr = data.makes || [];
+            const found = makesArr.find((m) => m.make === row.make);
+            setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: makesArr, available_qty: found?.available_qty || 0 } : r));
+          })
           .catch(() => {});
       });
     } else {
@@ -271,12 +275,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
-    if (!v) { updateItem(i, { makes: [], make: "", partLooked: false }); return; }
+    if (!v) { updateItem(i, { makes: [], make: "", partLooked: false, available_qty: 0 }); return; }
     try {
-      const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no: v } });
+      const { data } = await api.get(`/issue-notes/lookup/${encodeURIComponent(v)}`);
       const list = data.makes || [];
-      updateItem(i, { makes: list, partLooked: true, make: list.length === 1 ? list[0] : "" });
-    } catch { updateItem(i, { makes: [], partLooked: true, make: "" }); }
+      const auto = list.length === 1 ? list[0] : null;
+      updateItem(i, {
+        makes: list, partLooked: true,
+        make: auto ? auto.make : "",
+        available_qty: auto ? auto.available_qty : 0,
+      });
+    } catch { updateItem(i, { makes: [], partLooked: true, make: "", available_qty: 0 }); }
+  };
+
+  const onMakeChange = (i, makeVal) => {
+    const row = items[i];
+    const found = (row.makes || []).find((m) => m.make === makeVal);
+    updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0 });
   };
 
   const save = async () => {
@@ -287,6 +302,10 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
+      if (q > (it.available_qty || 0) + 1e-6) {
+        toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock, cannot issue ${q}`);
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -349,34 +368,50 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
         <table className="data-table w-full">
           <thead>
-            <tr><th className="w-14">SL</th><th>PART NO</th><th>QUANTITY</th><th>MAKE</th><th className="w-14"></th></tr>
+            <tr><th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>QUANTITY</th><th className="w-14"></th></tr>
           </thead>
           <tbody>
-            {items.map((it, idx) => (
-              <tr key={idx} data-testid={`in-item-row-${idx}`}>
+            {items.map((it, idx) => {
+              const overStock = it.available_qty !== undefined && (parseFloat(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+              return (
+              <tr key={idx} data-testid={`in-item-row-${idx}`} className={overStock ? "bg-red-50" : ""}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
                 <td>
                   <Input value={it.part_no}
-                    onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "" })}
+                    onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", available_qty: 0 })}
                     onBlur={(e) => lookupMakes(idx, e.target.value)}
                     placeholder="Enter part no"
                     className="rounded-sm font-mono h-8" data-testid={`in-part-no-${idx}`} />
                 </td>
-                <td className="w-32">
-                  <Input type="number" min="0.001" step="any" value={it.quantity}
-                    onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                    placeholder="0" className="rounded-sm font-mono h-8 text-right" data-testid={`in-qty-${idx}`} />
-                </td>
                 <td className="w-64">
                   <Select disabled={!it.partLooked || it.makes.length === 0}
-                    value={it.make || undefined} onValueChange={(v) => updateItem(idx, { make: v })}>
+                    value={it.make || undefined} onValueChange={(v) => onMakeChange(idx, v)}>
                     <SelectTrigger className="rounded-sm h-8" data-testid={`in-make-${idx}`}>
-                      <SelectValue placeholder={!it.partLooked ? "Enter Part No first" : (it.makes.length === 0 ? "Not in master" : "Select make")} />
+                      <SelectValue placeholder={!it.partLooked ? "Enter Part No first" : (it.makes.length === 0 ? "No stock available" : "Select make")} />
                     </SelectTrigger>
                     <SelectContent>
-                      {it.makes.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                      {it.makes.map((m) => (
+                        <SelectItem key={m.make} value={m.make} data-testid={`in-make-${idx}-option-${m.make}`}>
+                          <span className="font-mono">{m.make}</span>
+                          <span className="ml-3 text-xs text-slate-500">avail {m.available_qty}</span>
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
+                </td>
+                <td className="w-32">
+                  <Input type="number" min="0.001" step="any" value={it.quantity}
+                    disabled={!it.make}
+                    onChange={(e) => updateItem(idx, { quantity: e.target.value })}
+                    placeholder="0"
+                    className={`rounded-sm font-mono h-8 text-right ${overStock ? "border-red-400" : ""}`}
+                    data-testid={`in-qty-${idx}`} />
+                  {it.make && (
+                    <div className={`text-[10px] mt-0.5 ${overStock ? "text-red-600 font-bold" : "text-slate-500"}`}
+                      data-testid={`in-avail-hint-${idx}`}>
+                      {overStock ? `Over ${it.quantity}/${it.available_qty}` : `Available ${it.available_qty}`}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <button onClick={() => removeItem(idx)} disabled={items.length === 1}
@@ -384,7 +419,8 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                     data-testid={`in-remove-row-${idx}`}><Trash size={14} /></button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

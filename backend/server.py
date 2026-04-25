@@ -1699,6 +1699,28 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
 
 
 # ===================== ISSUE NOTES (Stock Out) =====================
+async def _stock_total_for(part_no: str, make: str) -> float:
+    """Total available qty for a part/make across all locations (sum of IN - OUT)."""
+    rows = await db.transactions.aggregate([
+        {"$match": {"part_no": part_no, "make": make}},
+        {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+    ]).to_list(1)
+    return rows[0]["q"] if rows else 0
+
+
+@api_router.get("/issue-notes/lookup/{part_no}")
+async def issue_lookup_makes(part_no: str, user=Depends(get_current_user)):
+    """For Issue Note flow: list makes that have positive stock for this part_no, with available qty."""
+    # Pull every (part_no, make) combination that has transactions, then filter to those with positive total
+    pairs = await db.transactions.aggregate([
+        {"$match": {"part_no": part_no}},
+        {"$group": {"_id": {"make": "$make"}, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+        {"$match": {"q": {"$gt": 0}}},
+        {"$sort": {"_id.make": 1}},
+    ]).to_list(1000)
+    return {"makes": [{"make": p["_id"]["make"], "available_qty": p["q"]} for p in pairs]}
+
+
 @api_router.get("/issue-notes/next-no")
 async def next_issue_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
@@ -1725,9 +1747,27 @@ def _validate_issue_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
 
 
+async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] = None):
+    """Block requesting more than current stock total for any (part_no, make)."""
+    # Sum requested qty in this payload per (part_no, make)
+    req = {}
+    for it in items:
+        k = _key(it.part_no, it.make)
+        req[k] = req.get(k, 0) + (it.quantity or 0)
+    for k, q in req.items():
+        part_no, make = k.split("||", 1)
+        avail = await _stock_total_for(part_no, make)
+        if q > avail + 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{part_no} / {make}: cannot issue {q} — only {avail} in stock",
+            )
+
+
 @api_router.post("/issue-notes", response_model=IssueNote)
 async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_user)):
     _validate_issue_items(payload.items)
+    await _validate_issue_qty_against_stock(payload.items)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     from pymongo.errors import DuplicateKeyError
@@ -1799,6 +1839,7 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     if await db.picking_notes.find_one({"issue_note_id": in_id}):
         raise HTTPException(status_code=409, detail="Cannot edit — picking notes have been created. Delete those first.")
     _validate_issue_items(payload.items)
+    await _validate_issue_qty_against_stock(payload.items, exclude_in_id=in_id)
     update = {
         "issued_to": (payload.issued_to or "").strip(),
         "items": [it.model_dump() for it in payload.items],
