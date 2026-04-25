@@ -1,0 +1,571 @@
+import React, { useEffect, useState, useCallback, useMemo } from "react";
+import { api, formatApiError } from "../lib/api";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from "../components/ui/select";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "../components/ui/dialog";
+import { toast } from "sonner";
+import {
+  Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin,
+} from "@phosphor-icons/react";
+
+const PAGE_SIZE = 5000;
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+/* ==============================================================
+   STOCK IN  ·  Racking Note tab
+   ============================================================== */
+export default function RackingNoteTab() {
+  const [view, setView] = useState("list"); // list | create | edit | detail
+  const [editing, setEditing] = useState(null);
+  const [openRkn, setOpenRkn] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const goCreate = () => { setEditing(null); setView("create"); };
+  const goEdit = (rkn) => { setEditing(rkn); setView("edit"); };
+  const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  return (
+    <>
+      {view === "list" && (
+        <RackingNoteList
+          reloadKey={reloadKey}
+          onCreate={goCreate}
+          onEdit={goEdit}
+          onOpen={(r) => setOpenRkn(r)}
+          onRecorded={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+      {(view === "create" || view === "edit") && (
+        <RackingNoteForm editing={editing} onCancel={goList} onSaved={goList} />
+      )}
+      <RackingNoteDetailDialog rkn={openRkn} onClose={() => setOpenRkn(null)} />
+    </>
+  );
+}
+
+/* ---------- LIST VIEW ---------- */
+function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
+  const [rows, setRows] = useState([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [recordingId, setRecordingId] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get("/racking-notes", { params: { page, page_size: PAGE_SIZE } });
+      setRows(res.data);
+      const t = parseInt(res.headers["x-total-count"], 10);
+      setTotal(isNaN(t) ? res.data.length : t);
+    } finally { setLoading(false); }
+  }, [page]);
+  useEffect(() => { load(); }, [load, reloadKey]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const handleDelete = async (rkn) => {
+    if (!window.confirm(`Delete ${rkn.rkn_no}?`)) return;
+    try {
+      await api.delete(`/racking-notes/${rkn.id}`);
+      toast.success(`${rkn.rkn_no} deleted`);
+      load();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
+    }
+  };
+
+  const handleRecord = async (rkn) => {
+    if (!window.confirm(`Record ${rkn.rkn_no} as Stock In?\n\nThis will add ${rkn.items.length} stock-in transaction(s) and mark the linked Receipt Note (${rkn.receipt_note_no}) as RACKED. This cannot be undone.`)) return;
+    setRecordingId(rkn.id);
+    try {
+      const { data } = await api.post(`/racking-notes/${rkn.id}/record`);
+      toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) created`);
+      load();
+      onRecorded?.();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not record");
+    } finally { setRecordingId(null); }
+  };
+
+  return (
+    <div className="mt-4" data-testid="rkn-list-view">
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm text-slate-600">
+          {total === 0 ? "No racking notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> racking notes</>}
+        </div>
+        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rkn-button">
+          <Plus size={16} weight="bold" className="mr-2" /> Create New Racking Note
+        </Button>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th className="w-14">SL NO</th>
+              <th>RACKING NOTE DATE</th>
+              <th>RACKING NOTE NO</th>
+              <th>RECEIPT NOTE DATE</th>
+              <th>RECEIPT NOTE NO</th>
+              <th className="text-right">ITEMS TOTAL</th>
+              <th className="text-right">QUANTITY TOTAL</th>
+              <th>STATUS</th>
+              <th className="text-right">ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, idx) => {
+              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+              const recorded = r.status === "RECORDED";
+              return (
+                <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
+                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`rkn-open-${r.rkn_no}`}
+                    >
+                      {r.rkn_no}
+                    </button>
+                  </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
+                  <td className="font-mono text-slate-700">{r.receipt_note_no || "—"}</td>
+                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td>
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
+                      data-testid={`rkn-status-${r.rkn_no}`}>
+                      {recorded ? "Recorded" : "Draft"}
+                    </span>
+                  </td>
+                  <td className="text-right whitespace-nowrap">
+                    <button
+                      onClick={() => onEdit(r)}
+                      disabled={recorded}
+                      title={recorded ? "Cannot edit — already recorded" : "Edit"}
+                      className={`p-1.5 rounded-sm mr-1 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                      data-testid={`rkn-edit-${r.rkn_no}`}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(r)}
+                      disabled={recorded}
+                      title={recorded ? "Cannot delete — already recorded" : "Delete"}
+                      className={`p-1.5 rounded-sm mr-2 ${recorded ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      data-testid={`rkn-delete-${r.rkn_no}`}
+                    >
+                      <Trash size={14} />
+                    </button>
+                    <Button
+                      onClick={() => handleRecord(r)}
+                      disabled={recorded || recordingId === r.id}
+                      size="sm"
+                      className={`rounded-sm h-7 text-xs ${recorded ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                      data-testid={`rkn-record-${r.rkn_no}`}
+                    >
+                      <CheckCircle size={12} weight="bold" className="mr-1" />
+                      {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock In")}
+                    </Button>
+                  </td>
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No racking notes. Click 'Create New Racking Note' to begin."}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
+        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- DETAIL DIALOG (read-only) ---------- */
+function RackingNoteDetailDialog({ rkn, onClose }) {
+  return (
+    <Dialog open={!!rkn} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-6xl rounded-sm" data-testid="rkn-detail-dialog">
+        {rkn && (
+          <>
+            <DialogHeader>
+              <DialogTitle className="text-2xl font-black font-mono">{rkn.rkn_no}</DialogTitle>
+            </DialogHeader>
+            <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
+              <Detail k="Racking Note Date" v={fmtDate(rkn.rkn_date)} />
+              <Detail k="Receipt Note No" v={rkn.receipt_note_no || "—"} />
+              <Detail k="Receipt Note Date" v={fmtDate(rkn.receipt_note_date)} />
+              <Detail k="Status" v={rkn.status} />
+              <Detail k="Created By" v={rkn.created_by || "—"} />
+              <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="data-table w-full text-xs">
+                <thead>
+                  <tr>
+                    <th>SL</th>
+                    <th>PART NO</th>
+                    <th>MAKE</th>
+                    <th>MODEL</th>
+                    <th>DESCRIPTION</th>
+                    <th>CATEGORY</th>
+                    <th className="text-right">QTY</th>
+                    <th>GODOWN</th>
+                    <th>RACK</th>
+                    <th>BOX</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(rkn.items || []).map((it, idx) => (
+                    <tr key={idx}>
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono font-semibold">{it.part_no}</td>
+                      <td>{it.make}</td>
+                      <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                      <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                      <td className="text-slate-600">{it.item_category || "—"}</td>
+                      <td className="text-right font-mono font-bold">{it.quantity}</td>
+                      <td className="font-mono">{it.godown_name || "—"}</td>
+                      <td className="font-mono">{it.rack_no || "—"}</td>
+                      <td className="font-mono">{it.box_no || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Detail({ k, v }) {
+  return (
+    <div>
+      <div className="label-sm">{k}</div>
+      <div className="font-mono mt-1 text-slate-900">{v}</div>
+    </div>
+  );
+}
+
+/* ---------- CREATE / EDIT FORM ---------- */
+function RackingNoteForm({ editing, onCancel, onSaved }) {
+  const isEdit = !!editing;
+  const [rknNo, setRknNo] = useState("");
+  const [rknDate, setRknDate] = useState("");
+  const [pendingRns, setPendingRns] = useState([]);
+  const [selectedRnId, setSelectedRnId] = useState("");
+  const [items, setItems] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  // Cascading dropdown caches
+  const [godowns, setGodowns] = useState([]);
+  const [racksByGodown, setRacksByGodown] = useState({}); // {godown_id: [racks]}
+  const [boxesByRack, setBoxesByRack] = useState({});
+
+  useEffect(() => { api.get("/godowns").then((r) => setGodowns(r.data)); }, []);
+
+  // Bootstrap form
+  useEffect(() => {
+    if (isEdit) {
+      setRknNo(editing.rkn_no);
+      setRknDate(editing.rkn_date);
+      setSelectedRnId(editing.receipt_note_id);
+      setPendingRns([{ id: editing.receipt_note_id, rn_no: editing.receipt_note_no, rn_date: editing.receipt_note_date }]);
+      setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [] })));
+    } else {
+      api.get("/racking-notes/next-no").then((r) => {
+        setRknNo(r.data.next_rkn_no);
+        setRknDate(r.data.rkn_date);
+      }).catch(() => toast.error("Could not preview racking-note number"));
+      api.get("/receipt-notes", { params: { status: "RACKING_PENDING", page_size: 5000 } })
+        .then((r) => {
+          // Filter out RNs that already have a draft racking note, by checking via the racking-notes list
+          api.get("/racking-notes", { params: { page_size: 5000 } }).then((rk) => {
+            const usedRnIds = new Set((rk.data || []).map((x) => x.receipt_note_id));
+            setPendingRns(r.data.filter((rn) => !usedRnIds.has(rn.id)));
+          });
+        });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEdit, editing]);
+
+  // Fetch racks for a given godown lazily
+  const ensureRacks = useCallback(async (godownId) => {
+    if (!godownId || racksByGodown[godownId]) return;
+    const { data } = await api.get("/racks", { params: { godown_id: godownId } });
+    setRacksByGodown((p) => ({ ...p, [godownId]: data }));
+  }, [racksByGodown]);
+
+  const ensureBoxes = useCallback(async (rackId) => {
+    if (!rackId || boxesByRack[rackId]) return;
+    const { data } = await api.get("/boxes", { params: { rack_id: rackId } });
+    setBoxesByRack((p) => ({ ...p, [rackId]: data }));
+  }, [boxesByRack]);
+
+  // When prefilled items have godown/rack ids, eagerly load their lookups
+  useEffect(() => {
+    items.forEach((it) => {
+      if (it.godown_id) ensureRacks(it.godown_id);
+      if (it.rack_id) ensureBoxes(it.rack_id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
+
+  const handleRnChange = async (rnId) => {
+    setSelectedRnId(rnId);
+    if (!rnId) { setItems([]); return; }
+    try {
+      const { data } = await api.get(`/racking-notes/prepare/${rnId}`);
+      setItems(data.items || []);
+      // Eagerly preload racks/boxes for prefilled rows
+      (data.items || []).forEach((it) => {
+        if (it.godown_id) ensureRacks(it.godown_id);
+        if (it.rack_id) ensureBoxes(it.rack_id);
+      });
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not prepare items");
+    }
+  };
+
+  const updateItem = (i, patch) => setItems((prev) => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+
+  const onGodownChange = async (i, godownId) => {
+    const g = godowns.find((x) => x.id === godownId);
+    updateItem(i, { godown_id: godownId, godown_name: g?.godown_name || "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "" });
+    await ensureRacks(godownId);
+  };
+  const onRackChange = async (i, rackId) => {
+    const racks = racksByGodown[items[i].godown_id] || [];
+    const rk = racks.find((x) => x.id === rackId);
+    updateItem(i, { rack_id: rackId, rack_no: rk?.rack_no || "", box_id: "", box_no: "", box_category: "" });
+    await ensureBoxes(rackId);
+  };
+  const onBoxChange = (i, boxId) => {
+    const boxes = boxesByRack[items[i].rack_id] || [];
+    const bx = boxes.find((x) => x.id === boxId);
+    updateItem(i, { box_id: boxId, box_no: bx?.box_no || "", box_category: bx?.box_category || "" });
+  };
+
+  // Apply an existing-location chip click
+  const applyExistingLocation = async (i, loc) => {
+    await ensureRacks(loc.godown_id);
+    await ensureBoxes(loc.rack_id);
+    updateItem(i, {
+      godown_id: loc.godown_id, godown_name: loc.godown_name,
+      rack_id: loc.rack_id, rack_no: loc.rack_no,
+      box_id: loc.box_id, box_no: loc.box_no,
+      box_category: loc.box_category || "",
+    });
+  };
+
+  const save = async () => {
+    if (!selectedRnId) { toast.error("Select a Receipt Note"); return; }
+    if (items.length === 0) { toast.error("No items to rack"); return; }
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (!it.godown_id || !it.rack_id || !it.box_id) {
+        toast.error(`Row ${i + 1}: pick Godown / Rack / Box`); return;
+      }
+      const q = parseFloat(it.quantity);
+      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        receipt_note_id: selectedRnId,
+        items: items.map((it) => ({
+          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
+          model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
+          description_1: it.description_1 || "", description_2: it.description_2 || "",
+          remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
+          item_category: it.item_category || "",
+          godown_id: it.godown_id, godown_name: it.godown_name,
+          rack_id: it.rack_id, rack_no: it.rack_no,
+          box_id: it.box_id, box_no: it.box_no, box_category: it.box_category || "",
+        })),
+      };
+      const { data } = isEdit
+        ? await api.put(`/racking-notes/${editing.id}`, payload)
+        : await api.post("/racking-notes", payload);
+      toast.success(`Racking Note ${data.rkn_no} ${isEdit ? "updated" : "saved"}`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-4 space-y-6" data-testid="rkn-create-view">
+      <div className="flex items-center justify-between">
+        <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="rkn-back-button">
+          <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
+        </Button>
+        <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="rkn-save-button">
+          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
+        </Button>
+      </div>
+
+      {/* HEADER */}
+      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <div>
+          <Label className="label-sm">Racking Note Date</Label>
+          <Input value={rknDate} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="rkn-date-input" />
+        </div>
+        <div>
+          <Label className="label-sm">Racking Note No</Label>
+          <Input value={rknNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rkn-no-input" />
+        </div>
+        <div>
+          <Label className="label-sm">Receipt Note *</Label>
+          <Select value={selectedRnId || undefined} onValueChange={handleRnChange} disabled={isEdit}>
+            <SelectTrigger className="mt-2 rounded-sm" data-testid="rkn-rn-select">
+              <SelectValue placeholder={pendingRns.length === 0 ? "No racking-pending receipt notes" : "Select receipt note"} />
+            </SelectTrigger>
+            <SelectContent>
+              {pendingRns.map((rn) => (
+                <SelectItem key={rn.id} value={rn.id} data-testid={`rkn-rn-option-${rn.rn_no}`}>
+                  <span className="font-mono">{rn.rn_no}</span><span className="ml-3 text-slate-500 text-xs">{fmtDate(rn.rn_date)}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {isEdit && <div className="text-[11px] text-slate-500 mt-1">Receipt note cannot be changed in edit mode</div>}
+        </div>
+      </div>
+
+      {/* ITEMS */}
+      {items.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+          <table className="data-table w-full text-xs">
+            <thead>
+              <tr>
+                <th className="w-10">SL</th>
+                <th>PART NO</th>
+                <th>MAKE</th>
+                <th>MODEL</th>
+                <th>OLD PART</th>
+                <th>MAKE PART</th>
+                <th>DESCRIPTION 1</th>
+                <th>DESCRIPTION 2</th>
+                <th>REMARKS OEM</th>
+                <th>REMARKS OTHERS</th>
+                <th>CATEGORY</th>
+                <th className="text-right">QTY</th>
+                <th className="min-w-[140px]">GODOWN *</th>
+                <th className="min-w-[120px]">RACK *</th>
+                <th className="min-w-[120px]">BOX *</th>
+                <th>BOX CATEGORY</th>
+                <th>EXISTING LOCATIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, idx) => {
+                const racks = racksByGodown[it.godown_id] || [];
+                const boxes = boxesByRack[it.rack_id] || [];
+                return (
+                  <tr key={idx} data-testid={`rkn-item-row-${idx}`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td>{it.make}</td>
+                    <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                    <td className="font-mono text-slate-600">{it.old_part_no || "—"}</td>
+                    <td className="font-mono text-slate-600">{it.make_part_no || "—"}</td>
+                    <td className="text-slate-700 max-w-[160px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-slate-700 max-w-[160px] truncate" title={it.description_2}>{it.description_2 || "—"}</td>
+                    <td className="text-slate-600 max-w-[140px] truncate" title={it.remarks_oem}>{it.remarks_oem || "—"}</td>
+                    <td className="text-slate-600 max-w-[140px] truncate" title={it.remarks_others}>{it.remarks_others || "—"}</td>
+                    <td className="text-slate-600">{it.item_category || "—"}</td>
+                    <td className="text-right">
+                      <Input type="number" min="0.001" step="any" value={it.quantity}
+                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
+                        className="rounded-sm font-mono h-8 text-right w-20" data-testid={`rkn-qty-${idx}`} />
+                    </td>
+                    <td>
+                      <Select value={it.godown_id || undefined} onValueChange={(v) => onGodownChange(idx, v)}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-godown-${idx}`}><SelectValue placeholder="Godown" /></SelectTrigger>
+                        <SelectContent>
+                          {godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td>
+                      <Select value={it.rack_id || undefined} onValueChange={(v) => onRackChange(idx, v)} disabled={!it.godown_id}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-rack-${idx}`}><SelectValue placeholder="Rack" /></SelectTrigger>
+                        <SelectContent>
+                          {racks.map((r) => <SelectItem key={r.id} value={r.id}>{r.rack_no}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td>
+                      <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}><SelectValue placeholder="Box" /></SelectTrigger>
+                        <SelectContent>
+                          {boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="font-mono text-slate-600 text-[11px]">{it.box_category || "—"}</td>
+                    <td>
+                      {(it.existing_locations || []).length === 0 ? (
+                        <span className="text-[11px] text-slate-400 italic">New part — pick any location</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1 max-w-[220px]">
+                          {(it.existing_locations || []).map((loc, k) => {
+                            const isCurrent = loc.box_id === it.box_id;
+                            return (
+                              <button key={k} onClick={() => applyExistingLocation(idx, loc)}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-sm border ${isCurrent ? "bg-blue-50 border-blue-300 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"}`}
+                                title={`${loc.godown_name}/${loc.rack_no}/${loc.box_no} — ${loc.current_qty} in stock`}
+                                data-testid={`rkn-existing-loc-${idx}-${k}`}>
+                                <MapPin size={10} weight="bold" className="inline mr-0.5" />
+                                {loc.godown_name}/{loc.rack_no}/{loc.box_no} ({loc.current_qty})
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!selectedRnId && !isEdit && (
+        <div className="bg-amber-50 border border-amber-200 rounded-sm p-6 text-sm text-amber-800">
+          Pick a Receipt Note above to load its items for racking.
+        </div>
+      )}
+    </div>
+  );
+}

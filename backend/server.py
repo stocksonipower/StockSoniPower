@@ -200,6 +200,52 @@ class ReceiptNote(BaseModel):
     invoice_no: str = ""
     invoice_date: str = ""
     items: List[ReceiptNoteItem] = []
+    status: str = "RACKING_PENDING"  # RACKING_PENDING | RACKED
+    racked_at: Optional[str] = None
+    created_at: str
+    created_by: str = ""
+
+
+class RackingNoteItem(BaseModel):
+    part_no: str
+    make: str
+    quantity: float
+    # Denormalized stock master fields (filled at create time)
+    model: Optional[str] = ""
+    old_part_no: Optional[str] = ""
+    make_part_no: Optional[str] = ""
+    description_1: Optional[str] = ""
+    description_2: Optional[str] = ""
+    remarks_oem: Optional[str] = ""
+    remarks_others: Optional[str] = ""
+    item_category: Optional[str] = ""
+    # Location (set when user fills in cascading dropdowns)
+    godown_id: Optional[str] = ""
+    godown_name: Optional[str] = ""
+    rack_id: Optional[str] = ""
+    rack_no: Optional[str] = ""
+    box_id: Optional[str] = ""
+    box_no: Optional[str] = ""
+    box_category: Optional[str] = ""
+
+
+class RackingNoteCreate(BaseModel):
+    receipt_note_id: str
+    items: List[RackingNoteItem] = []
+
+
+class RackingNote(BaseModel):
+    id: str
+    rkn_no: str
+    rkn_date: str
+    fy: str
+    serial: int
+    receipt_note_id: str
+    receipt_note_no: str = ""
+    receipt_note_date: str = ""
+    items: List[RackingNoteItem] = []
+    status: str = "DRAFT"  # DRAFT | RECORDED
+    recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
 
@@ -1131,6 +1177,7 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "invoice_no": (payload.invoice_no or "").strip(),
             "invoice_date": (payload.invoice_date or "").strip(),
             "items": [it.model_dump() for it in payload.items],
+            "status": "RACKING_PENDING",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
         }
@@ -1150,11 +1197,15 @@ async def list_receipt_notes(
     response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    total = await db.receipt_notes.count_documents({})
+    query = {}
+    if status:
+        query["status"] = status.upper()
+    total = await db.receipt_notes.count_documents(query)
     skip = (page - 1) * page_size
-    rows = await db.receipt_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    rows = await db.receipt_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1175,6 +1226,8 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     existing = await db.receipt_notes.find_one({"id": rn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
+    if existing.get("status") == "RACKED":
+        raise HTTPException(status_code=409, detail="Cannot edit — this receipt note has already been racked. Delete the linked racking note first.")
     if not payload.items or len(payload.items) == 0:
         raise HTTPException(status_code=400, detail="At least one item is required")
     for idx, it in enumerate(payload.items, start=1):
@@ -1197,10 +1250,272 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
 
 @api_router.delete("/receipt-notes/{rn_id}")
 async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
-    res = await db.receipt_notes.delete_one({"id": rn_id})
-    if res.deleted_count == 0:
+    existing = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
+    if existing.get("status") == "RACKED":
+        raise HTTPException(status_code=409, detail="Cannot delete — this receipt note has already been racked. Delete the linked racking note first.")
+    # Block delete if any racking note (DRAFT or RECORDED) references it
+    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
+        raise HTTPException(status_code=409, detail="Cannot delete — a racking note has been created against this receipt note. Delete the racking note first.")
+    await db.receipt_notes.delete_one({"id": rn_id})
     return {"ok": True}
+
+
+# -------------------- RACKING NOTES --------------------
+@api_router.get("/racking-notes/next-no")
+async def next_racking_note_no(user=Depends(get_current_user)):
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    last = await db.racking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    next_serial = (last[0]["serial"] if last else 0) + 1
+    return {
+        "fy": fy,
+        "next_serial": next_serial,
+        "next_rkn_no": f"RKN/{fy}/{next_serial:03d}",
+        "rkn_date": today.date().isoformat(),
+    }
+
+
+@api_router.get("/racking-notes/prepare/{rn_id}")
+async def prepare_racking_note(rn_id: str, user=Depends(get_current_user)):
+    """Given a receipt-note id, return prefilled items (master fields + existing locations from balance)."""
+    rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if not rn:
+        raise HTTPException(status_code=404, detail="Receipt note not found")
+    if rn.get("status") == "RACKED":
+        raise HTTPException(status_code=409, detail="This receipt note is already racked")
+
+    items_out = []
+    for it in rn.get("items", []):
+        part_no = it.get("part_no", "")
+        make = it.get("make", "")
+        master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+        # Existing locations with positive qty
+        pipeline = [
+            {"$match": {"part_no": part_no, "make": make}},
+            {"$group": {
+                "_id": {
+                    "godown_id": "$godown_id", "godown_name": "$godown_name",
+                    "rack_id": "$rack_id", "rack_no": "$rack_no",
+                    "box_id": "$box_id", "box_no": "$box_no", "box_category": "$box_category",
+                },
+                "quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+            }},
+            {"$match": {"quantity": {"$gt": 0}}},
+            {"$sort": {"_id.godown_name": 1, "_id.rack_no": 1, "_id.box_no": 1}},
+        ]
+        raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
+        existing_locations = [{**r["_id"], "current_qty": r["quantity"]} for r in raw_locs]
+
+        # Pre-fill location: if exactly 1 existing, use it; else leave blank
+        prefill = existing_locations[0] if len(existing_locations) == 1 else None
+
+        items_out.append({
+            "part_no": part_no,
+            "make": make,
+            "quantity": it.get("quantity", 0),
+            "model": master.get("model", ""),
+            "old_part_no": master.get("old_part_no", ""),
+            "make_part_no": master.get("make_part_no", ""),
+            "description_1": master.get("description_1", ""),
+            "description_2": master.get("description_2", ""),
+            "remarks_oem": master.get("remarks_oem", ""),
+            "remarks_others": master.get("remarks_others", ""),
+            "item_category": master.get("item_category", ""),
+            "godown_id": prefill["godown_id"] if prefill else "",
+            "godown_name": prefill["godown_name"] if prefill else "",
+            "rack_id": prefill["rack_id"] if prefill else "",
+            "rack_no": prefill["rack_no"] if prefill else "",
+            "box_id": prefill["box_id"] if prefill else "",
+            "box_no": prefill["box_no"] if prefill else "",
+            "box_category": prefill.get("box_category", "") if prefill else "",
+            "existing_locations": existing_locations,  # informational; UI shows as chips
+        })
+
+    return {
+        "receipt_note": {
+            "id": rn["id"], "rn_no": rn["rn_no"], "rn_date": rn["rn_date"],
+            "invoice_no": rn.get("invoice_no", ""), "invoice_date": rn.get("invoice_date", ""),
+        },
+        "items": items_out,
+    }
+
+
+def _validate_racking_items(items):
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        if it.quantity is None or it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
+        if not (it.godown_id or "").strip() or not (it.rack_id or "").strip() or not (it.box_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack/Box are required")
+
+
+@api_router.post("/racking-notes", response_model=RackingNote)
+async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_current_user)):
+    rn = await db.receipt_notes.find_one({"id": payload.receipt_note_id}, {"_id": 0})
+    if not rn:
+        raise HTTPException(status_code=400, detail="Receipt note not found")
+    if rn.get("status") == "RACKED":
+        raise HTTPException(status_code=409, detail="This receipt note is already racked")
+    # Block creating a second draft against the same receipt note
+    if await db.racking_notes.find_one({"receipt_note_id": payload.receipt_note_id}):
+        raise HTTPException(status_code=409, detail="A racking note already exists for this receipt note")
+    _validate_racking_items(payload.items)
+
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    from pymongo.errors import DuplicateKeyError
+    last_err = None
+    for _ in range(5):
+        last = await db.racking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+        serial = (last[0]["serial"] if last else 0) + 1
+        rkn_no = f"RKN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "rkn_no": rkn_no,
+            "rkn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "receipt_note_id": rn["id"],
+            "receipt_note_no": rn["rn_no"],
+            "receipt_note_date": rn["rn_date"],
+            "items": [it.model_dump() for it in payload.items],
+            "status": "DRAFT",
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+        }
+        try:
+            await db.racking_notes.insert_one(doc)
+            doc.pop("_id", None)
+            return doc
+        except DuplicateKeyError as e:
+            last_err = e
+            continue
+    raise HTTPException(status_code=500, detail=f"Could not allocate racking-note number: {last_err}")
+
+
+@api_router.get("/racking-notes")
+async def list_racking_notes(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    user=Depends(get_current_user),
+):
+    total = await db.racking_notes.count_documents({})
+    skip = (page - 1) * page_size
+    rows = await db.racking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/racking-notes/{rkn_id}")
+async def get_racking_note(rkn_id: str, user=Depends(get_current_user)):
+    doc = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Racking note not found")
+    return doc
+
+
+@api_router.put("/racking-notes/{rkn_id}", response_model=RackingNote)
+async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depends(get_current_user)):
+    existing = await db.racking_notes.find_one({"id": rkn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Racking note not found")
+    if existing.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Cannot edit — this racking note has already been recorded as Stock In")
+    _validate_racking_items(payload.items)
+    update = {
+        "items": [it.model_dump() for it in payload.items],
+        "updated_at": now_iso(),
+    }
+    await db.racking_notes.update_one({"id": rkn_id}, {"$set": update})
+    doc = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
+    return doc
+
+
+@api_router.delete("/racking-notes/{rkn_id}")
+async def delete_racking_note(rkn_id: str, user=Depends(get_current_user)):
+    existing = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Racking note not found")
+    if existing.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock In")
+    await db.racking_notes.delete_one({"id": rkn_id})
+    return {"ok": True}
+
+
+@api_router.post("/racking-notes/{rkn_id}/record")
+async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
+    rkn = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
+    if not rkn:
+        raise HTTPException(status_code=404, detail="Racking note not found")
+    if rkn.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Already recorded")
+    items = rkn.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="No items to record")
+    # Validate every item has a complete location & qty (defence in depth)
+    for idx, it in enumerate(items, start=1):
+        if not it.get("godown_id") or not it.get("rack_id") or not it.get("box_id"):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: location missing — edit racking note before recording")
+        if (it.get("quantity") or 0) <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: quantity must be > 0")
+
+    # Build & insert one IN transaction per item
+    now = now_iso()
+    tx_docs = []
+    for it in items:
+        master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
+        tx_docs.append({
+            "id": str(uuid.uuid4()),
+            "type": "IN",
+            "part_no": it["part_no"],
+            "make": it["make"],
+            "model": master.get("model", it.get("model", "")),
+            "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
+            "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
+            "description_1": master.get("description_1", it.get("description_1", "")),
+            "description_2": master.get("description_2", it.get("description_2", "")),
+            "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
+            "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
+            "item_category": master.get("item_category", it.get("item_category", "")),
+            "image": master.get("image", ""),
+            "quantity": it["quantity"],
+            "godown_id": it["godown_id"],
+            "godown_name": it.get("godown_name", ""),
+            "rack_id": it["rack_id"],
+            "rack_no": it.get("rack_no", ""),
+            "box_id": it["box_id"],
+            "box_no": it.get("box_no", ""),
+            "box_category": it.get("box_category", ""),
+            "racking_note_id": rkn["id"],
+            "racking_note_no": rkn["rkn_no"],
+            "receipt_note_id": rkn.get("receipt_note_id", ""),
+            "receipt_note_no": rkn.get("receipt_note_no", ""),
+            "created_at": now,
+            "created_by": user.get("email"),
+        })
+    if tx_docs:
+        await db.transactions.insert_many(tx_docs)
+    await db.racking_notes.update_one(
+        {"id": rkn_id},
+        {"$set": {"status": "RECORDED", "recorded_at": now}},
+    )
+    if rkn.get("receipt_note_id"):
+        await db.receipt_notes.update_one(
+            {"id": rkn["receipt_note_id"]},
+            {"$set": {"status": "RACKED", "racked_at": now}},
+        )
+    return {"ok": True, "transactions_created": len(tx_docs)}
 
 
 # -------------------- STOCK BALANCE --------------------
@@ -1370,6 +1685,14 @@ async def startup():
     await db.receipt_notes.create_index("id", unique=True)
     await db.receipt_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
     await db.receipt_notes.create_index("created_at")
+    await db.receipt_notes.create_index("status")
+    await db.racking_notes.create_index("id", unique=True)
+    await db.racking_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.racking_notes.create_index("created_at")
+    await db.racking_notes.create_index("status")
+    await db.racking_notes.create_index("receipt_note_id")
+    # Backfill: ensure every existing receipt note has a status
+    await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_PENDING"}})
 
     # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others
     cursor = db.stock_master.find({"$or": [{"oem": {"$exists": True}}, {"remarks": {"$exists": True}}]})

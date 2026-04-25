@@ -13,8 +13,9 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil,
+  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, Stack,
 } from "@phosphor-icons/react";
+import RackingNoteTab from "./RackingNoteTab";
 
 /* ==============================================================
    STOCK IN  ·  Receipt Note tab
@@ -42,11 +43,17 @@ export default function StockInPage() {
           <TabsTrigger value="receipt-note" className="rounded-sm" data-testid="tab-receipt-note">
             <FileText size={14} weight="bold" className="mr-2" /> Receipt Note
           </TabsTrigger>
+          <TabsTrigger value="racking-note" className="rounded-sm" data-testid="tab-racking-note">
+            <Stack size={14} weight="bold" className="mr-2" /> Racking Note
+          </TabsTrigger>
           {/* future tabs go here */}
         </TabsList>
 
         <TabsContent value="receipt-note">
           <ReceiptNoteTab />
+        </TabsContent>
+        <TabsContent value="racking-note">
+          <RackingNoteTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -147,12 +154,14 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               <th>INVOICE NO</th>
               <th className="text-right">ITEMS</th>
               <th className="text-right">TOTAL QUANTITY</th>
+              <th>STATUS</th>
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+              const isRacked = r.status === "RACKED";
               return (
                 <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
                   <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
@@ -170,20 +179,28 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td>
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${isRacked ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
+                      data-testid={`rn-status-${r.rn_no}`}>
+                      {isRacked ? "Racked" : "Racking Pending"}
+                    </span>
+                  </td>
                   <td className="text-right whitespace-nowrap">
                     <button
                       onClick={() => onEdit(r)}
-                      className="p-1.5 hover:bg-slate-100 rounded-sm mr-1"
+                      disabled={isRacked}
+                      title={isRacked ? "Cannot edit — already racked" : "Edit"}
+                      className={`p-1.5 rounded-sm mr-1 ${isRacked ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`rn-edit-${r.rn_no}`}
-                      title="Edit"
                     >
                       <Pencil size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(r)}
-                      className="p-1.5 hover:bg-red-50 text-red-700 rounded-sm"
+                      disabled={isRacked}
+                      title={isRacked ? "Cannot delete — already racked" : "Delete"}
+                      className={`p-1.5 rounded-sm ${isRacked ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`rn-delete-${r.rn_no}`}
-                      title="Delete"
                     >
                       <Trash size={14} />
                     </button>
@@ -192,7 +209,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               );
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
