@@ -18,13 +18,17 @@ import {
 import { toast } from "sonner";
 import {
   Users, ArrowsClockwise, Plus, PencilSimple, Power, LockKey, ShieldCheck, ShieldWarning,
+  DownloadSimple,
 } from "@phosphor-icons/react";
+import { exportToExcel } from "../lib/exportExcel";
+import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
 
 const MODULE_LABELS = {
   stock_master: "Stock Master",
   locations: "Location Master",
   stock_in: "Stock In",
   stock_out: "Stock Out",
+  stock_transfer: "Stock Transfer",
   stock_summary: "Stock Summary",
   low_stock: "Low Stock",
   transactions: "Transactions",
@@ -168,6 +172,22 @@ export default function UsersPage() {
     setForm((f) => ({ ...f, module_access: Object.fromEntries(MODULE_KEYS.map((k) => [k, next])) }));
   };
 
+  // ---- Excel-style filter / sort ----
+  const userColumns = useMemo(() => [
+    { key: "name", label: "Name", value: (u) => u.name || "" },
+    { key: "email", label: "Email", value: (u) => u.email || "" },
+    { key: "role", label: "Role", value: (u) => u.role || "" },
+    { key: "status", label: "Status", value: (u) => u.is_active === false ? "Deactivated" : (isLocked(u) ? "Locked" : "Active") },
+    { key: "modules", label: "Modules", value: (u) => u.role === "admin" ? "All (admin)" : `${MODULE_KEYS.filter((k) => (u.module_access || {})[k] !== false).length} / ${MODULE_KEYS.length}` },
+    { key: "last_login", label: "Last Login", value: (u) => fmtDate(u.last_login) },
+  ], []);
+  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, userColumns);
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+    exportToExcel(filteredRows, userColumns, `Users_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div className="p-8 max-w-[1400px] mx-auto" data-testid="users-page">
       <div className="mb-6 flex items-end justify-between gap-4">
@@ -184,6 +204,10 @@ export default function UsersPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="users-export-button">
+            <DownloadSimple size={14} weight="bold" className="mr-2" />
+            Export to Excel
+          </Button>
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="users-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
             Refresh
@@ -195,23 +219,23 @@ export default function UsersPage() {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th>Modules</th>
-              <th>Last Login</th>
+              <ColumnHeader {...getColumnHeaderProps("name")} label="Name" testid="users-col-name" />
+              <ColumnHeader {...getColumnHeaderProps("email")} label="Email" testid="users-col-email" />
+              <ColumnHeader {...getColumnHeaderProps("role")} label="Role" testid="users-col-role" />
+              <ColumnHeader {...getColumnHeaderProps("status")} label="Status" testid="users-col-status" />
+              <ColumnHeader {...getColumnHeaderProps("modules")} label="Modules" testid="users-col-modules" />
+              <ColumnHeader {...getColumnHeaderProps("last_login")} label="Last Login" testid="users-col-last-login" />
               <th className="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-12 text-slate-500">No users found.</td></tr>
-            ) : rows.map((u) => {
+            {filteredRows.length === 0 ? (
+              <tr><td colSpan={7} className="text-center py-12 text-slate-500">{rows.length === 0 ? "No users found." : "No users match the current filters."}</td></tr>
+            ) : filteredRows.map((u) => {
               const locked = isLocked(u);
               const moduleCount = u.role === "admin"
                 ? MODULE_KEYS.length
