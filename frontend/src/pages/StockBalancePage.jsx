@@ -2,10 +2,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
-import {
-  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
-} from "../components/ui/select";
-import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X } from "@phosphor-icons/react";
+import { Checkbox } from "../components/ui/checkbox";
+import { Popover, PopoverTrigger, PopoverContent } from "../components/ui/popover";
+import { ScrollArea } from "../components/ui/scroll-area";
+import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X, CaretDown } from "@phosphor-icons/react";
 
 const COLUMNS = [
   { key: "model", label: "MODEL", className: "font-mono text-slate-700" },
@@ -26,11 +26,14 @@ const COLUMNS = [
   { key: "total_quantity", label: "QTY", className: "text-right font-mono font-bold", isQty: true },
 ];
 
+const BLANK = "(Blank)";
+
 export default function StockBalancePage() {
   const [rows, setRows] = useState([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
-  const [colFilters, setColFilters] = useState({}); // { key: "value" }
+  // colFilters: { [colKey]: Set<string of allowed values> }
+  const [colFilters, setColFilters] = useState({});
 
   const load = async (q) => {
     setLoading(true);
@@ -45,27 +48,57 @@ export default function StockBalancePage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  const setFilter = (key, val) => setColFilters((f) => {
-    const next = { ...f };
-    if (!val) delete next[key];
-    else next[key] = val;
-    return next;
-  });
+  // Build a map of unique values per column from the currently loaded rows
+  const uniqueValues = useMemo(() => {
+    const map = {};
+    COLUMNS.forEach((c) => {
+      if (c.isImage) {
+        map[c.key] = ["Has image", "No image"];
+      } else {
+        const seen = new Set();
+        rows.forEach((r) => {
+          const raw = r[c.key];
+          const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+          seen.add(v);
+        });
+        map[c.key] = [...seen].sort((a, b) => {
+          if (a === BLANK) return 1;
+          if (b === BLANK) return -1;
+          // numeric sort if both look like numbers
+          const na = Number(a), nb = Number(b);
+          if (!isNaN(na) && !isNaN(nb)) return na - nb;
+          return a.localeCompare(b);
+        });
+      }
+    });
+    return map;
+  }, [rows]);
 
   const filteredRows = useMemo(() => {
     const activeKeys = Object.keys(colFilters);
     if (activeKeys.length === 0) return rows;
     return rows.filter((row) => activeKeys.every((k) => {
-      const v = colFilters[k];
-      if (k === "image") {
-        if (v === "yes") return !!row.image;
-        if (v === "no") return !row.image;
-        return true;
+      const allowed = colFilters[k];
+      if (!allowed || allowed.size === 0) return true;
+      const col = COLUMNS.find((c) => c.key === k);
+      if (col?.isImage) {
+        const tag = row.image ? "Has image" : "No image";
+        return allowed.has(tag);
       }
-      const cell = String(row[k] ?? "").toLowerCase();
-      return cell.includes(v.toLowerCase());
+      const raw = row[k];
+      const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+      return allowed.has(v);
     }));
   }, [rows, colFilters]);
+
+  const setColFilter = (key, allowedSet) => {
+    setColFilters((f) => {
+      const next = { ...f };
+      if (!allowedSet || allowedSet.size === 0) delete next[key];
+      else next[key] = allowedSet;
+      return next;
+    });
+  };
 
   const activeFilterCount = Object.keys(colFilters).length;
   const dash = <span className="text-slate-300">—</span>;
@@ -99,7 +132,7 @@ export default function StockBalancePage() {
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <FunnelSimple size={14} weight="bold" />
-          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Use the row below the headers to filter any column"}</span>
+          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Click any column header dropdown to filter, like Excel"}</span>
         </div>
         {activeFilterCount > 0 && (
           <Button onClick={() => setColFilters({})} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">
@@ -114,36 +147,15 @@ export default function StockBalancePage() {
             <tr>
               <th className="w-14">SL NO</th>
               {COLUMNS.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>{c.label}</th>
-              ))}
-            </tr>
-            <tr className="bg-slate-50">
-              <th className="w-14 px-2 py-1.5"></th>
-              {COLUMNS.map((c) => (
-                <th key={c.key} className="px-2 py-1.5 font-normal normal-case tracking-normal">
-                  {c.isImage ? (
-                    <Select
-                      value={colFilters[c.key] || "all"}
-                      onValueChange={(v) => setFilter(c.key, v === "all" ? "" : v)}
-                    >
-                      <SelectTrigger className="h-7 rounded-sm text-xs" data-testid={`filter-${c.key}`}>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All</SelectItem>
-                        <SelectItem value="yes">Has image</SelectItem>
-                        <SelectItem value="no">No image</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <Input
-                      value={colFilters[c.key] || ""}
-                      onChange={(e) => setFilter(c.key, e.target.value)}
-                      placeholder="Filter"
-                      className="h-7 rounded-sm text-xs"
-                      data-testid={`filter-${c.key}`}
-                    />
-                  )}
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    isImage={c.isImage}
+                    isQty={c.isQty}
+                  />
                 </th>
               ))}
             </tr>
@@ -197,5 +209,129 @@ export default function StockBalancePage() {
         {activeFilterCount > 0 && " (filtered)"} • Item details and locations are pulled live from Stock Master and Location Master each time you refresh.
       </div>
     </div>
+  );
+}
+
+/* ============================================================ */
+/* Excel-style column header dropdown filter                     */
+/* ============================================================ */
+function ColumnFilter({ label, values, selected, onChange, isImage, isQty }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  // Local working set
+  const [working, setWorking] = useState(null);
+
+  // sync working set when popover opens
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      // If filter is active, working = current selected; if not active, all values are "selected" (default).
+      if (selected && selected.size > 0) setWorking(new Set(selected));
+      else setWorking(new Set(values));
+    }
+  }, [open, selected, values]);
+
+  const filteredValues = useMemo(() => {
+    if (!query) return values;
+    const q = query.toLowerCase();
+    return values.filter((v) => String(v).toLowerCase().includes(q));
+  }, [values, query]);
+
+  const allInViewSelected = working && filteredValues.every((v) => working.has(v));
+  const noneInViewSelected = working && filteredValues.every((v) => !working.has(v));
+
+  const toggle = (v) => {
+    setWorking((w) => {
+      const next = new Set(w);
+      if (next.has(v)) next.delete(v); else next.add(v);
+      return next;
+    });
+  };
+  const toggleAllInView = () => {
+    setWorking((w) => {
+      const next = new Set(w);
+      if (allInViewSelected) filteredValues.forEach((v) => next.delete(v));
+      else filteredValues.forEach((v) => next.add(v));
+      return next;
+    });
+  };
+
+  const apply = () => {
+    if (!working) return;
+    // If user has all values selected → no filter
+    if (working.size === values.length) onChange(null);
+    else onChange(working);
+    setOpen(false);
+  };
+
+  const clear = () => {
+    setWorking(new Set(values));
+    onChange(null);
+    setOpen(false);
+  };
+
+  const isActive = !!(selected && selected.size > 0);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          className={`group flex items-center gap-1 ${isQty ? "ml-auto" : ""} ${isActive ? "text-blue-700" : "text-slate-500 hover:text-slate-900"}`}
+          data-testid={`filter-trigger-${label.toLowerCase().replace(/\s+/g, "-")}`}
+        >
+          <span className="font-bold tracking-[0.15em]">{label}</span>
+          <CaretDown size={10} weight="bold" className={`opacity-60 group-hover:opacity-100 ${isActive ? "opacity-100" : ""}`} />
+          {isActive && <span className="ml-1 text-[9px] bg-blue-100 text-blue-800 px-1 rounded-sm font-mono">{selected.size}</span>}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-64 p-0 rounded-sm" align="start">
+        <div className="p-2 border-b border-slate-200">
+          <Input
+            placeholder="Search values…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-8 rounded-sm text-xs"
+            autoFocus
+            data-testid="filter-search-input"
+          />
+        </div>
+        <div className="px-2 py-1 border-b border-slate-200 bg-slate-50 flex items-center gap-2">
+          <Checkbox
+            checked={allInViewSelected}
+            data-state={allInViewSelected ? "checked" : (noneInViewSelected ? "unchecked" : "indeterminate")}
+            onCheckedChange={toggleAllInView}
+            data-testid="filter-select-all"
+          />
+          <span className="text-[11px] text-slate-600 font-semibold">
+            {allInViewSelected ? "Deselect all" : "Select all"}
+            {query && filteredValues.length !== values.length && ` (${filteredValues.length})`}
+          </span>
+        </div>
+        <ScrollArea className="h-56">
+          <ul className="py-1">
+            {filteredValues.length === 0 && (
+              <li className="px-3 py-2 text-xs text-slate-400">No values match.</li>
+            )}
+            {filteredValues.map((v) => (
+              <li key={v} className="px-3 py-1.5 flex items-center gap-2 hover:bg-slate-50 cursor-pointer" onClick={() => toggle(v)}>
+                <Checkbox
+                  checked={working?.has(v) ?? false}
+                  onCheckedChange={() => toggle(v)}
+                  onClick={(e) => e.stopPropagation()}
+                  data-testid={`filter-value-${v}`}
+                />
+                <span className={`text-xs font-mono truncate ${v === BLANK ? "italic text-slate-500" : "text-slate-800"}`}>
+                  {v}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </ScrollArea>
+        <div className="p-2 border-t border-slate-200 flex gap-2">
+          <Button onClick={clear} variant="ghost" size="sm" className="rounded-sm h-7 text-xs flex-1" data-testid="filter-clear">Clear</Button>
+          <Button onClick={apply} size="sm" className="rounded-sm h-7 text-xs flex-1 bg-blue-700 hover:bg-blue-800" data-testid="filter-apply">Apply</Button>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
