@@ -1,13 +1,36 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
-import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon } from "@phosphor-icons/react";
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from "../components/ui/select";
+import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X } from "@phosphor-icons/react";
+
+const COLUMNS = [
+  { key: "model", label: "MODEL", className: "font-mono text-slate-700" },
+  { key: "part_no", label: "PART NO", className: "font-mono font-semibold" },
+  { key: "old_part_no", label: "OLD PART NO", className: "font-mono text-slate-600" },
+  { key: "make_part_no", label: "MAKE PART NO", className: "font-mono text-slate-600" },
+  { key: "description_1", label: "DESCRIPTION 1", className: "text-slate-700 max-w-[180px] truncate" },
+  { key: "description_2", label: "DESCRIPTION 2", className: "text-slate-700 max-w-[180px] truncate" },
+  { key: "remarks_oem", label: "REMARKS OEM", className: "text-slate-600 max-w-[160px] truncate" },
+  { key: "remarks_others", label: "REMARKS OTHERS", className: "text-slate-600 max-w-[160px] truncate" },
+  { key: "make", label: "MAKE", className: "" },
+  { key: "item_category", label: "ITEM CATEGORY", className: "" },
+  { key: "image", label: "IMAGE", className: "", isImage: true },
+  { key: "godown_name", label: "GODOWN", className: "" },
+  { key: "rack_no", label: "RACK NO", className: "font-mono" },
+  { key: "box_no", label: "BOX NO", className: "font-mono" },
+  { key: "box_category", label: "BOX CATEGORY", className: "" },
+  { key: "total_quantity", label: "QTY", className: "text-right font-mono font-bold", isQty: true },
+];
 
 export default function StockBalancePage() {
   const [rows, setRows] = useState([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
+  const [colFilters, setColFilters] = useState({}); // { key: "value" }
 
   const load = async (q) => {
     setLoading(true);
@@ -17,12 +40,34 @@ export default function StockBalancePage() {
     } finally { setLoading(false); }
   };
 
-  // Debounced search; refetch on every change
   useEffect(() => {
     const t = setTimeout(() => load(search), 250);
     return () => clearTimeout(t);
   }, [search]);
 
+  const setFilter = (key, val) => setColFilters((f) => {
+    const next = { ...f };
+    if (!val) delete next[key];
+    else next[key] = val;
+    return next;
+  });
+
+  const filteredRows = useMemo(() => {
+    const activeKeys = Object.keys(colFilters);
+    if (activeKeys.length === 0) return rows;
+    return rows.filter((row) => activeKeys.every((k) => {
+      const v = colFilters[k];
+      if (k === "image") {
+        if (v === "yes") return !!row.image;
+        if (v === "no") return !row.image;
+        return true;
+      }
+      const cell = String(row[k] ?? "").toLowerCase();
+      return cell.includes(v.toLowerCase());
+    }));
+  }, [rows, colFilters]);
+
+  const activeFilterCount = Object.keys(colFilters).length;
   const dash = <span className="text-slate-300">—</span>;
 
   return (
@@ -35,27 +80,32 @@ export default function StockBalancePage() {
             Live join of Stock Master + Locations + Transactions. Edits in any of those reflect here on next refresh.
           </p>
         </div>
-        <Button
-          onClick={() => load(search)}
-          variant="outline"
-          className="rounded-sm border-slate-300"
-          disabled={loading}
-          data-testid="refresh-button"
-        >
+        <Button onClick={() => load(search)} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
           <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
           Refresh
         </Button>
       </div>
 
-      <div className="relative mb-4 max-w-xl">
-        <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <Input
-          placeholder="Search part no, old part no, make part no, description, remarks, make, category…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-10 rounded-sm"
-          data-testid="balance-search-input"
-        />
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <div className="relative max-w-md flex-1">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            placeholder="Search part no, descriptions, remarks, category…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-10 rounded-sm"
+            data-testid="balance-search-input"
+          />
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <FunnelSimple size={14} weight="bold" />
+          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Use the row below the headers to filter any column"}</span>
+        </div>
+        {activeFilterCount > 0 && (
+          <Button onClick={() => setColFilters({})} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">
+            <X size={12} weight="bold" className="mr-1" /> Clear filters
+          </Button>
+        )}
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
@@ -63,60 +113,79 @@ export default function StockBalancePage() {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>MODEL</th>
-              <th>PART NO</th>
-              <th>OLD PART NO</th>
-              <th>MAKE PART NO</th>
-              <th>DESCRIPTION 1</th>
-              <th>DESCRIPTION 2</th>
-              <th>REMARKS OEM</th>
-              <th>REMARKS OTHERS</th>
-              <th>MAKE</th>
-              <th>ITEM CATEGORY</th>
-              <th>IMAGE</th>
-              <th>GODOWN</th>
-              <th>RACK NO</th>
-              <th>BOX NO</th>
-              <th>BOX CATEGORY</th>
-              <th className="text-right">QTY</th>
+              {COLUMNS.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>{c.label}</th>
+              ))}
+            </tr>
+            <tr className="bg-slate-50">
+              <th className="w-14 px-2 py-1.5"></th>
+              {COLUMNS.map((c) => (
+                <th key={c.key} className="px-2 py-1.5 font-normal normal-case tracking-normal">
+                  {c.isImage ? (
+                    <Select
+                      value={colFilters[c.key] || "all"}
+                      onValueChange={(v) => setFilter(c.key, v === "all" ? "" : v)}
+                    >
+                      <SelectTrigger className="h-7 rounded-sm text-xs" data-testid={`filter-${c.key}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All</SelectItem>
+                        <SelectItem value="yes">Has image</SelectItem>
+                        <SelectItem value="no">No image</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      value={colFilters[c.key] || ""}
+                      onChange={(e) => setFilter(c.key, e.target.value)}
+                      placeholder="Filter"
+                      className="h-7 rounded-sm text-xs"
+                      data-testid={`filter-${c.key}`}
+                    />
+                  )}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {filteredRows.length === 0 ? (
               <tr>
-                <td colSpan={17} className="text-center py-12 text-slate-500">
-                  {loading ? "Loading…" : (search ? "No matches." : "No stock recorded yet.")}
+                <td colSpan={COLUMNS.length + 1} className="text-center py-12 text-slate-500">
+                  {loading ? "Loading…" : (search || activeFilterCount > 0 ? "No matches." : "No stock recorded yet.")}
                 </td>
               </tr>
-            ) : rows.map((r, i) => (
+            ) : filteredRows.map((r, i) => (
               <tr key={`${r.part_no}|${r.make}|${r.box_id || i}`} data-testid={`balance-row-${i}`}>
                 <td className="font-mono text-slate-500">{i + 1}</td>
-                <td className="font-mono text-slate-700">{r.model || dash}</td>
-                <td className="font-mono font-semibold">{r.part_no}</td>
-                <td className="font-mono text-slate-600">{r.old_part_no || dash}</td>
-                <td className="font-mono text-slate-600">{r.make_part_no || dash}</td>
-                <td className="text-slate-700 max-w-[180px] truncate">{r.description_1 || dash}</td>
-                <td className="text-slate-700 max-w-[180px] truncate">{r.description_2 || dash}</td>
-                <td className="text-slate-600 max-w-[160px] truncate">{r.remarks_oem || dash}</td>
-                <td className="text-slate-600 max-w-[160px] truncate">{r.remarks_others || dash}</td>
-                <td>{r.make}</td>
-                <td>{r.item_category || dash}</td>
-                <td>
-                  {r.image ? (
-                    <img src={r.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
-                  ) : (
-                    <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400">
-                      <ImgIcon size={14} />
-                    </div>
-                  )}
-                </td>
-                <td>{r.godown_name || dash}</td>
-                <td className="font-mono">{r.rack_no || dash}</td>
-                <td className="font-mono">{r.box_no || dash}</td>
-                <td>{r.box_category || dash}</td>
-                <td className={`text-right font-mono font-bold ${r.total_quantity <= 5 ? "text-red-700" : "text-slate-900"}`}>
-                  {r.total_quantity}
-                </td>
+                {COLUMNS.map((c) => {
+                  if (c.isImage) {
+                    return (
+                      <td key={c.key}>
+                        {r.image ? (
+                          <img src={r.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
+                        ) : (
+                          <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400">
+                            <ImgIcon size={14} />
+                          </div>
+                        )}
+                      </td>
+                    );
+                  }
+                  if (c.isQty) {
+                    return (
+                      <td key={c.key} className={`text-right font-mono font-bold ${r.total_quantity <= 5 ? "text-red-700" : "text-slate-900"}`}>
+                        {r.total_quantity}
+                      </td>
+                    );
+                  }
+                  const val = r[c.key];
+                  return (
+                    <td key={c.key} className={c.className}>
+                      {val || val === 0 ? val : dash}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -124,7 +193,8 @@ export default function StockBalancePage() {
       </div>
 
       <div className="mt-4 text-xs text-slate-500">
-        {rows.length} row{rows.length === 1 ? "" : "s"} • Item details (model, descriptions, remarks, image, category) and location names are pulled live from Stock Master and Location Master each time you refresh.
+        {filteredRows.length} of {rows.length} row{rows.length === 1 ? "" : "s"}
+        {activeFilterCount > 0 && " (filtered)"} • Item details and locations are pulled live from Stock Master and Location Master each time you refresh.
       </div>
     </div>
   );
