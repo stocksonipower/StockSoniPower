@@ -121,5 +121,13 @@ Build a warehouse stock management system with:
 - **Low Stock**: removed Shortage and Category columns; added Sl No (auto), Model, Description 1, Description 2, Make
 - **Transactions**: split Date/Time, added Document No clickable column → opens `<DocumentDetailDialog>` (fetches racking-note / picking-note / transfer-note by id and renders body), pagination at 500/page, includes Stock In and Stock Out sub-tabs
 
+## UI Improvements Across Tabs (2026-04-25, COMPLETE — iteration_15.json 100% pass)
+- **Users**: added "Sl No" first column; renamed "Export to Excel" → "Export"
+- **Low Stock**: renamed "Export to Excel" → "Export"
+- **Transactions**: added "Sl No" first column to All / Stock In / Stock Out sub-tabs; renamed Export
+- **Stock Summary**: per-column sort (asc/desc) added inline alongside the existing filter popover (single trigger now offers Sort A→Z / Z→A, or Smallest→Largest / Largest→Smallest for numeric columns); sticky **TOTALS row at TOP** of `<tbody>` showing live sum of REORDER LEVEL + QTY based on currently filtered rows (data-testid `totals-row`, `totals-{key}`)
+- **Stock In / Stock Out / Stock Transfer list pages** (Receipt Note, Racking Note, Issue Note, Picking Note, Transfer Request, Transfer Note): each refactored to use `useTableSortFilter` + `<ColumnHeader>` for per-column Excel-style sort+filter (excluding the static SL NO column and Actions); each list now has new `Export` and `Refresh` buttons next to the Create CTA. Export downloads `.xlsx` of currently visible (filtered+sorted) rows including a "Sl No" column. Refresh re-fetches from `/api/<resource>` without a full page reload.
+- Files touched: `UsersPage.jsx`, `LowStockPage.jsx`, `TransactionsPage.jsx`, `StockBalancePage.jsx`, `StockInPage.jsx`, `RackingNoteTab.jsx`, `StockOutPage.jsx`, `StockTransferPage.jsx`
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
