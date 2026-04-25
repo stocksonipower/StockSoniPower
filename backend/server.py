@@ -1352,8 +1352,14 @@ def _validate_racking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
         if it.quantity is None or it.quantity <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
-        if not (it.godown_id or "").strip() or not (it.rack_id or "").strip() or not (it.box_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack/Box are required")
+        if not (it.godown_id or "").strip() or not (it.rack_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
+        # box_id is required only when the rack actually has boxes
+
+
+async def _box_id_required_for_rack(rack_id: str) -> bool:
+    """A box must be picked only if the selected rack has at least one box defined."""
+    return await db.boxes.count_documents({"rack_id": rack_id}) > 0
 
 
 @api_router.post("/racking-notes", response_model=RackingNote)
@@ -1367,6 +1373,10 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_curre
     if await db.racking_notes.find_one({"receipt_note_id": payload.receipt_note_id}):
         raise HTTPException(status_code=409, detail="A racking note already exists for this receipt note")
     _validate_racking_items(payload.items)
+    # Per-row: box_id required only if the chosen rack has boxes
+    for idx, it in enumerate(payload.items, start=1):
+        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
 
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
@@ -1433,6 +1443,9 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot edit — this racking note has already been recorded as Stock In")
     _validate_racking_items(payload.items)
+    for idx, it in enumerate(payload.items, start=1):
+        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
     update = {
         "items": [it.model_dump() for it in payload.items],
         "updated_at": now_iso(),
@@ -1465,8 +1478,10 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="No items to record")
     # Validate every item has a complete location & qty (defence in depth)
     for idx, it in enumerate(items, start=1):
-        if not it.get("godown_id") or not it.get("rack_id") or not it.get("box_id"):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: location missing — edit racking note before recording")
+        if not it.get("godown_id") or not it.get("rack_id"):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing — edit racking note before recording")
+        if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing — edit racking note before recording")
         if (it.get("quantity") or 0) <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: quantity must be > 0")
 

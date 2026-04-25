@@ -392,8 +392,13 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     if (items.length === 0) { toast.error("No items to rack"); return; }
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it.godown_id || !it.rack_id || !it.box_id) {
-        toast.error(`Row ${i + 1}: pick Godown / Rack / Box`); return;
+      if (!it.godown_id || !it.rack_id) {
+        toast.error(`Row ${i + 1}: pick Godown / Rack`); return;
+      }
+      // Box is required only if the chosen rack has any boxes
+      const hasBoxesForRack = (boxesByRack[it.rack_id] || []).length > 0;
+      if (hasBoxesForRack && !it.box_id) {
+        toast.error(`Row ${i + 1}: pick Box`); return;
       }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
@@ -526,8 +531,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                       </Select>
                     </td>
                     <td>
-                      <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}><SelectValue placeholder="Box" /></SelectTrigger>
+                      <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id || boxes.length === 0}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}>
+                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes — skip" : "Box")} />
+                        </SelectTrigger>
                         <SelectContent>
                           {boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}
                         </SelectContent>
