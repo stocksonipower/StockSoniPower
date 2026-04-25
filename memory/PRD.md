@@ -114,8 +114,12 @@ Build a warehouse stock management system with:
 - **P2**: Barcode/QR generation for scan-based Stock In/Out/Transfer
 - **P2**: Refactor `server.py` (~3500 lines) into routers under `/app/backend/routes/`
 - **P2**: Date-range filters on Transactions
-- **P2**: Add `<DialogDescription>` to Radix DialogContent components to silence a11y warnings
 - **P3**: Object storage for images (currently base64)
+
+## Recent UI Work (2026-04-25)
+- **Users / Low Stock / Transactions tabs rebuilt**: Excel-style per-column sort + multi-select filter popover (`useTableSortFilter` hook + `<ColumnHeader>` in `/app/frontend/src/components/DataTable.jsx`); Export to Excel via `xlsx` package
+- **Low Stock**: removed Shortage and Category columns; added Sl No (auto), Model, Description 1, Description 2, Make
+- **Transactions**: split Date/Time, added Document No clickable column → opens `<DocumentDetailDialog>` (fetches racking-note / picking-note / transfer-note by id and renders body), pagination at 500/page, includes Stock In and Stock Out sub-tabs
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.

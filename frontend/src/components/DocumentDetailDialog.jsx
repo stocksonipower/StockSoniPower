@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -39,6 +39,7 @@ export default function DocumentDetailDialog({ kind, id, no, onClose }) {
       <DialogContent className="max-w-7xl rounded-sm" data-testid="doc-detail-dialog">
         <DialogHeader>
           <DialogTitle className="text-2xl font-black font-mono">{title}</DialogTitle>
+          <DialogDescription className="sr-only">Full document details</DialogDescription>
         </DialogHeader>
         {loading && <div className="text-sm text-slate-500 py-6">Loading…</div>}
         {err && <div className="text-sm text-red-700 py-6">{err}</div>}
