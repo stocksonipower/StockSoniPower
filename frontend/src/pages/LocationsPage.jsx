@@ -5,6 +5,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { toast } from "sonner";
+import { Checkbox } from "../components/ui/checkbox";
 import { Plus, Trash, Buildings, Stack, Archive, Pencil, Check, X, UploadSimple, DownloadSimple, ListNumbers } from "@phosphor-icons/react";
 
 export default function LocationsPage() {
@@ -19,6 +20,11 @@ export default function LocationsPage() {
   const [newBox, setNewBox] = useState({ box_no: "", box_category: "" });
 
   const [editing, setEditing] = useState({ kind: null, id: null, data: {} });
+
+  // Multi-select state
+  const [selectedGodownIds, setSelectedGodownIds] = useState(new Set());
+  const [selectedRackIds, setSelectedRackIds] = useState(new Set());
+  const [selectedBoxIds, setSelectedBoxIds] = useState(new Set());
 
   const godownFileRef = useRef(null);
   const rackFileRef = useRef(null);
@@ -98,6 +104,30 @@ export default function LocationsPage() {
   const delRack = async (id) => { if (window.confirm("Delete rack?")) { await api.delete(`/racks/${id}`); loadRacks(selectedGodown); if (selectedRack === id) setSelectedRack(null); } };
   const delBox = async (id) => { if (window.confirm("Delete box?")) { await api.delete(`/boxes/${id}`); loadBoxes(selectedRack); } };
 
+  // ---- Bulk select helpers ----
+  const toggleSet = (set, id) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  };
+  const toggleAll = (set, items) => {
+    if (set.size === items.length && items.length > 0) return new Set();
+    return new Set(items.map((x) => x.id));
+  };
+
+  const bulkDelete = async (kind, ids, reload, clear) => {
+    if (ids.size === 0) return;
+    if (!window.confirm(`Delete ${ids.size} ${kind}(s)? This cannot be undone.`)) return;
+    try {
+      const { data } = await api.post(`/${kind}/bulk-delete`, { ids: [...ids] });
+      toast.success(`Deleted ${data.deleted} ${kind}`);
+      clear(new Set());
+      reload();
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail));
+    }
+  };
+
   // ---- Edit ----
   const startEdit = (kind, item) => {
     if (kind === "godown") setEditing({ kind, id: item.id, data: { godown_name: item.godown_name } });
@@ -132,6 +162,10 @@ export default function LocationsPage() {
 
   const isEditing = (kind, id) => editing.kind === kind && editing.id === id;
 
+  // Reset child selections when parent changes
+  useEffect(() => { setSelectedRackIds(new Set()); setSelectedBoxIds(new Set()); }, [selectedGodown]);
+  useEffect(() => { setSelectedBoxIds(new Set()); }, [selectedRack]);
+
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="location-master-page">
       <div className="mb-8">
@@ -164,16 +198,32 @@ export default function LocationsPage() {
           {godowns.length === 0 ? (
             <EmptyState text="No godowns yet. Add one above." />
           ) : (
-            <ul>
-              {godowns.map((g) => (
-                <li
-                  key={g.id}
-                  className={`px-4 py-2.5 border-b border-slate-100 flex items-center gap-2 group ${
-                    selectedGodown === g.id ? "bg-slate-900 text-white" : "hover:bg-slate-50 text-slate-800"
-                  }`}
-                  data-testid={`godown-item-${g.id}`}
-                >
-                  {isEditing("godown", g.id) ? (
+            <>
+              <SelectAllBar
+                count={selectedGodownIds.size}
+                allChecked={selectedGodownIds.size === godowns.length && godowns.length > 0}
+                someChecked={selectedGodownIds.size > 0 && selectedGodownIds.size < godowns.length}
+                onToggleAll={() => setSelectedGodownIds((s) => toggleAll(s, godowns))}
+                onBulkDelete={() => bulkDelete("godowns", selectedGodownIds, loadGodowns, setSelectedGodownIds)}
+                testidPrefix="godown"
+              />
+              <ul>
+                {godowns.map((g) => (
+                  <li
+                    key={g.id}
+                    className={`px-4 py-2.5 border-b border-slate-100 flex items-center gap-2 group ${
+                      selectedGodown === g.id ? "bg-slate-900 text-white" : "hover:bg-slate-50 text-slate-800"
+                    }`}
+                    data-testid={`godown-item-${g.id}`}
+                  >
+                    <Checkbox
+                      checked={selectedGodownIds.has(g.id)}
+                      onCheckedChange={() => setSelectedGodownIds((s) => toggleSet(s, g.id))}
+                      onClick={(e) => e.stopPropagation()}
+                      className={selectedGodown === g.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
+                      data-testid={`select-godown-${g.id}`}
+                    />
+                    {isEditing("godown", g.id) ? (
                     <>
                       <Input
                         value={editing.data.godown_name}
@@ -201,6 +251,7 @@ export default function LocationsPage() {
                 </li>
               ))}
             </ul>
+            </>
           )}
         </ColumnCard>
 
@@ -230,7 +281,16 @@ export default function LocationsPage() {
           {!selectedGodown ? null : racks.length === 0 ? (
             <EmptyState text="No racks. Add one above." />
           ) : (
-            <ul>
+            <>
+              <SelectAllBar
+                count={selectedRackIds.size}
+                allChecked={selectedRackIds.size === racks.length && racks.length > 0}
+                someChecked={selectedRackIds.size > 0 && selectedRackIds.size < racks.length}
+                onToggleAll={() => setSelectedRackIds((s) => toggleAll(s, racks))}
+                onBulkDelete={() => bulkDelete("racks", selectedRackIds, () => loadRacks(selectedGodown), setSelectedRackIds)}
+                testidPrefix="rack"
+              />
+              <ul>
               {racks.map((r) => (
                 <li
                   key={r.id}
@@ -239,6 +299,13 @@ export default function LocationsPage() {
                   }`}
                   data-testid={`rack-item-${r.id}`}
                 >
+                  <Checkbox
+                    checked={selectedRackIds.has(r.id)}
+                    onCheckedChange={() => setSelectedRackIds((s) => toggleSet(s, r.id))}
+                    onClick={(e) => e.stopPropagation()}
+                    className={selectedRack === r.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
+                    data-testid={`select-rack-${r.id}`}
+                  />
                   {isEditing("rack", r.id) ? (
                     <>
                       <Input
@@ -275,6 +342,7 @@ export default function LocationsPage() {
                 </li>
               ))}
             </ul>
+            </>
           )}
         </ColumnCard>
 
@@ -304,14 +372,29 @@ export default function LocationsPage() {
           {!selectedRack ? null : boxes.length === 0 ? (
             <EmptyState text="No boxes. Add one above." />
           ) : (
-            <ul>
-              {boxes.map((b) => (
-                <li
-                  key={b.id}
-                  className="px-4 py-2.5 border-b border-slate-100 flex items-center gap-2 group hover:bg-slate-50 text-slate-800"
-                  data-testid={`box-item-${b.id}`}
-                >
-                  {isEditing("box", b.id) ? (
+            <>
+              <SelectAllBar
+                count={selectedBoxIds.size}
+                allChecked={selectedBoxIds.size === boxes.length && boxes.length > 0}
+                someChecked={selectedBoxIds.size > 0 && selectedBoxIds.size < boxes.length}
+                onToggleAll={() => setSelectedBoxIds((s) => toggleAll(s, boxes))}
+                onBulkDelete={() => bulkDelete("boxes", selectedBoxIds, () => loadBoxes(selectedRack), setSelectedBoxIds)}
+                testidPrefix="box"
+              />
+              <ul>
+                {boxes.map((b) => (
+                  <li
+                    key={b.id}
+                    className="px-4 py-2.5 border-b border-slate-100 flex items-center gap-2 group hover:bg-slate-50 text-slate-800"
+                    data-testid={`box-item-${b.id}`}
+                  >
+                    <Checkbox
+                      checked={selectedBoxIds.has(b.id)}
+                      onCheckedChange={() => setSelectedBoxIds((s) => toggleSet(s, b.id))}
+                      onClick={(e) => e.stopPropagation()}
+                      data-testid={`select-box-${b.id}`}
+                    />
+                    {isEditing("box", b.id) ? (
                     <>
                       <Input
                         value={editing.data.box_no}
@@ -346,6 +429,7 @@ export default function LocationsPage() {
                 </li>
               ))}
             </ul>
+            </>
           )}
         </ColumnCard>
       </div>
@@ -547,6 +631,31 @@ function ToolbarBtn({ onClick, icon: Icon, label, testid }) {
 
 function EmptyState({ text }) {
   return <div className="p-8 text-center text-sm text-slate-400">{text}</div>;
+}
+
+function SelectAllBar({ count, allChecked, someChecked, onToggleAll, onBulkDelete, testidPrefix }) {
+  return (
+    <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex items-center gap-2 sticky top-0 z-10">
+      <Checkbox
+        checked={allChecked}
+        data-state={allChecked ? "checked" : someChecked ? "indeterminate" : "unchecked"}
+        onCheckedChange={onToggleAll}
+        data-testid={`select-all-${testidPrefix}`}
+      />
+      <span className="text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500">
+        {count > 0 ? `${count} selected` : "Select all"}
+      </span>
+      {count > 0 && (
+        <button
+          onClick={onBulkDelete}
+          className="ml-auto flex items-center gap-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-red-700 hover:bg-red-50 rounded-sm border border-red-200"
+          data-testid={`bulk-delete-${testidPrefix}`}
+        >
+          <Trash size={12} weight="bold" /> Delete {count}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function IconBtn({ onClick, icon: Icon, color = "slate", dark = false, testid, title }) {

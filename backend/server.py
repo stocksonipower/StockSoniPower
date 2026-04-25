@@ -574,6 +574,34 @@ async def boxes_bulk_upload(file: UploadFile = File(...), user=Depends(get_curre
     }
 
 
+class BulkDeleteRequest(BaseModel):
+    ids: List[str]
+
+
+@api_router.post("/godowns/bulk-delete")
+async def godowns_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
+    if not payload.ids:
+        return {"deleted": 0}
+    res = await db.godowns.delete_many({"id": {"$in": payload.ids}})
+    return {"deleted": res.deleted_count}
+
+
+@api_router.post("/racks/bulk-delete")
+async def racks_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
+    if not payload.ids:
+        return {"deleted": 0}
+    res = await db.racks.delete_many({"id": {"$in": payload.ids}})
+    return {"deleted": res.deleted_count}
+
+
+@api_router.post("/boxes/bulk-delete")
+async def boxes_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
+    if not payload.ids:
+        return {"deleted": 0}
+    res = await db.boxes.delete_many({"id": {"$in": payload.ids}})
+    return {"deleted": res.deleted_count}
+
+
 class RackRangeRequest(BaseModel):
     godown_id: str
     start: int
