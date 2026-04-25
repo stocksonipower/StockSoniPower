@@ -269,10 +269,10 @@ async def download_template_route():
     sample_rows = [
         ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
-         "Cummins", "Engine Parts", ""],
+         "Cummins", "Engine Parts", "5", ""],
         ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Qty per box 1",
-         "Tata", "Engine Parts", ""],
+         "Tata", "Engine Parts", "10", ""],
     ]
     return _csv_response(sample_rows, TEMPLATE_COLUMNS, "stock_master_template.csv")
 
@@ -294,6 +294,7 @@ async def export_stock_master(user=Depends(get_current_user)):
             it.get("remarks_others", ""),
             it.get("make", ""),
             it.get("item_category", ""),
+            it.get("reorder_level", 0) or 0,
             "",  # image (skip base64 data in export)
         ])
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -345,13 +346,14 @@ COLUMN_ALIASES = {
     "remarks others": "remarks_others", "remarks_others": "remarks_others", "remarks": "remarks_others", "remark": "remarks_others",
     "make": "make",
     "item category": "item_category", "item_category": "item_category", "category": "item_category",
+    "reorder level": "reorder_level", "reorder_level": "reorder_level", "reorder": "reorder_level", "min stock": "reorder_level",
     "image": "image",
 }
 
 TEMPLATE_COLUMNS = [
     "SL NO", "MODEL", "PART NO", "OLD PART NO", "MAKE PART NO",
     "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS OEM", "REMARKS OTHERS",
-    "MAKE", "ITEM CATEGORY", "IMAGE"
+    "MAKE", "ITEM CATEGORY", "REORDER LEVEL", "IMAGE"
 ]
 
 
@@ -389,10 +391,15 @@ async def bulk_upload(file: UploadFile = File(...), user=Depends(get_current_use
         data = {"model": "", "part_no": "", "old_part_no": "", "make_part_no": "",
                 "description_1": "", "description_2": "",
                 "remarks_oem": "", "remarks_others": "",
-                "make": "", "item_category": "", "image": ""}
+                "make": "", "item_category": "", "reorder_level": 0, "image": ""}
         for orig_col, field in col_map.items():
             val = row.get(orig_col, "")
             data[field] = str(val).strip() if val is not None else ""
+        # Coerce reorder_level to int
+        try:
+            data["reorder_level"] = int(float(str(data.get("reorder_level") or 0)))
+        except Exception:
+            data["reorder_level"] = 0
         part_no = data["part_no"]
         make = data["make"]
         if not part_no or not make:
@@ -1048,6 +1055,7 @@ async def stock_balance(search: Optional[str] = None, user=Depends(get_current_u
             "remarks_oem": sm.get("remarks_oem", ""),
             "remarks_others": sm.get("remarks_others", ""),
             "item_category": sm.get("item_category", ""),
+            "reorder_level": sm.get("reorder_level", 0) or 0,
             "image": sm.get("image", ""),
             "godown_id": k.get("godown_id", ""),
             "godown_name": g.get("godown_name", ""),
@@ -1078,24 +1086,38 @@ async def stock_balance(search: Optional[str] = None, user=Depends(get_current_u
 
 
 @api_router.get("/low-stock")
-async def low_stock(threshold: int = 5, user=Depends(get_current_user)):
+async def low_stock(user=Depends(get_current_user)):
+    """Items where current stock <= reorder_level (per-item from Stock Master)."""
+    items = await db.stock_master.find({"reorder_level": {"$gt": 0}}, {"_id": 0}).to_list(50000)
+    if not items:
+        return []
+    pairs = [{"part_no": i["part_no"], "make": i["make"]} for i in items]
     pipeline = [
+        {"$match": {"$or": pairs}},
         {"$group": {
             "_id": {"part_no": "$part_no", "make": "$make"},
             "total_quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
-            "description_1": {"$last": "$description_1"},
         }},
-        {"$match": {"total_quantity": {"$lte": threshold, "$gte": 0}}},
-        {"$project": {
-            "_id": 0,
-            "part_no": "$_id.part_no",
-            "make": "$_id.make",
-            "total_quantity": 1,
-            "description_1": 1,
-        }},
-        {"$sort": {"total_quantity": 1}}
     ]
-    return await db.transactions.aggregate(pipeline).to_list(500)
+    qty_map = {}
+    async for r in db.transactions.aggregate(pipeline):
+        qty_map[(r["_id"]["part_no"], r["_id"]["make"])] = r["total_quantity"]
+    out = []
+    for item in items:
+        rl = int(item.get("reorder_level") or 0)
+        qty = qty_map.get((item["part_no"], item["make"]), 0)
+        if qty <= rl:
+            out.append({
+                "part_no": item["part_no"],
+                "make": item["make"],
+                "model": item.get("model", ""),
+                "description_1": item.get("description_1", ""),
+                "item_category": item.get("item_category", ""),
+                "reorder_level": rl,
+                "total_quantity": qty,
+            })
+    out.sort(key=lambda x: x["total_quantity"])
+    return out
 
 
 @api_router.get("/dashboard/stats")
@@ -1113,7 +1135,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
     result = await db.transactions.aggregate(pipeline).to_list(1)
     total_stock = result[0]["qty"] if result else 0
 
-    low = await low_stock(threshold=5, user=user)
+    low = await low_stock(user=user)
     return {
         "total_items": total_items,
         "total_godowns": total_godowns,

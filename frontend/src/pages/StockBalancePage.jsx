@@ -18,6 +18,7 @@ const COLUMNS = [
   { key: "remarks_others", label: "REMARKS OTHERS", className: "text-slate-600 max-w-[160px] truncate" },
   { key: "make", label: "MAKE", className: "" },
   { key: "item_category", label: "ITEM CATEGORY", className: "" },
+  { key: "reorder_level", label: "REORDER LEVEL", className: "font-mono" },
   { key: "image", label: "IMAGE", className: "", isImage: true },
   { key: "godown_name", label: "GODOWN", className: "" },
   { key: "rack_no", label: "RACK NO", className: "font-mono" },

@@ -14,7 +14,7 @@ const emptyForm = {
   model: "", part_no: "", old_part_no: "", make_part_no: "",
   description_1: "", description_2: "",
   remarks_oem: "", remarks_others: "",
-  make: "", item_category: "", image: "",
+  make: "", item_category: "", reorder_level: 0, image: "",
 };
 
 export default function StockMasterPage() {
@@ -167,6 +167,7 @@ export default function StockMasterPage() {
               <th>REMARKS OTHERS</th>
               <th>MAKE</th>
               <th>ITEM CATEGORY</th>
+              <th>REORDER LEVEL</th>
               <th>IMAGE</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -185,6 +186,7 @@ export default function StockMasterPage() {
                 <td className="text-slate-600 max-w-[180px] truncate">{i.remarks_others || "—"}</td>
                 <td>{i.make}</td>
                 <td>{i.item_category || "—"}</td>
+                <td className="font-mono text-slate-700">{i.reorder_level || 0}</td>
                 <td>
                   {i.image ? (
                     <img src={i.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
@@ -205,7 +207,7 @@ export default function StockMasterPage() {
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={13} className="text-center py-12 text-slate-500">No items found.</td></tr>
+              <tr><td colSpan={14} className="text-center py-12 text-slate-500">No items found.</td></tr>
             )}
           </tbody>
         </table>
@@ -235,6 +237,17 @@ export default function StockMasterPage() {
             </div>
             <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
             <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
+            <div>
+              <Label className="label-sm">Reorder Level</Label>
+              <Input
+                type="number" min="0"
+                value={form.reorder_level}
+                onChange={(e) => setForm({ ...form, reorder_level: parseInt(e.target.value) || 0 })}
+                className="mt-2 rounded-sm font-mono"
+                data-testid="form-reorder-level"
+              />
+              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable.</div>
+            </div>
             <div className="col-span-2">
               <Label className="label-sm">Image</Label>
               <div className="flex items-center gap-4 mt-2">

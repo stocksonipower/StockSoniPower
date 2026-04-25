@@ -29,7 +29,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     api.get("/dashboard/stats").then((r) => setStats(r.data));
-    api.get("/low-stock?threshold=5").then((r) => setLowStock(r.data));
+    api.get("/low-stock").then((r) => setLowStock(r.data));
     api.get("/transactions?limit=10").then((r) => setRecent(r.data));
   }, []);
 
@@ -62,7 +62,7 @@ export default function Dashboard() {
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
             <div>
               <div className="label-sm">Alerts</div>
-              <h2 className="text-lg font-bold text-slate-900">Low Stock (≤ 5)</h2>
+              <h2 className="text-lg font-bold text-slate-900">Low Stock</h2>
             </div>
             <Link to="/low-stock" className="text-xs font-semibold text-blue-700 hover:underline">View all →</Link>
           </div>
