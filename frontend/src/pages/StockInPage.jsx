@@ -1,164 +1,431 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import { Textarea } from "../components/ui/textarea";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../components/ui/select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
-import { ArrowDown, Plus, Trash, MagnifyingGlass, Image as ImgIcon, Warning } from "@phosphor-icons/react";
+import {
+  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
+} from "@phosphor-icons/react";
 
-/*
-  STOCK IN ENTRY
-  --------------
-  Top grid (editable):
-    SL NO (auto) · PART NO (input) · MAKE (select filtered by part_no) · QUANTITY IN (input)
-
-  Click "Generate Summary" →
-  Bottom Report shows stock master details + existing location/qty + QTY IN for each entry.
-  Single/zero-location items first, multi-location items below.
-  "Record IN" button per row commits the stock-in to a chosen location.
-*/
-
-const emptyRow = () => ({ part_no: "", make: "", quantity: "", makes: [] });
+/* ==============================================================
+   STOCK IN  ·  Receipt Note tab
+   ============================================================== */
 
 export default function StockInPage() {
-  const [rows, setRows] = useState([emptyRow()]);
-  const [report, setReport] = useState([]);        // flattened display rows
-  const [hasReport, setHasReport] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState("receipt-note");
+  return (
+    <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-in-page">
+      <div className="mb-6">
+        <div className="label-sm mb-2">Inward</div>
+        <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock In</h1>
+      </div>
 
-  const addRow = () => setRows((p) => [...p, emptyRow()]);
-  const removeRow = (i) => setRows((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
-  const updateRow = (i, patch) => setRows((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList className="rounded-sm">
+          <TabsTrigger value="receipt-note" className="rounded-sm" data-testid="tab-receipt-note">
+            <FileText size={14} weight="bold" className="mr-2" /> Receipt Note
+          </TabsTrigger>
+          {/* future tabs go here */}
+        </TabsList>
 
-  // When part_no changes → fetch available makes
-  const handlePartNoBlur = async (i, value) => {
-    const part_no = (value || "").trim();
-    if (!part_no) { updateRow(i, { makes: [], make: "" }); return; }
-    try {
-      const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no } });
-      const makes = data.makes || [];
-      updateRow(i, { makes, make: makes.length === 1 ? makes[0] : rows[i].make });
-    } catch { updateRow(i, { makes: [] }); }
-  };
+        <TabsContent value="receipt-note">
+          <ReceiptNoteTab />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
 
-  const generate = async () => {
-    const entries = rows
-      .filter((r) => r.part_no.trim() && r.make && parseInt(r.quantity) > 0)
-      .map((r) => ({ part_no: r.part_no.trim(), make: r.make, quantity: parseInt(r.quantity) }));
-    if (entries.length === 0) { toast.error("Enter at least one row with Part No., Make and Quantity"); return; }
-    setLoading(true);
-    try {
-      const { data } = await api.post("/stock-in/lookup", {
-        entries: entries.map((e) => ({ part_no: e.part_no, make: e.make })),
-      });
-      // Merge user-entered qty_in back into the response by (part_no, make)
-      const qtyMap = new Map(entries.map((e) => [`${e.part_no}|${e.make}`, e.quantity]));
-      const flat = [];
-      data.forEach((r) => {
-        const qty_in = qtyMap.get(`${r.part_no}|${r.make}`) ?? 0;
-        if (r.not_found || !r.locations || r.locations.length === 0) {
-          flat.push({ ...r, qty_in, location: null, isFirstOfGroup: true, groupSize: 1 });
-        } else {
-          r.locations.forEach((loc, idx) => {
-            flat.push({
-              ...r,
-              qty_in,
-              location: loc,
-              isFirstOfGroup: idx === 0,
-              groupSize: r.locations.length,
-            });
-          });
-        }
-      });
-      setReport(flat);
-      setHasReport(true);
-      toast.success(`${data.length} line(s) resolved`);
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail));
-    } finally { setLoading(false); }
-  };
-
-  const clearAll = () => { setRows([emptyRow()]); setReport([]); setHasReport(false); };
+/* --------------------------------------------------------------
+   Receipt Note Tab — switches between LIST and CREATE views
+   -------------------------------------------------------------- */
+function ReceiptNoteTab() {
+  const [view, setView] = useState("list"); // "list" | "create"
+  const [openRn, setOpenRn] = useState(null); // detail dialog
 
   return (
-    <div className="p-8 max-w-[1800px] mx-auto" data-testid="stock-in-page">
-      <div className="mb-6 flex items-center gap-4">
-        <div className="h-12 w-12 rounded-sm flex items-center justify-center bg-green-50 text-green-700">
-          <ArrowDown size={24} weight="bold" />
+    <>
+      {view === "list" && (
+        <ReceiptNoteList
+          onCreate={() => setView("create")}
+          onOpen={(rn) => setOpenRn(rn)}
+        />
+      )}
+      {view === "create" && (
+        <ReceiptNoteCreate
+          onCancel={() => setView("list")}
+          onSaved={() => setView("list")}
+        />
+      )}
+
+      <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
+    </>
+  );
+}
+
+/* --------------------------------------------------------------
+   List view
+   -------------------------------------------------------------- */
+const PAGE_SIZE = 5000;
+
+function ReceiptNoteList({ onCreate, onOpen }) {
+  const [rows, setRows] = useState([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get("/receipt-notes", { params: { page, page_size: PAGE_SIZE } });
+      setRows(res.data);
+      const t = parseInt(res.headers["x-total-count"], 10);
+      setTotal(isNaN(t) ? res.data.length : t);
+    } finally { setLoading(false); }
+  }, [page]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  return (
+    <div className="mt-4" data-testid="rn-list-view">
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm text-slate-600">
+          {total === 0 ? "No receipt notes yet." : <>Showing <span className="font-semibold text-slate-900">{rows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> receipt notes</>}
+        </div>
+        <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rn-button">
+          <Plus size={16} weight="bold" className="mr-2" /> Create New Receipt Note
+        </Button>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th className="w-14">SL NO</th>
+              <th>RECEIPT NOTE DATE</th>
+              <th>RECEIPT NOTE NO</th>
+              <th>INVOICE DATE</th>
+              <th>INVOICE NO</th>
+              <th className="text-right">ITEMS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, idx) => (
+              <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
+                <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                <td className="font-mono text-slate-700">{r.rn_date || "—"}</td>
+                <td>
+                  <button
+                    onClick={() => onOpen(r)}
+                    className="font-mono font-semibold text-blue-700 hover:underline"
+                    data-testid={`rn-open-${r.rn_no}`}
+                  >
+                    {r.rn_no}
+                  </button>
+                </td>
+                <td className="font-mono text-slate-700">{r.invoice_date || "—"}</td>
+                <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
+                <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
+        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------
+   Detail dialog (read-only)
+   -------------------------------------------------------------- */
+function ReceiptNoteDetailDialog({ rn, onClose }) {
+  return (
+    <Dialog open={!!rn} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl rounded-sm" data-testid="rn-detail-dialog">
+        {rn && (
+          <>
+            <DialogHeader>
+              <DialogTitle className="text-2xl font-black font-mono">{rn.rn_no}</DialogTitle>
+            </DialogHeader>
+            <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
+              <Detail k="Receipt Note Date" v={rn.rn_date} />
+              <Detail k="Financial Year" v={rn.fy ? `FY ${rn.fy}` : "—"} />
+              <Detail k="Invoice Date" v={rn.invoice_date || "—"} />
+              <Detail k="Invoice No" v={rn.invoice_no || "—"} />
+              <Detail k="Created By" v={rn.created_by || "—"} />
+              <Detail k="Created At" v={new Date(rn.created_at).toLocaleString()} />
+            </div>
+            <div>
+              <div className="label-sm mb-2">Items ({(rn.items || []).length})</div>
+              <table className="data-table w-full">
+                <thead>
+                  <tr>
+                    <th className="w-14">SL NO</th>
+                    <th>PART NO</th>
+                    <th>MAKE</th>
+                    <th className="text-right">QUANTITY</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(rn.items || []).map((it, idx) => (
+                    <tr key={idx}>
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono font-semibold">{it.part_no}</td>
+                      <td>{it.make}</td>
+                      <td className="text-right font-mono font-bold">{it.quantity}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Detail({ k, v }) {
+  return (
+    <div>
+      <div className="label-sm">{k}</div>
+      <div className="font-mono mt-1 text-slate-900">{v}</div>
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------
+   Create view — the form
+   -------------------------------------------------------------- */
+const emptyItem = () => ({ part_no: "", make: "", quantity: "", makes: [], partLooked: false });
+
+function ReceiptNoteCreate({ onCancel, onSaved }) {
+  const [rnNo, setRnNo] = useState("");
+  const [rnDate, setRnDate] = useState("");
+  const [invoiceNo, setInvoiceNo] = useState("");
+  const [invoiceDate, setInvoiceDate] = useState("");
+  const [items, setItems] = useState([emptyItem()]);
+  const [saving, setSaving] = useState(false);
+
+  // Inline "Create New Master" dialog
+  const [masterDialog, setMasterDialog] = useState(null); // { rowIdx, part_no }
+
+  // Load preview RN no on mount
+  useEffect(() => {
+    api.get("/receipt-notes/next-no").then((r) => {
+      setRnNo(r.data.next_rn_no);
+      setRnDate(r.data.rn_date);
+    }).catch(() => toast.error("Could not preview receipt-note number"));
+  }, []);
+
+  const addItem = () => setItems((p) => [...p, emptyItem()]);
+  const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
+  const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+
+  // Lookup makes from stock_master when Part No is entered
+  const lookupMakes = async (i, partNo) => {
+    const v = (partNo || "").trim();
+    if (!v) {
+      updateItem(i, { makes: [], make: "", partLooked: false });
+      return;
+    }
+    try {
+      const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no: v } });
+      const list = data.makes || [];
+      updateItem(i, { makes: list, partLooked: true, make: list.length === 1 ? list[0] : "" });
+    } catch {
+      updateItem(i, { makes: [], partLooked: true, make: "" });
+    }
+  };
+
+  const handleMakeChange = (i, value) => {
+    if (value === "__create__") {
+      const row = items[i];
+      if (!row.part_no.trim()) {
+        toast.error("Enter Part No first");
+        return;
+      }
+      setMasterDialog({ rowIdx: i, part_no: row.part_no.trim() });
+    } else {
+      updateItem(i, { make: value });
+    }
+  };
+
+  const handleMasterCreated = (newItem) => {
+    if (masterDialog == null) return;
+    const i = masterDialog.rowIdx;
+    // refresh makes list and select the new make
+    setItems((prev) => prev.map((r, idx) => idx === i
+      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true }
+      : r));
+    setMasterDialog(null);
+    toast.success(`Master created: ${newItem.part_no} / ${newItem.make}`);
+  };
+
+  const save = async () => {
+    if (items.length === 0) { toast.error("Add at least one item"); return; }
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx];
+      if (!it.part_no.trim()) { toast.error(`Row ${idx + 1}: Part No is required`); return; }
+      if (!it.make.trim()) { toast.error(`Row ${idx + 1}: Make is required`); return; }
+      const q = parseFloat(it.quantity);
+      if (isNaN(q) || q <= 0) { toast.error(`Row ${idx + 1}: Quantity must be > 0`); return; }
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        invoice_no: invoiceNo.trim(),
+        invoice_date: invoiceDate || "",
+        items: items.map((it) => ({
+          part_no: it.part_no.trim(),
+          make: it.make.trim(),
+          quantity: parseFloat(it.quantity),
+        })),
+      };
+      const { data } = await api.post("/receipt-notes", payload);
+      toast.success(`Receipt Note ${data.rn_no} saved`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save receipt note");
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-4 space-y-6" data-testid="rn-create-view">
+      <div className="flex items-center justify-between">
+        <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="rn-back-button">
+          <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
+        </Button>
+        <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="rn-save-button">
+          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save Receipt Note"}
+        </Button>
+      </div>
+
+      {/* HEADER */}
+      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div>
+          <Label className="label-sm">Receipt Note Date</Label>
+          <Input value={rnDate} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="rn-date-input" />
+          <div className="text-[11px] text-slate-500 mt-1">Auto · today's date</div>
         </div>
         <div>
-          <div className="label-sm mb-1">Transaction</div>
-          <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock In</h1>
+          <Label className="label-sm">Receipt Note No</Label>
+          <Input value={rnNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rn-no-input" />
+          <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
+        </div>
+        <div>
+          <Label className="label-sm">Invoice Date</Label>
+          <Input
+            type="date"
+            value={invoiceDate}
+            onChange={(e) => setInvoiceDate(e.target.value)}
+            className="mt-2 rounded-sm font-mono"
+            data-testid="rn-invoice-date-input"
+          />
+        </div>
+        <div>
+          <Label className="label-sm">Invoice No</Label>
+          <Input
+            value={invoiceNo}
+            onChange={(e) => setInvoiceNo(e.target.value)}
+            placeholder="e.g. INV-1024"
+            className="mt-2 rounded-sm font-mono"
+            data-testid="rn-invoice-no-input"
+          />
         </div>
       </div>
 
-      {/* ---------- ENTRY GRID ---------- */}
-      <div className="bg-white border border-slate-200 rounded-sm overflow-hidden mb-4" data-testid="entry-grid">
+      {/* ITEMS */}
+      <div className="bg-white border border-slate-200 rounded-sm">
+        <div className="flex items-center justify-between p-4 border-b border-slate-200">
+          <div>
+            <div className="label-sm">Items Received</div>
+            <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""}</div>
+          </div>
+          <Button onClick={addItem} variant="outline" className="rounded-sm" data-testid="rn-add-row-button">
+            <Plus size={14} weight="bold" className="mr-1" /> Add Row
+          </Button>
+        </div>
+
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
               <th>PART NO</th>
+              <th>QUANTITY</th>
               <th>MAKE</th>
-              <th>QUANTITY IN</th>
-              <th className="w-16 text-right">—</th>
+              <th className="w-14"></th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
-              <tr key={i} data-testid={`entry-row-${i}`}>
-                <td className="font-mono text-slate-500">{i + 1}</td>
+            {items.map((it, idx) => (
+              <tr key={idx} data-testid={`rn-item-row-${idx}`}>
+                <td className="font-mono text-slate-500">{idx + 1}</td>
                 <td>
                   <Input
-                    value={r.part_no}
-                    onChange={(e) => updateRow(i, { part_no: e.target.value })}
-                    onBlur={(e) => handlePartNoBlur(i, e.target.value)}
-                    placeholder="Enter part number"
-                    className="rounded-sm font-mono h-9"
-                    data-testid={`entry-part-no-${i}`}
+                    value={it.part_no}
+                    onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "" })}
+                    onBlur={(e) => lookupMakes(idx, e.target.value)}
+                    placeholder="Enter part no"
+                    className="rounded-sm font-mono h-8"
+                    data-testid={`rn-part-no-${idx}`}
                   />
                 </td>
-                <td>
-                  <Select
-                    value={r.make}
-                    onValueChange={(v) => updateRow(i, { make: v })}
-                    disabled={!r.makes?.length}
-                  >
-                    <SelectTrigger className="rounded-sm h-9" data-testid={`entry-make-${i}`}>
-                      <SelectValue placeholder={r.makes?.length ? "Select make" : (r.part_no ? "No makes found" : "Enter part no. first")} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(r.makes || []).map((m) => (
-                        <SelectItem key={m} value={m} data-testid={`entry-make-option-${i}-${m}`}>{m}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </td>
-                <td>
+                <td className="w-32">
                   <Input
                     type="number"
-                    min="1"
-                    value={r.quantity}
-                    onChange={(e) => updateRow(i, { quantity: e.target.value })}
+                    min="0.001"
+                    step="any"
+                    value={it.quantity}
+                    onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                     placeholder="0"
-                    className="rounded-sm font-mono h-9 w-32"
-                    data-testid={`entry-qty-${i}`}
+                    className="rounded-sm font-mono h-8 text-right"
+                    data-testid={`rn-qty-${idx}`}
                   />
                 </td>
-                <td className="text-right">
+                <td className="w-64">
+                  <MakeDropdown
+                    value={it.make}
+                    makes={it.makes}
+                    partLooked={it.partLooked}
+                    onChange={(v) => handleMakeChange(idx, v)}
+                    testid={`rn-make-${idx}`}
+                  />
+                </td>
+                <td>
                   <button
-                    onClick={() => removeRow(i)}
-                    disabled={rows.length === 1}
-                    className="p-1.5 rounded-sm text-red-700 hover:bg-red-50 disabled:text-slate-300 disabled:hover:bg-transparent"
-                    data-testid={`entry-remove-${i}`}
+                    onClick={() => removeItem(idx)}
+                    disabled={items.length === 1}
+                    className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                    data-testid={`rn-remove-row-${idx}`}
                   >
-                    <Trash size={14} weight="bold" />
+                    <Trash size={14} />
                   </button>
                 </td>
               </tr>
@@ -167,273 +434,129 @@ export default function StockInPage() {
         </table>
       </div>
 
-      <div className="flex gap-2 flex-wrap mb-8">
-        <Button onClick={addRow} variant="outline" className="rounded-sm border-slate-300" data-testid="add-entry-row">
-          <Plus size={14} weight="bold" className="mr-2" /> Add Row
-        </Button>
-        <Button
-          onClick={generate}
-          disabled={loading}
-          className="rounded-sm bg-blue-700 hover:bg-blue-800"
-          data-testid="generate-summary-button"
-        >
-          <MagnifyingGlass size={14} weight="bold" className="mr-2" />
-          {loading ? "Generating…" : "Generate Summary"}
-        </Button>
-        {hasReport && (
-          <Button onClick={clearAll} variant="ghost" className="rounded-sm" data-testid="clear-button">Clear</Button>
-        )}
-      </div>
-
-      {/* ---------- REPORT ---------- */}
-      {hasReport && <ReportTable rows={report} onRecorded={generate} />}
+      <CreateMasterDialog
+        open={!!masterDialog}
+        partNo={masterDialog?.part_no || ""}
+        onClose={() => setMasterDialog(null)}
+        onCreated={handleMasterCreated}
+      />
     </div>
   );
 }
 
-/* ================================================================= */
-function ReportTable({ rows, onRecorded }) {
-  const firstMultiIndex = rows.findIndex((r) => r.groupSize > 1 && r.isFirstOfGroup);
-  return (
-    <div>
-      <div className="label-sm mb-2">Report</div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto" data-testid="report-table-wrap">
-        <table className="data-table w-full">
-          <thead>
-            <tr>
-              <th className="w-14">SL NO</th>
-              <th>PART NO</th>
-              <th>OLD PART NO</th>
-              <th>MAKE PART NO</th>
-              <th>DESCRIPTION 1</th>
-              <th>DESCRIPTION 2</th>
-              <th>REMARKS OEM</th>
-              <th>REMARKS OTHERS</th>
-              <th>MAKE</th>
-              <th>ITEM CATEGORY</th>
-              <th>IMAGE</th>
-              <th>QTY IN</th>
-              <th>GODOWN QTY</th>
-              <th>GODOWN</th>
-              <th>RACK NO</th>
-              <th>BOX NO</th>
-              <th className="text-right">ACTION</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 && (
-              <tr><td colSpan={17} className="text-center py-12 text-slate-500">No results.</td></tr>
-            )}
-            {rows.map((r, i) => {
-              const showMultiDivider = i === firstMultiIndex && firstMultiIndex !== -1;
-              return (
-                <React.Fragment key={i}>
-                  {showMultiDivider && (
-                    <tr className="bg-slate-100">
-                      <td colSpan={17} className="py-2 px-3 text-[10px] uppercase tracking-[0.2em] font-bold text-slate-600">
-                        Multi-location items
-                      </td>
-                    </tr>
-                  )}
-                  <ReportRow row={r} idx={i} onRecorded={onRecorded} />
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function ReportRow({ row, idx, onRecorded }) {
-  const [open, setOpen] = useState(false);
-  const showItemCols = row.isFirstOfGroup;
-
-  if (row.not_found) {
+/* --------------------------------------------------------------
+   Make dropdown with the 3 conditional behaviours
+   -------------------------------------------------------------- */
+function MakeDropdown({ value, makes, partLooked, onChange, testid }) {
+  // If part not yet looked-up, show disabled placeholder
+  if (!partLooked) {
     return (
-      <tr className="bg-red-50/40" data-testid={`report-row-${idx}-notfound`}>
-        <td className="font-mono text-slate-500">{idx + 1}</td>
-        <td className="font-mono font-bold text-red-700">{row.part_no}</td>
-        <td colSpan={14} className="text-red-700 text-sm">
-          <div className="flex items-center gap-2">
-            <Warning size={14} weight="bold" /> Not found in Stock Master (make: {row.make || "—"})
-          </div>
-        </td>
-        <td></td>
-      </tr>
+      <Select disabled value="" onValueChange={() => {}}>
+        <SelectTrigger className="rounded-sm h-8 text-xs" data-testid={testid}>
+          <SelectValue placeholder="Enter Part No first" />
+        </SelectTrigger>
+      </Select>
     );
   }
-
-  const dash = <span className="text-slate-300">—</span>;
-  const mono = (v) => <span className="font-mono">{v || dash}</span>;
-  const rowClass = row.groupSize > 1 ? "bg-amber-50/30" : "";
-
   return (
-    <>
-      <tr className={rowClass} data-testid={`report-row-${idx}`}>
-        <td className="font-mono text-slate-500">{idx + 1}</td>
-        <td>{showItemCols ? mono(row.part_no) : <span className="text-slate-300">↳</span>}</td>
-        <td>{showItemCols ? mono(row.old_part_no) : ""}</td>
-        <td>{showItemCols ? mono(row.make_part_no) : ""}</td>
-        <td className="text-slate-700 max-w-[180px] truncate">{showItemCols ? (row.description_1 || dash) : ""}</td>
-        <td className="text-slate-700 max-w-[180px] truncate">{showItemCols ? (row.description_2 || dash) : ""}</td>
-        <td className="text-slate-600 max-w-[160px] truncate">{showItemCols ? (row.remarks_oem || dash) : ""}</td>
-        <td className="text-slate-600 max-w-[160px] truncate">{showItemCols ? (row.remarks_others || dash) : ""}</td>
-        <td>{showItemCols ? (row.make || dash) : ""}</td>
-        <td>{showItemCols ? (row.item_category || dash) : ""}</td>
-        <td>
-          {showItemCols && row.image ? (
-            <img src={row.image} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200" />
-          ) : showItemCols ? (
-            <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400">
-              <ImgIcon size={14} />
-            </div>
-          ) : ""}
-        </td>
-        <td>
-          {showItemCols
-            ? <span className="font-mono font-bold text-green-700">+{row.qty_in}</span>
-            : ""}
-        </td>
-        {row.location ? (
-          <>
-            <td className="font-mono font-bold text-slate-900">{row.location.quantity}</td>
-            <td>{row.location.godown_name}</td>
-            <td className="font-mono">{row.location.rack_no}</td>
-            <td className="font-mono">{row.location.box_no}</td>
-          </>
-        ) : (
-          <>
-            <td className="text-slate-400 font-mono">0</td>
-            <td colSpan={3} className="text-xs text-slate-500 italic">No existing stock — choose location on record</td>
-          </>
-        )}
-        <td className="text-right">
-          <Button
-            size="sm" variant="outline"
-            className="rounded-sm h-7 text-xs border-slate-300"
-            onClick={() => setOpen(true)}
-            data-testid={`record-in-${idx}`}
-          >
-            + Record IN
-          </Button>
-        </td>
-      </tr>
-
-      {open && (
-        <RecordDialog
-          row={row}
-          onClose={() => setOpen(false)}
-          onSuccess={() => { setOpen(false); onRecorded(); }}
-        />
-      )}
-    </>
+    <Select value={value || undefined} onValueChange={onChange}>
+      <SelectTrigger className="rounded-sm h-8" data-testid={testid}>
+        <SelectValue placeholder={makes.length === 0 ? "Not in master — pick option" : "Select make"} />
+      </SelectTrigger>
+      <SelectContent>
+        {makes.map((m) => (
+          <SelectItem key={m} value={m} data-testid={`${testid}-option-${m}`}>{m}</SelectItem>
+        ))}
+        <SelectItem value="__create__" data-testid={`${testid}-option-create`}>
+          <span className="text-blue-700 font-semibold">+ Create New Master</span>
+        </SelectItem>
+      </SelectContent>
+    </Select>
   );
 }
 
-/* ================================================================= */
-function RecordDialog({ row, onClose, onSuccess }) {
-  const [qty, setQty] = useState(String(row.qty_in || ""));
-  const [godowns, setGodowns] = useState([]);
-  const [racks, setRacks] = useState([]);
-  const [boxes, setBoxes] = useState([]);
-  const [godownId, setGodownId] = useState(row.location?.godown_id || "");
-  const [rackId, setRackId] = useState(row.location?.rack_id || "");
-  const [boxId, setBoxId] = useState(row.location?.box_id || "");
+/* --------------------------------------------------------------
+   Inline "Create New Master" dialog (Part No pre-filled)
+   -------------------------------------------------------------- */
+const emptyMaster = (partNo) => ({
+  model: "", part_no: partNo, old_part_no: "", make_part_no: "",
+  description_1: "", description_2: "",
+  remarks_oem: "", remarks_others: "",
+  make: "", item_category: "", reorder_level: 0, image: "",
+});
+
+function CreateMasterDialog({ open, partNo, onClose, onCreated }) {
+  const [form, setForm] = useState(emptyMaster(partNo));
   const [saving, setSaving] = useState(false);
-  const lockedLocation = !!row.location;
 
-  useEffect(() => { api.get("/godowns").then((r) => setGodowns(r.data)); }, []);
   useEffect(() => {
-    if (godownId) api.get("/racks", { params: { godown_id: godownId } }).then((r) => setRacks(r.data));
-    else setRacks([]);
-    if (!lockedLocation) { setRackId(""); setBoxId(""); }
-  }, [godownId, lockedLocation]);
-  useEffect(() => {
-    if (rackId) api.get("/boxes", { params: { rack_id: rackId } }).then((r) => setBoxes(r.data));
-    else setBoxes([]);
-    if (!lockedLocation) setBoxId("");
-  }, [rackId, lockedLocation]);
+    if (open) setForm(emptyMaster(partNo));
+  }, [open, partNo]);
 
-  const submit = async () => {
-    const q = parseInt(qty);
-    if (!q || q <= 0) { toast.error("Quantity must be > 0"); return; }
-    if (!godownId || !rackId || !boxId) { toast.error("Select godown, rack and box"); return; }
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const save = async () => {
+    if (!form.part_no.trim() || !form.make.trim()) {
+      toast.error("Part No and Make are required");
+      return;
+    }
     setSaving(true);
     try {
-      await api.post("/stock-in", {
-        part_no: row.part_no, make: row.make, quantity: q,
-        godown_id: godownId, rack_id: rackId, box_id: boxId,
-      });
-      toast.success(`Recorded ${q} units of ${row.part_no} IN`);
-      onSuccess();
+      const payload = { ...form, reorder_level: Math.max(0, parseInt(form.reorder_level, 10) || 0) };
+      const { data } = await api.post("/stock-master", payload);
+      onCreated(data);
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail));
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not create master");
     } finally { setSaving(false); }
   };
 
   return (
-    <Dialog open={true} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="rounded-sm max-w-md">
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl rounded-sm" data-testid="create-master-dialog">
         <DialogHeader>
-          <DialogTitle className="text-xl font-black">Record Stock IN</DialogTitle>
+          <DialogTitle className="text-xl font-black">Create New Stock Master</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div className="bg-slate-50 border border-slate-200 rounded-sm p-3 text-sm">
-            <div className="font-mono font-bold text-slate-900">{row.part_no} · {row.make}</div>
-            {row.description_1 && <div className="text-xs text-slate-600 mt-1">{row.description_1}</div>}
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="Model" v={form.model} on={(v) => set("model", v)} testid="cm-model" />
+          <Field label="Part No *" v={form.part_no} on={(v) => set("part_no", v)} testid="cm-part-no" />
+          <Field label="Make *" v={form.make} on={(v) => set("make", v)} testid="cm-make" />
+          <Field label="Item Category" v={form.item_category} on={(v) => set("item_category", v)} testid="cm-category" />
+          <Field label="Old Part No." v={form.old_part_no} on={(v) => set("old_part_no", v)} testid="cm-old-part-no" />
+          <Field label="Make Part No." v={form.make_part_no} on={(v) => set("make_part_no", v)} testid="cm-make-part-no" />
+          <Field label="Description 1" v={form.description_1} on={(v) => set("description_1", v)} testid="cm-desc-1" />
+          <Field label="Description 2" v={form.description_2} on={(v) => set("description_2", v)} testid="cm-desc-2" />
+          <div>
+            <Label className="label-sm">Remarks OEM</Label>
+            <Textarea value={form.remarks_oem} onChange={(e) => set("remarks_oem", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-oem" />
           </div>
           <div>
-            <Label className="label-sm">Godown *</Label>
-            <Select value={godownId} onValueChange={setGodownId} disabled={lockedLocation}>
-              <SelectTrigger className="mt-1 rounded-sm" data-testid="dialog-godown">
-                <SelectValue placeholder="Select godown" />
-              </SelectTrigger>
-              <SelectContent>
-                {godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Label className="label-sm">Remarks Others</Label>
+            <Textarea value={form.remarks_others} onChange={(e) => set("remarks_others", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-others" />
           </div>
           <div>
-            <Label className="label-sm">Rack *</Label>
-            <Select value={rackId} onValueChange={setRackId} disabled={lockedLocation || !godownId}>
-              <SelectTrigger className="mt-1 rounded-sm" data-testid="dialog-rack">
-                <SelectValue placeholder={godownId ? "Select rack" : "Pick godown first"} />
-              </SelectTrigger>
-              <SelectContent>
-                {racks.map((r) => <SelectItem key={r.id} value={r.id}>Rack {r.rack_no}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label className="label-sm">Box *</Label>
-            <Select value={boxId} onValueChange={setBoxId} disabled={lockedLocation || !rackId}>
-              <SelectTrigger className="mt-1 rounded-sm" data-testid="dialog-box">
-                <SelectValue placeholder={rackId ? "Select box" : "Pick rack first"} />
-              </SelectTrigger>
-              <SelectContent>
-                {boxes.map((b) => <SelectItem key={b.id} value={b.id}>Box {b.box_no}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label className="label-sm">Quantity *</Label>
-            <Input
-              type="number" min="1" value={qty}
-              onChange={(e) => setQty(e.target.value)}
-              className="mt-1 rounded-sm font-mono text-lg" autoFocus
-              data-testid="dialog-qty"
+            <Label className="label-sm">Reorder Level</Label>
+            <Input type="number" min="0" value={form.reorder_level ?? ""}
+              onChange={(e) => set("reorder_level", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
+              className="mt-2 rounded-sm font-mono" data-testid="cm-reorder-level"
             />
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="rounded-sm">Cancel</Button>
-          <Button onClick={submit} disabled={saving} className="rounded-sm bg-green-700 hover:bg-green-800" data-testid="dialog-submit">
-            {saving ? "Recording…" : "Record IN"}
+          <Button variant="outline" onClick={onClose} className="rounded-sm" disabled={saving}>Cancel</Button>
+          <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="cm-save-button">
+            {saving ? "Saving…" : "Create & Use"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function Field({ label, v, on, testid }) {
+  return (
+    <div>
+      <Label className="label-sm">{label}</Label>
+      <Input value={v || ""} onChange={(e) => on(e.target.value)} className="mt-2 rounded-sm" data-testid={testid} />
+    </div>
   );
 }

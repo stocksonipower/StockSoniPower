@@ -179,6 +179,31 @@ class StockOutCreate(BaseModel):
     box_id: str
 
 
+class ReceiptNoteItem(BaseModel):
+    part_no: str
+    make: str
+    quantity: float
+
+
+class ReceiptNoteCreate(BaseModel):
+    invoice_no: Optional[str] = ""
+    invoice_date: Optional[str] = ""  # ISO "YYYY-MM-DD"
+    items: List[ReceiptNoteItem] = []
+
+
+class ReceiptNote(BaseModel):
+    id: str
+    rn_no: str
+    rn_date: str  # ISO "YYYY-MM-DD"
+    fy: str
+    serial: int
+    invoice_no: str = ""
+    invoice_date: str = ""
+    items: List[ReceiptNoteItem] = []
+    created_at: str
+    created_by: str = ""
+
+
 # -------------------- AUTH ROUTES --------------------
 @api_router.post("/auth/register", response_model=AuthResponse)
 async def register(payload: UserRegister):
@@ -1049,6 +1074,98 @@ async def list_transactions(
     return rows
 
 
+# -------------------- RECEIPT NOTES (Stock In) --------------------
+def current_fy_label(d: datetime) -> str:
+    """Indian financial year label, e.g. 2026-04-15 -> '26-27'."""
+    if d.month >= 4:
+        start, end = d.year, d.year + 1
+    else:
+        start, end = d.year - 1, d.year
+    return f"{start % 100:02d}-{end % 100:02d}"
+
+
+@api_router.get("/receipt-notes/next-no")
+async def next_receipt_note_no(user=Depends(get_current_user)):
+    """Preview the next receipt-note number for the current FY without consuming the counter."""
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    counter = await db.counters.find_one({"_id": f"rn_{fy}"})
+    next_serial = (counter.get("value") if counter else 0) + 1
+    return {
+        "fy": fy,
+        "next_serial": next_serial,
+        "next_rn_no": f"RN/{fy}/{next_serial:03d}",
+        "rn_date": today.date().isoformat(),
+    }
+
+
+@api_router.post("/receipt-notes", response_model=ReceiptNote)
+async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+    if not payload.items or len(payload.items) == 0:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(payload.items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        if it.quantity is None or it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
+
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    # Atomic serial increment for this FY
+    from pymongo import ReturnDocument
+    counter = await db.counters.find_one_and_update(
+        {"_id": f"rn_{fy}"},
+        {"$inc": {"value": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    serial = counter["value"]
+    rn_no = f"RN/{fy}/{serial:03d}"
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "rn_no": rn_no,
+        "rn_date": today.date().isoformat(),
+        "fy": fy,
+        "serial": serial,
+        "invoice_no": (payload.invoice_no or "").strip(),
+        "invoice_date": (payload.invoice_date or "").strip(),
+        "items": [it.model_dump() for it in payload.items],
+        "created_at": now_iso(),
+        "created_by": user.get("email", ""),
+    }
+    await db.receipt_notes.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.get("/receipt-notes")
+async def list_receipt_notes(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    user=Depends(get_current_user),
+):
+    total = await db.receipt_notes.count_documents({})
+    skip = (page - 1) * page_size
+    rows = await db.receipt_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/receipt-notes/{rn_id}")
+async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
+    doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Receipt note not found")
+    return doc
+
+
 # -------------------- STOCK BALANCE --------------------
 @api_router.get("/stock-balance")
 async def stock_balance(search: Optional[str] = None, user=Depends(get_current_user)):
@@ -1213,6 +1330,9 @@ async def startup():
     await db.boxes.create_index("id", unique=True)
     await db.transactions.create_index("id", unique=True)
     await db.transactions.create_index([("part_no", 1), ("make", 1)])
+    await db.receipt_notes.create_index("id", unique=True)
+    await db.receipt_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.receipt_notes.create_index("created_at")
 
     # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others
     cursor = db.stock_master.find({"$or": [{"oem": {"$exists": True}}, {"remarks": {"$exists": True}}]})
