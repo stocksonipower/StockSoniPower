@@ -1086,11 +1086,11 @@ def current_fy_label(d: datetime) -> str:
 
 @api_router.get("/receipt-notes/next-no")
 async def next_receipt_note_no(user=Depends(get_current_user)):
-    """Preview the next receipt-note number for the current FY without consuming the counter."""
+    """Preview the next receipt-note number for the current FY (max existing serial + 1)."""
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
-    counter = await db.counters.find_one({"_id": f"rn_{fy}"})
-    next_serial = (counter.get("value") if counter else 0) + 1
+    last = await db.receipt_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    next_serial = (last[0]["serial"] if last else 0) + 1
     return {
         "fy": fy,
         "next_serial": next_serial,
@@ -1113,32 +1113,36 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
 
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
-    # Atomic serial increment for this FY
-    from pymongo import ReturnDocument
-    counter = await db.counters.find_one_and_update(
-        {"_id": f"rn_{fy}"},
-        {"$inc": {"value": 1}},
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    serial = counter["value"]
-    rn_no = f"RN/{fy}/{serial:03d}"
 
-    doc = {
-        "id": str(uuid.uuid4()),
-        "rn_no": rn_no,
-        "rn_date": today.date().isoformat(),
-        "fy": fy,
-        "serial": serial,
-        "invoice_no": (payload.invoice_no or "").strip(),
-        "invoice_date": (payload.invoice_date or "").strip(),
-        "items": [it.model_dump() for it in payload.items],
-        "created_at": now_iso(),
-        "created_by": user.get("email", ""),
-    }
-    await db.receipt_notes.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+    # Pick next serial = max(existing serial in this FY) + 1, with retry-on-conflict
+    # so that deleted RNs free up their slots and the sequence stays tight.
+    from pymongo.errors import DuplicateKeyError
+    last_err = None
+    for _ in range(5):
+        last = await db.receipt_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+        serial = (last[0]["serial"] if last else 0) + 1
+        rn_no = f"RN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "rn_no": rn_no,
+            "rn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "invoice_no": (payload.invoice_no or "").strip(),
+            "invoice_date": (payload.invoice_date or "").strip(),
+            "items": [it.model_dump() for it in payload.items],
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+        }
+        try:
+            await db.receipt_notes.insert_one(doc)
+            doc.pop("_id", None)
+            return doc
+        except DuplicateKeyError as e:
+            # Concurrent insert grabbed the same serial — retry with the next one
+            last_err = e
+            continue
+    raise HTTPException(status_code=500, detail=f"Could not allocate receipt-note number: {last_err}")
 
 
 @api_router.get("/receipt-notes")
@@ -1164,6 +1168,39 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Receipt note not found")
     return doc
+
+
+@api_router.put("/receipt-notes/{rn_id}", response_model=ReceiptNote)
+async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+    existing = await db.receipt_notes.find_one({"id": rn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Receipt note not found")
+    if not payload.items or len(payload.items) == 0:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(payload.items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        if it.quantity is None or it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
+    update = {
+        "invoice_no": (payload.invoice_no or "").strip(),
+        "invoice_date": (payload.invoice_date or "").strip(),
+        "items": [it.model_dump() for it in payload.items],
+        "updated_at": now_iso(),
+    }
+    await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
+    doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    return doc
+
+
+@api_router.delete("/receipt-notes/{rn_id}")
+async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
+    res = await db.receipt_notes.delete_one({"id": rn_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Receipt note not found")
+    return {"ok": True}
 
 
 # -------------------- STOCK BALANCE --------------------

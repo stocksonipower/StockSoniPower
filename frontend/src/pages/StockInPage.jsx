@@ -13,12 +13,20 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
+  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil,
 } from "@phosphor-icons/react";
 
 /* ==============================================================
    STOCK IN  ·  Receipt Note tab
    ============================================================== */
+
+/** Format an ISO date "YYYY-MM-DD" -> "DD-MM-YYYY". Returns "—" for falsy. */
+function fmtDate(iso) {
+  if (!iso) return "—";
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
 
 export default function StockInPage() {
   const [tab, setTab] = useState("receipt-note");
@@ -49,21 +57,30 @@ export default function StockInPage() {
    Receipt Note Tab — switches between LIST and CREATE views
    -------------------------------------------------------------- */
 function ReceiptNoteTab() {
-  const [view, setView] = useState("list"); // "list" | "create"
+  const [view, setView] = useState("list"); // "list" | "create" | "edit"
+  const [editingRn, setEditingRn] = useState(null);
   const [openRn, setOpenRn] = useState(null); // detail dialog
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const goCreate = () => { setEditingRn(null); setView("create"); };
+  const goEdit = (rn) => { setEditingRn(rn); setView("edit"); };
+  const goList = () => { setEditingRn(null); setView("list"); setReloadKey((k) => k + 1); };
 
   return (
     <>
       {view === "list" && (
         <ReceiptNoteList
-          onCreate={() => setView("create")}
+          reloadKey={reloadKey}
+          onCreate={goCreate}
           onOpen={(rn) => setOpenRn(rn)}
+          onEdit={goEdit}
         />
       )}
-      {view === "create" && (
+      {(view === "create" || view === "edit") && (
         <ReceiptNoteCreate
-          onCancel={() => setView("list")}
-          onSaved={() => setView("list")}
+          editing={editingRn}
+          onCancel={goList}
+          onSaved={goList}
         />
       )}
 
@@ -77,7 +94,7 @@ function ReceiptNoteTab() {
    -------------------------------------------------------------- */
 const PAGE_SIZE = 5000;
 
-function ReceiptNoteList({ onCreate, onOpen }) {
+function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -93,7 +110,18 @@ function ReceiptNoteList({ onCreate, onOpen }) {
     } finally { setLoading(false); }
   }, [page]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, reloadKey]);
+
+  const handleDelete = async (rn) => {
+    if (!window.confirm(`Delete Receipt Note ${rn.rn_no}?\n\nThis cannot be undone.`)) return;
+    try {
+      await api.delete(`/receipt-notes/${rn.id}`);
+      toast.success(`${rn.rn_no} deleted`);
+      load();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
+    }
+  };
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -118,29 +146,53 @@ function ReceiptNoteList({ onCreate, onOpen }) {
               <th>INVOICE DATE</th>
               <th>INVOICE NO</th>
               <th className="text-right">ITEMS</th>
+              <th className="text-right">TOTAL QUANTITY</th>
+              <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => (
-              <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
-                <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
-                <td className="font-mono text-slate-700">{r.rn_date || "—"}</td>
-                <td>
-                  <button
-                    onClick={() => onOpen(r)}
-                    className="font-mono font-semibold text-blue-700 hover:underline"
-                    data-testid={`rn-open-${r.rn_no}`}
-                  >
-                    {r.rn_no}
-                  </button>
-                </td>
-                <td className="font-mono text-slate-700">{r.invoice_date || "—"}</td>
-                <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
-                <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-              </tr>
-            ))}
+            {rows.map((r, idx) => {
+              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+              return (
+                <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
+                  <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.rn_date)}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`rn-open-${r.rn_no}`}
+                    >
+                      {r.rn_no}
+                    </button>
+                  </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
+                  <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
+                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td className="text-right whitespace-nowrap">
+                    <button
+                      onClick={() => onEdit(r)}
+                      className="p-1.5 hover:bg-slate-100 rounded-sm mr-1"
+                      data-testid={`rn-edit-${r.rn_no}`}
+                      title="Edit"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(r)}
+                      className="p-1.5 hover:bg-red-50 text-red-700 rounded-sm"
+                      data-testid={`rn-delete-${r.rn_no}`}
+                      title="Delete"
+                    >
+                      <Trash size={14} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {rows.length === 0 && (
-              <tr><td colSpan={6} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No receipt notes. Click 'Create New Receipt Note' to begin."}</td></tr>
             )}
           </tbody>
         </table>
@@ -174,9 +226,9 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
               <DialogTitle className="text-2xl font-black font-mono">{rn.rn_no}</DialogTitle>
             </DialogHeader>
             <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Receipt Note Date" v={rn.rn_date} />
+              <Detail k="Receipt Note Date" v={fmtDate(rn.rn_date)} />
               <Detail k="Financial Year" v={rn.fy ? `FY ${rn.fy}` : "—"} />
-              <Detail k="Invoice Date" v={rn.invoice_date || "—"} />
+              <Detail k="Invoice Date" v={fmtDate(rn.invoice_date)} />
               <Detail k="Invoice No" v={rn.invoice_no || "—"} />
               <Detail k="Created By" v={rn.created_by || "—"} />
               <Detail k="Created At" v={new Date(rn.created_at).toLocaleString()} />
@@ -225,7 +277,8 @@ function Detail({ k, v }) {
    -------------------------------------------------------------- */
 const emptyItem = () => ({ part_no: "", make: "", quantity: "", makes: [], partLooked: false });
 
-function ReceiptNoteCreate({ onCancel, onSaved }) {
+function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
+  const isEdit = !!editing;
   const [rnNo, setRnNo] = useState("");
   const [rnDate, setRnDate] = useState("");
   const [invoiceNo, setInvoiceNo] = useState("");
@@ -236,13 +289,41 @@ function ReceiptNoteCreate({ onCancel, onSaved }) {
   // Inline "Create New Master" dialog
   const [masterDialog, setMasterDialog] = useState(null); // { rowIdx, part_no }
 
-  // Load preview RN no on mount
+  // On mount: either populate from `editing` (edit mode) or fetch next preview (create mode)
   useEffect(() => {
-    api.get("/receipt-notes/next-no").then((r) => {
-      setRnNo(r.data.next_rn_no);
-      setRnDate(r.data.rn_date);
-    }).catch(() => toast.error("Could not preview receipt-note number"));
-  }, []);
+    if (isEdit) {
+      setRnNo(editing.rn_no || "");
+      setRnDate(editing.rn_date || "");
+      setInvoiceNo(editing.invoice_no || "");
+      setInvoiceDate(editing.invoice_date || "");
+      // Hydrate items with empty makes lists; lookup runs in a separate effect once part_nos are set
+      const initial = (editing.items || []).map((it) => ({
+        part_no: it.part_no || "",
+        make: it.make || "",
+        quantity: it.quantity ?? "",
+        makes: it.make ? [it.make] : [],
+        partLooked: !!it.part_no,
+      }));
+      setItems(initial.length ? initial : [emptyItem()]);
+      // Refresh real makes list from stock_master so the dropdown shows all options
+      initial.forEach((row, idx) => {
+        if (!row.part_no) return;
+        api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
+          .then(({ data }) => {
+            const list = data.makes || [];
+            // Ensure the current saved make is included even if no longer in master (rare)
+            const merged = row.make && !list.includes(row.make) ? [...list, row.make] : list;
+            setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: merged } : r));
+          }).catch(() => { /* ignore */ });
+      });
+    } else {
+      api.get("/receipt-notes/next-no").then((r) => {
+        setRnNo(r.data.next_rn_no);
+        setRnDate(r.data.rn_date);
+      }).catch(() => toast.error("Could not preview receipt-note number"));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, isEdit]);
 
   const addItem = () => setItems((p) => [...p, emptyItem()]);
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
@@ -308,8 +389,10 @@ function ReceiptNoteCreate({ onCancel, onSaved }) {
           quantity: parseFloat(it.quantity),
         })),
       };
-      const { data } = await api.post("/receipt-notes", payload);
-      toast.success(`Receipt Note ${data.rn_no} saved`);
+      const { data } = isEdit
+        ? await api.put(`/receipt-notes/${editing.id}`, payload)
+        : await api.post("/receipt-notes", payload);
+      toast.success(`Receipt Note ${data.rn_no} ${isEdit ? "updated" : "saved"}`);
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not save receipt note");
@@ -323,7 +406,7 @@ function ReceiptNoteCreate({ onCancel, onSaved }) {
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
         <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="rn-save-button">
-          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save Receipt Note"}
+          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : (isEdit ? "Update Receipt Note" : "Save Receipt Note")}
         </Button>
       </div>
 
