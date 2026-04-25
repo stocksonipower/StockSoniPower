@@ -51,6 +51,7 @@ export default function TransactionsPage() {
               <th>Type</th>
               <th>Part No.</th>
               <th>Make</th>
+              <th>Description</th>
               <th>Godown</th>
               <th>Rack</th>
               <th>Box</th>
@@ -71,6 +72,7 @@ export default function TransactionsPage() {
                 </td>
                 <td className="font-mono font-semibold">{t.part_no}</td>
                 <td>{t.make}</td>
+                <td className="text-slate-700 max-w-[260px] truncate" title={t.description_1}>{t.description_1 || "—"}</td>
                 <td>{t.godown_name}</td>
                 <td className="font-mono">{t.rack_no}</td>
                 <td className="font-mono">{t.box_no}</td>
@@ -79,7 +81,7 @@ export default function TransactionsPage() {
               </tr>
             ))}
             {txns.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No transactions."}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No transactions."}</td></tr>
             )}
           </tbody>
         </table>
