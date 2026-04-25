@@ -76,16 +76,32 @@ Build a warehouse stock management system with:
 ### Backend Tests
 - `/app/backend/tests/test_user_management.py` — 16/16 PASS (lockout, RBAC, CRUD, force-reset, module middleware)
 - `/app/backend/tests/test_notifications.py` — 14/14 PASS (list, unread count, triggers, staff visibility, mark-read variants)
+- `/app/backend/tests/test_phase3_assignment.py` — 10/10 PASS (assignable users, RN/IN assignment, RKN/PN gating, admin bypass, unassigned-allows-anyone, parent enrichment)
+
+### Phase 3 — Workflow Assignment Gating (2026-04-25, COMPLETE, 10/10 tests pass)
+- **Models extended**: `assigned_to_user_id`, `assigned_to_name`, `assigned_to_email` on Receipt Notes and Issue Notes
+- **Helpers**: `_resolve_assignee(user_id, module)` (validates user is active + has module access; admin always passes) and `_enforce_assignee(parent_note, user, action)` (raises 403 if note is assigned and user is not the assignee or admin)
+- **New endpoint**: `GET /api/users/assignable?module=stock_in|stock_out` — auth-only (any logged-in user); admins always returned, staff filtered by module_access
+- **Receipt Note**: POST/PUT accept `assigned_to_user_id`; PUT/DELETE enforce assignee. Sends `receipt_note.assigned` notification (audience=user) on new assignment
+- **Issue Note**: POST/PUT accept `assigned_to_user_id`; PUT/DELETE enforce assignee. Sends `issue_note.assigned` notification on new assignment
+- **Racking Note**: POST/PUT/DELETE/`/record` all enforce parent Receipt Note's assignee
+- **Picking Note**: POST/PUT/DELETE/`/record` all enforce parent Issue Note's assignee
+- **List endpoints** GET `/racking-notes` and `/picking-notes` enriched with `parent_assigned_to_user_id` / `_name` / `_email` via batched join
+- **Frontend `<AssigneeSelect>`** + `<AssigneeBadge>` in `/app/frontend/src/components/AssigneeSelect.jsx`:
+  - Used in Receipt Note form (testid `rn-assignee`) and Issue Note form (`in-assignee`)
+  - Defaults to `— Unassigned (anyone) —`, returns null on submit
+  - Filters dropdown by relevant module
+- **List rows** show `<AssigneeBadge />` (`rn-assignee-{rn_no}`, `in-assignee-{in_no}`, `rkn-assignee-{rkn_no}`, `pn-assignee-{pn_no}`)
+- **Disabled buttons + tooltip** "Locked — assigned to {name}" for non-assignee staff (Edit/Delete on RN+IN; Edit/Delete/Record on RKN+PN). Admin bypass.
+- **Detail dialogs** all show `Assigned To` row (parent assignee for RKN/PN)
 
 ## Backlog / Next Tasks
-- **P1 — Phase 3: Workflow Assignment Gating**
-  - Optional `assigned_to` user dropdown on Receipt Note / Issue Note creation
-  - Restrict Racking/Picking creation to assignee (or any user when null)
-  - Send a `user`-audience notification to the assignee on assignment
+- **P1 — Stock Transfer (between locations)**: similar to Stock In/Stock Out — Stock Transfer Request + Stock Transfer Note workflow (user-requested 2026-04-25)
+- **P1 — Dashboard Activity Widget** (proposed; not yet started)
 - **P2**: Barcode/QR generation for scan-based Stock In/Out
-- **P2**: Refactor `server.py` (~3000 lines) into routers under `/app/backend/routes/`
+- **P2**: Refactor `server.py` (~3100 lines) into routers under `/app/backend/routes/`
 - **P2**: Date-range filters on Transactions
-- **P3**: Stock transfer between locations (single txn)
+- **P2**: Add `<DialogDescription>` to Radix DialogContent components to silence a11y console warnings
 - **P3**: Object storage for images (currently base64)
 
 ## Test Credentials
