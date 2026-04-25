@@ -242,10 +242,14 @@ async def list_stock_master(search: Optional[str] = None, user=Depends(get_curre
         s = search.strip()
         query = {"$or": [
             {"part_no": {"$regex": s, "$options": "i"}},
-            {"make": {"$regex": s, "$options": "i"}},
+            {"old_part_no": {"$regex": s, "$options": "i"}},
+            {"make_part_no": {"$regex": s, "$options": "i"}},
             {"description_1": {"$regex": s, "$options": "i"}},
             {"description_2": {"$regex": s, "$options": "i"}},
-            {"model": {"$regex": s, "$options": "i"}},
+            {"remarks_oem": {"$regex": s, "$options": "i"}},
+            {"remarks_others": {"$regex": s, "$options": "i"}},
+            {"make": {"$regex": s, "$options": "i"}},
+            {"item_category": {"$regex": s, "$options": "i"}},
         ]}
     items = await db.stock_master.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return items

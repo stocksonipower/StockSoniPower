@@ -8,7 +8,23 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown } from "@phosphor-icons/react";
+import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise, FunnelSimple, X } from "@phosphor-icons/react";
+import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
+
+const COLUMNS = [
+  { key: "model", label: "MODEL" },
+  { key: "part_no", label: "PART NO" },
+  { key: "old_part_no", label: "OLD PART NO" },
+  { key: "make_part_no", label: "MAKE PART NO" },
+  { key: "description_1", label: "DESCRIPTION 1" },
+  { key: "description_2", label: "DESCRIPTION 2" },
+  { key: "remarks_oem", label: "REMARKS OEM" },
+  { key: "remarks_others", label: "REMARKS OTHERS" },
+  { key: "make", label: "MAKE" },
+  { key: "item_category", label: "ITEM CATEGORY" },
+  { key: "reorder_level", label: "REORDER LEVEL", isNumeric: true },
+  { key: "image", label: "IMAGE", isImage: true },
+];
 
 const emptyForm = {
   model: "", part_no: "", old_part_no: "", make_part_no: "",
@@ -23,15 +39,84 @@ export default function StockMasterPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyForm);
+  const [loading, setLoading] = useState(false);
+  // Excel-style state: per-column filter (Set of allowed values) and global sort
+  const [colFilters, setColFilters] = useState({});
+  const [sort, setSort] = useState({ key: null, dir: null });
   const fileInput = useRef(null);
   const excelInput = useRef(null);
 
   const load = async () => {
-    const { data } = await api.get("/stock-master", { params: search ? { search } : {} });
-    setItems(data);
+    setLoading(true);
+    try {
+      const { data } = await api.get("/stock-master", { params: search ? { search } : {} });
+      setItems(data);
+    } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, [search]);
+  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search]);
+
+  // Build unique values per column from current items
+  const uniqueValues = React.useMemo(() => {
+    const map = {};
+    COLUMNS.forEach((c) => {
+      if (c.isImage) { map[c.key] = ["Has image", "No image"]; return; }
+      const seen = new Set();
+      items.forEach((it) => {
+        const raw = it[c.key];
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        seen.add(v);
+      });
+      map[c.key] = [...seen].sort((a, b) => {
+        if (a === BLANK) return 1;
+        if (b === BLANK) return -1;
+        const na = Number(a), nb = Number(b);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b);
+      });
+    });
+    return map;
+  }, [items]);
+
+  // Apply per-column filters + global sort
+  const visibleItems = React.useMemo(() => {
+    const activeKeys = Object.keys(colFilters);
+    let out = items;
+    if (activeKeys.length) {
+      out = out.filter((row) => activeKeys.every((k) => {
+        const allowed = colFilters[k];
+        if (!allowed || allowed.size === 0) return true;
+        const col = COLUMNS.find((c) => c.key === k);
+        if (col?.isImage) return allowed.has(row.image ? "Has image" : "No image");
+        const raw = row[k];
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        return allowed.has(v);
+      }));
+    }
+    if (sort.key && sort.dir) {
+      const col = COLUMNS.find((c) => c.key === sort.key);
+      const numeric = col?.isNumeric;
+      out = [...out].sort((a, b) => {
+        const av = a[sort.key]; const bv = b[sort.key];
+        const aS = av === null || av === undefined ? "" : String(av);
+        const bS = bv === null || bv === undefined ? "" : String(bv);
+        let cmp;
+        if (numeric) cmp = (Number(av) || 0) - (Number(bv) || 0);
+        else cmp = aS.localeCompare(bS);
+        return sort.dir === "asc" ? cmp : -cmp;
+      });
+    }
+    return out;
+  }, [items, colFilters, sort]);
+
+  const setColFilter = (key, set) => setColFilters((f) => {
+    const next = { ...f };
+    if (!set || set.size === 0) delete next[key];
+    else next[key] = set;
+    return next;
+  });
+
+  const activeFilterCount = Object.keys(colFilters).length;
 
   const openNew = () => { setEditing(null); setForm(emptyForm); setOpen(true); };
   const openEdit = (i) => { setEditing(i); setForm({ ...emptyForm, ...i }); setOpen(true); };
@@ -127,6 +212,9 @@ export default function StockMasterPage() {
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Master</h1>
         </div>
         <div className="flex gap-2 flex-wrap">
+          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
+            <ArrowsClockwise size={16} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
           <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
             <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
           </Button>
@@ -143,15 +231,26 @@ export default function StockMasterPage() {
         </div>
       </div>
 
-      <div className="relative mb-4">
-        <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <Input
-          placeholder="Search by part_no, make, description, model…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-10 rounded-sm max-w-md"
-          data-testid="search-input"
-        />
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <div className="relative max-w-md flex-1">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            placeholder="Search part no, old/make part no, descriptions, remarks, make, category…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-10 rounded-sm"
+            data-testid="search-input"
+          />
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <FunnelSimple size={14} weight="bold" />
+          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Click any column to filter or sort"}</span>
+        </div>
+        {(activeFilterCount > 0 || sort.key) && (
+          <Button onClick={() => { setColFilters({}); setSort({ key: null, dir: null }); }} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">
+            <X size={12} weight="bold" className="mr-1" /> Clear filters & sort
+          </Button>
+        )}
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
@@ -159,23 +258,24 @@ export default function StockMasterPage() {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>MODEL</th>
-              <th>PART NO</th>
-              <th>OLD PART NO</th>
-              <th>MAKE PART NO</th>
-              <th>DESCRIPTION 1</th>
-              <th>DESCRIPTION 2</th>
-              <th>REMARKS OEM</th>
-              <th>REMARKS OTHERS</th>
-              <th>MAKE</th>
-              <th>ITEM CATEGORY</th>
-              <th>REORDER LEVEL</th>
-              <th>IMAGE</th>
+              {COLUMNS.map((c) => (
+                <th key={c.key}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort.key === c.key ? sort.dir : null}
+                    onSort={c.isImage ? null : (dir) => setSort(dir ? { key: c.key, dir } : { key: null, dir: null })}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((i, idx) => (
+            {visibleItems.map((i, idx) => (
               <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
                 <td className="font-mono text-slate-600">{i.model || "—"}</td>
@@ -208,8 +308,8 @@ export default function StockMasterPage() {
                 </td>
               </tr>
             ))}
-            {items.length === 0 && (
-              <tr><td colSpan={14} className="text-center py-12 text-slate-500">No items found.</td></tr>
+            {visibleItems.length === 0 && (
+              <tr><td colSpan={14} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No items found."}</td></tr>
             )}
           </tbody>
         </table>
