@@ -131,11 +131,11 @@ export default function StockTransactionPage({ type = "IN" }) {
             <AutoField label="Item Category" value={item?.item_category} />
             <AutoField label="Old Part No." value={item?.old_part_no} />
             <AutoField label="Make Part No." value={item?.make_part_no} />
-            <AutoField label="OEM" value={item?.oem} />
+            <AutoField label="Remarks OEM" value={item?.remarks_oem} />
             <AutoField label="Description 1" value={item?.description_1} />
             <AutoField label="Description 2" value={item?.description_2} />
             <div className="col-span-2">
-              <AutoField label="Remarks" value={item?.remarks} />
+              <AutoField label="Remarks Others" value={item?.remarks_others} />
             </div>
             {item?.image && (
               <div className="col-span-2">

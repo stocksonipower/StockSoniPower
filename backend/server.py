@@ -103,10 +103,10 @@ class StockMasterBase(BaseModel):
     part_no: str
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
-    oem: Optional[str] = ""
     description_1: Optional[str] = ""
     description_2: Optional[str] = ""
-    remarks: Optional[str] = ""
+    remarks_oem: Optional[str] = ""
+    remarks_others: Optional[str] = ""
     make: str
     item_category: Optional[str] = ""
     image: Optional[str] = ""  # base64 data URL
@@ -267,55 +267,37 @@ async def get_item_by_part_make(part_no: str, make: str, user=Depends(get_curren
 @api_router.get("/stock-master/download/template")
 async def download_template_route():
     sample_rows = [
-        ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900", "OEM-88421",
-         "Fuel Pump Assembly", "With gasket", "Qty per box 2", "Cummins", "Engine Parts", ""],
-        ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900", "OEM-88421",
-         "Fuel Pump Assembly", "With gasket", "Qty per box 1", "Tata", "Engine Parts", ""],
+        ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900",
+         "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
+         "Cummins", "Engine Parts", ""],
+        ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900",
+         "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Qty per box 1",
+         "Tata", "Engine Parts", ""],
     ]
-    buf = io.StringIO()
-    import csv
-    writer = csv.writer(buf)
-    writer.writerow(TEMPLATE_COLUMNS)
-    for r in sample_rows:
-        writer.writerow(r)
-    buf.seek(0)
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="stock_master_template.csv"'},
-    )
+    return _csv_response(sample_rows, TEMPLATE_COLUMNS, "stock_master_template.csv")
 
 
 @api_router.get("/stock-master/download/export")
 async def export_stock_master(user=Depends(get_current_user)):
-    """Export all Stock Master items to CSV in the standard column order."""
     items = await db.stock_master.find({}, {"_id": 0}).sort("created_at", 1).to_list(100000)
-    buf = io.StringIO()
-    import csv
-    writer = csv.writer(buf)
-    writer.writerow(TEMPLATE_COLUMNS)
+    rows = []
     for idx, it in enumerate(items, start=1):
-        writer.writerow([
+        rows.append([
             idx,
             it.get("model", ""),
             it.get("part_no", ""),
             it.get("old_part_no", ""),
             it.get("make_part_no", ""),
-            it.get("oem", ""),
             it.get("description_1", ""),
             it.get("description_2", ""),
-            it.get("remarks", ""),
+            it.get("remarks_oem", ""),
+            it.get("remarks_others", ""),
             it.get("make", ""),
             it.get("item_category", ""),
             "",  # image (skip base64 data in export)
         ])
-    buf.seek(0)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="stock_master_export_{ts}.csv"'},
-    )
+    return _csv_response(rows, TEMPLATE_COLUMNS, f"stock_master_export_{ts}.csv")
 
 
 @api_router.get("/stock-master/{item_id}", response_model=StockMaster)
@@ -357,18 +339,19 @@ COLUMN_ALIASES = {
     "part no": "part_no", "part_no": "part_no", "partno": "part_no", "part number": "part_no",
     "old no": "old_part_no", "old part no": "old_part_no", "old_part_no": "old_part_no",
     "make part no": "make_part_no", "make_part_no": "make_part_no", "makepartno": "make_part_no",
-    "oem": "oem", "oem no": "oem", "oem_no": "oem", "oem number": "oem",
     "description 1": "description_1", "description_1": "description_1", "description1": "description_1", "desc 1": "description_1",
     "description 2": "description_2", "description_2": "description_2", "description2": "description_2", "desc 2": "description_2",
-    "remarks": "remarks", "remark": "remarks",
+    "remarks oem": "remarks_oem", "remarks_oem": "remarks_oem", "oem": "remarks_oem", "oem no": "remarks_oem",
+    "remarks others": "remarks_others", "remarks_others": "remarks_others", "remarks": "remarks_others", "remark": "remarks_others",
     "make": "make",
-    "category": "item_category", "item category": "item_category", "item_category": "item_category",
+    "item category": "item_category", "item_category": "item_category", "category": "item_category",
     "image": "image",
 }
 
 TEMPLATE_COLUMNS = [
-    "SL NO", "MODEL", "PART NO", "OLD NO", "MAKE PART NO", "OEM",
-    "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS", "MAKE", "CATEGORY", "IMAGE"
+    "SL NO", "MODEL", "PART NO", "OLD PART NO", "MAKE PART NO",
+    "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS OEM", "REMARKS OTHERS",
+    "MAKE", "ITEM CATEGORY", "IMAGE"
 ]
 
 
@@ -403,8 +386,9 @@ async def bulk_upload(file: UploadFile = File(...), user=Depends(get_current_use
 
     inserted, skipped, errors = 0, 0, []
     for idx, row in df.iterrows():
-        data = {"model": "", "part_no": "", "old_part_no": "", "make_part_no": "", "oem": "",
-                "description_1": "", "description_2": "", "remarks": "",
+        data = {"model": "", "part_no": "", "old_part_no": "", "make_part_no": "",
+                "description_1": "", "description_2": "",
+                "remarks_oem": "", "remarks_others": "",
                 "make": "", "item_category": "", "image": ""}
         for orig_col, field in col_map.items():
             val = row.get(orig_col, "")
@@ -786,7 +770,8 @@ async def stock_in_lookup(req: StockInLookupRequest, user=Depends(get_current_us
                 "oem": item.get("oem", ""),
                 "description_1": item.get("description_1", ""),
                 "description_2": item.get("description_2", ""),
-                "remarks": item.get("remarks", ""),
+                "remarks_oem": item.get("remarks_oem", ""),
+                "remarks_others": item.get("remarks_others", ""),
                 "item_category": item.get("item_category", ""),
                 "image": item.get("image", ""),
                 "locations": locations,
@@ -806,10 +791,10 @@ async def stock_in(payload: StockInCreate, user=Depends(get_current_user)):
         "model": item.get("model", ""),
         "old_part_no": item.get("old_part_no", ""),
         "make_part_no": item.get("make_part_no", ""),
-        "oem": item.get("oem", ""),
         "description_1": item.get("description_1", ""),
         "description_2": item.get("description_2", ""),
-        "remarks": item.get("remarks", ""),
+        "remarks_oem": item.get("remarks_oem", ""),
+        "remarks_others": item.get("remarks_others", ""),
         "item_category": item.get("item_category", ""),
         "image": item.get("image", ""),
         "quantity": payload.quantity,
@@ -843,10 +828,10 @@ async def stock_out(payload: StockOutCreate, user=Depends(get_current_user)):
         "model": item.get("model", ""),
         "old_part_no": item.get("old_part_no", ""),
         "make_part_no": item.get("make_part_no", ""),
-        "oem": item.get("oem", ""),
         "description_1": item.get("description_1", ""),
         "description_2": item.get("description_2", ""),
-        "remarks": item.get("remarks", ""),
+        "remarks_oem": item.get("remarks_oem", ""),
+        "remarks_others": item.get("remarks_others", ""),
         "item_category": item.get("item_category", ""),
         "image": item.get("image", ""),
         "quantity": payload.quantity,
@@ -983,6 +968,28 @@ async def startup():
     await db.boxes.create_index("id", unique=True)
     await db.transactions.create_index("id", unique=True)
     await db.transactions.create_index([("part_no", 1), ("make", 1)])
+
+    # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others
+    cursor = db.stock_master.find({"$or": [{"oem": {"$exists": True}}, {"remarks": {"$exists": True}}]})
+    migrated = 0
+    async for doc in cursor:
+        upd, unset = {}, {}
+        if "oem" in doc:
+            if not doc.get("remarks_oem"):
+                upd["remarks_oem"] = doc.get("oem", "") or ""
+            unset["oem"] = ""
+        if "remarks" in doc:
+            if not doc.get("remarks_others"):
+                upd["remarks_others"] = doc.get("remarks", "") or ""
+            unset["remarks"] = ""
+        if upd or unset:
+            op = {}
+            if upd: op["$set"] = upd
+            if unset: op["$unset"] = unset
+            await db.stock_master.update_one({"_id": doc["_id"]}, op)
+            migrated += 1
+    if migrated:
+        logger.info(f"Migrated {migrated} stock_master docs to new schema")
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@stockmgmt.com").lower()

@@ -205,12 +205,12 @@ function ReportTable({ rows, onRecorded }) {
               <th>PART NO</th>
               <th>OLD PART NO</th>
               <th>MAKE PART NO</th>
-              <th>OEM</th>
               <th>DESCRIPTION 1</th>
               <th>DESCRIPTION 2</th>
-              <th>REMARKS</th>
+              <th>REMARKS OEM</th>
+              <th>REMARKS OTHERS</th>
               <th>MAKE</th>
-              <th>CATEGORY</th>
+              <th>ITEM CATEGORY</th>
               <th>IMAGE</th>
               <th>QTY IN</th>
               <th>GODOWN QTY</th>
@@ -276,10 +276,10 @@ function ReportRow({ row, idx, onRecorded }) {
         <td>{showItemCols ? mono(row.part_no) : <span className="text-slate-300">↳</span>}</td>
         <td>{showItemCols ? mono(row.old_part_no) : ""}</td>
         <td>{showItemCols ? mono(row.make_part_no) : ""}</td>
-        <td>{showItemCols ? mono(row.oem) : ""}</td>
         <td className="text-slate-700 max-w-[180px] truncate">{showItemCols ? (row.description_1 || dash) : ""}</td>
         <td className="text-slate-700 max-w-[180px] truncate">{showItemCols ? (row.description_2 || dash) : ""}</td>
-        <td className="text-slate-600 max-w-[160px] truncate">{showItemCols ? (row.remarks || dash) : ""}</td>
+        <td className="text-slate-600 max-w-[160px] truncate">{showItemCols ? (row.remarks_oem || dash) : ""}</td>
+        <td className="text-slate-600 max-w-[160px] truncate">{showItemCols ? (row.remarks_others || dash) : ""}</td>
         <td>{showItemCols ? (row.make || dash) : ""}</td>
         <td>{showItemCols ? (row.item_category || dash) : ""}</td>
         <td>

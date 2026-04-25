@@ -11,8 +11,9 @@ import { toast } from "sonner";
 import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown } from "@phosphor-icons/react";
 
 const emptyForm = {
-  model: "", part_no: "", old_part_no: "", make_part_no: "", oem: "",
-  description_1: "", description_2: "", remarks: "",
+  model: "", part_no: "", old_part_no: "", make_part_no: "",
+  description_1: "", description_2: "",
+  remarks_oem: "", remarks_others: "",
   make: "", item_category: "", image: "",
 };
 
@@ -158,14 +159,14 @@ export default function StockMasterPage() {
               <th className="w-14">SL NO</th>
               <th>MODEL</th>
               <th>PART NO</th>
-              <th>OLD NO</th>
+              <th>OLD PART NO</th>
               <th>MAKE PART NO</th>
-              <th>OEM</th>
               <th>DESCRIPTION 1</th>
               <th>DESCRIPTION 2</th>
-              <th>REMARKS</th>
+              <th>REMARKS OEM</th>
+              <th>REMARKS OTHERS</th>
               <th>MAKE</th>
-              <th>CATEGORY</th>
+              <th>ITEM CATEGORY</th>
               <th>IMAGE</th>
               <th className="text-right">ACTIONS</th>
             </tr>
@@ -178,10 +179,10 @@ export default function StockMasterPage() {
                 <td className="font-mono font-semibold">{i.part_no}</td>
                 <td className="font-mono text-slate-600">{i.old_part_no || "—"}</td>
                 <td className="font-mono text-slate-600">{i.make_part_no || "—"}</td>
-                <td className="font-mono text-slate-600">{i.oem || "—"}</td>
                 <td className="text-slate-700 max-w-[200px] truncate">{i.description_1 || "—"}</td>
                 <td className="text-slate-700 max-w-[200px] truncate">{i.description_2 || "—"}</td>
-                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks || "—"}</td>
+                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks_oem || "—"}</td>
+                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks_others || "—"}</td>
                 <td>{i.make}</td>
                 <td>{i.item_category || "—"}</td>
                 <td>
@@ -218,17 +219,22 @@ export default function StockMasterPage() {
           <div className="grid grid-cols-2 gap-4">
             <Field label="Model" val={form.model} on={(v) => setForm({ ...form, model: v })} testid="form-model" />
             <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
-            <Field label="Old No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
+            <Field label="Old Part No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
             <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
-            <Field label="OEM" val={form.oem} on={(v) => setForm({ ...form, oem: v })} testid="form-oem" />
             <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
             <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
-            <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
-            <Field label="Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
-            <div className="col-span-2">
-              <Label className="label-sm">Remarks</Label>
-              <Textarea value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} className="mt-2 rounded-sm" data-testid="form-remarks" />
+            <div className="col-span-2 grid grid-cols-2 gap-4">
+              <div>
+                <Label className="label-sm">Remarks OEM</Label>
+                <Textarea value={form.remarks_oem} onChange={(e) => setForm({ ...form, remarks_oem: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-oem" />
+              </div>
+              <div>
+                <Label className="label-sm">Remarks Others</Label>
+                <Textarea value={form.remarks_others} onChange={(e) => setForm({ ...form, remarks_others: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-others" />
+              </div>
             </div>
+            <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
+            <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
             <div className="col-span-2">
               <Label className="label-sm">Image</Label>
               <div className="flex items-center gap-4 mt-2">
