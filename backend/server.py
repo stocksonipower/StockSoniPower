@@ -45,6 +45,7 @@ APP_MODULES = (
     "locations",
     "stock_in",
     "stock_out",
+    "stock_transfer",
     "stock_summary",
     "low_stock",
     "transactions",
@@ -471,6 +472,96 @@ class PickingNote(BaseModel):
     issue_note_date: str = ""
     issued_to: str = ""
     items: List[PickingNoteItem] = []
+    status: str = "DRAFT"  # DRAFT | RECORDED
+    recorded_at: Optional[str] = None
+    created_at: str
+    created_by: str = ""
+
+
+# ===================== STOCK TRANSFER =====================
+class TransferRequestItem(BaseModel):
+    part_no: str
+    make: str
+    quantity: float
+    # Optional destination preference (the Transfer Note can override)
+    dest_godown_id: Optional[str] = ""
+    dest_godown_name: Optional[str] = ""
+    dest_rack_id: Optional[str] = ""
+    dest_rack_no: Optional[str] = ""
+    dest_box_id: Optional[str] = ""
+    dest_box_no: Optional[str] = ""
+    dest_box_category: Optional[str] = ""
+
+
+class TransferRequestCreate(BaseModel):
+    purpose: str = ""  # free-form reason for the transfer
+    items: List[TransferRequestItem] = []
+    assigned_to_user_id: Optional[str] = None
+
+
+class TransferRequest(BaseModel):
+    id: str
+    str_no: str
+    str_date: str
+    fy: str
+    serial: int
+    purpose: str = ""
+    items: List[TransferRequestItem] = []
+    status: str = "PENDING"  # PENDING | PARTIALLY_TRANSFERRED | FULLY_TRANSFERRED
+    transferred_at: Optional[str] = None
+    created_at: str
+    created_by: str = ""
+    assigned_to_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = ""
+    assigned_to_email: Optional[str] = ""
+
+
+class TransferNoteItem(BaseModel):
+    part_no: str
+    make: str
+    quantity: float
+    # Master snapshot
+    model: Optional[str] = ""
+    old_part_no: Optional[str] = ""
+    make_part_no: Optional[str] = ""
+    description_1: Optional[str] = ""
+    description_2: Optional[str] = ""
+    remarks_oem: Optional[str] = ""
+    remarks_others: Optional[str] = ""
+    item_category: Optional[str] = ""
+    # Source location (picked from)
+    src_godown_id: str
+    src_godown_name: Optional[str] = ""
+    src_rack_id: str
+    src_rack_no: Optional[str] = ""
+    src_box_id: Optional[str] = ""
+    src_box_no: Optional[str] = ""
+    src_box_category: Optional[str] = ""
+    # Destination location (placed at)
+    dest_godown_id: str
+    dest_godown_name: Optional[str] = ""
+    dest_rack_id: str
+    dest_rack_no: Optional[str] = ""
+    dest_box_id: Optional[str] = ""
+    dest_box_no: Optional[str] = ""
+    dest_box_category: Optional[str] = ""
+
+
+class TransferNoteCreate(BaseModel):
+    transfer_request_id: str
+    items: List[TransferNoteItem] = []
+
+
+class TransferNote(BaseModel):
+    id: str
+    stn_no: str
+    stn_date: str
+    fy: str
+    serial: int
+    transfer_request_id: str
+    transfer_request_no: str = ""
+    transfer_request_date: str = ""
+    items: List[TransferNoteItem] = []
     status: str = "DRAFT"  # DRAFT | RECORDED
     recorded_at: Optional[str] = None
     created_at: str
@@ -2886,6 +2977,594 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
     return {"ok": True, "transactions_created": len(tx_docs)}
 
 
+# ===================== STOCK TRANSFER (Request + Note) =====================
+async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None) -> dict:
+    """Sum qty per (part,make) across other STNs (DRAFT + RECORDED) for a given STR."""
+    q = {"transfer_request_id": str_id}
+    if exclude_stn_id:
+        q["id"] = {"$ne": exclude_stn_id}
+    sums = {}
+    async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
+        for it in stn.get("items", []):
+            k = _key(it.get("part_no"), it.get("make"))
+            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0)
+    return sums
+
+
+async def _transfer_other_src_loc_qty(exclude_stn_id: Optional[str] = None) -> dict:
+    """Per-source-location sum across DRAFT STNs (used to reserve source qty so two drafts can't double-book)."""
+    q = {"status": "DRAFT"}
+    if exclude_stn_id:
+        q["id"] = {"$ne": exclude_stn_id}
+    sums = {}
+    async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
+        for it in stn.get("items", []):
+            loc_key = f"{it.get('part_no','')}||{it.get('make','')}||{it.get('src_box_id','') or ''}"
+            sums[loc_key] = sums.get(loc_key, 0) + (it.get("quantity") or 0)
+    return sums
+
+
+async def _recompute_str_status(str_id: str):
+    s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    if not s:
+        return
+    requested = {}
+    for it in s.get("items", []):
+        k = _key(it.get("part_no"), it.get("make"))
+        requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
+    transferred = await _transfer_other_qty(str_id)
+    if not requested or sum(transferred.values()) == 0:
+        new_status = "PENDING"
+    else:
+        all_full = all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items())
+        new_status = "FULLY_TRANSFERRED" if all_full else "PARTIALLY_TRANSFERRED"
+    update = {"status": new_status}
+    if new_status == "FULLY_TRANSFERRED":
+        update["transferred_at"] = s.get("transferred_at") or now_iso()
+    else:
+        if s.get("transferred_at"):
+            await db.transfer_requests.update_one({"id": str_id}, {"$unset": {"transferred_at": ""}})
+    await db.transfer_requests.update_one({"id": str_id}, {"$set": update})
+
+
+def _validate_transfer_request_items(items):
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        if it.quantity is None or it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
+
+
+async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = None):
+    """Block requesting more than current stock total for any (part,make)."""
+    req = {}
+    for it in items:
+        k = _key(it.part_no, it.make)
+        req[k] = req.get(k, 0) + (it.quantity or 0)
+    for k, q in req.items():
+        part_no, make = k.split("||", 1)
+        avail = await _stock_total_for(part_no, make)
+        if q > avail + 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{part_no} / {make}: cannot transfer {q} — only {avail} in stock",
+            )
+
+
+# ---------- Transfer Request ----------
+@api_router.get("/transfer-requests/lookup/{part_no}")
+async def transfer_lookup_makes(part_no: str, user=Depends(get_current_user)):
+    """Reuse the issue-note lookup: makes with positive stock for this part_no."""
+    pairs = await db.transactions.aggregate([
+        {"$match": {"part_no": part_no}},
+        {"$group": {"_id": {"make": "$make"}, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+        {"$match": {"q": {"$gt": 0}}},
+        {"$sort": {"_id.make": 1}},
+    ]).to_list(1000)
+    return {"makes": [{"make": p["_id"]["make"], "available_qty": p["q"]} for p in pairs]}
+
+
+@api_router.get("/transfer-requests/next-no")
+async def next_transfer_request_no(user=Depends(get_current_user)):
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    last = await db.transfer_requests.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    next_serial = (last[0]["serial"] if last else 0) + 1
+    return {
+        "fy": fy,
+        "next_serial": next_serial,
+        "next_str_no": f"STR/{fy}/{next_serial:03d}",
+        "str_date": today.date().isoformat(),
+    }
+
+
+@api_router.post("/transfer-requests", response_model=TransferRequest)
+async def create_transfer_request(payload: TransferRequestCreate, user=Depends(get_current_user)):
+    _validate_transfer_request_items(payload.items)
+    await _validate_transfer_request_qty(payload.items)
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_transfer")
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    from pymongo.errors import DuplicateKeyError
+    last_err = None
+    for _ in range(5):
+        last = await db.transfer_requests.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+        serial = (last[0]["serial"] if last else 0) + 1
+        str_no = f"STR/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "str_no": str_no,
+            "str_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "purpose": (payload.purpose or "").strip(),
+            "items": [it.model_dump() for it in payload.items],
+            "status": "PENDING",
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+            **assignee,
+        }
+        try:
+            await db.transfer_requests.insert_one(doc)
+            doc.pop("_id", None)
+            await _notify(
+                actor=user, type="transfer_request.created", module="stock_transfer",
+                title=f"Transfer Request {str_no}",
+                message=f"{user.get('email')} created {str_no} with {len(doc['items'])} item(s) — transfer pending.",
+                audience="module", ref_collection="transfer_requests", ref_id=doc["id"],
+            )
+            if assignee.get("assigned_to_user_id"):
+                await _notify(
+                    actor=user, type="transfer_request.assigned", module="stock_transfer",
+                    title=f"Assigned to you: {str_no}",
+                    message=f"{user.get('email')} assigned Transfer Request {str_no} to you.",
+                    audience="user", target_user_id=assignee["assigned_to_user_id"],
+                    ref_collection="transfer_requests", ref_id=doc["id"],
+                )
+            return doc
+        except DuplicateKeyError as e:
+            last_err = e
+    raise HTTPException(status_code=500, detail=f"Could not allocate transfer-request number: {last_err}")
+
+
+@api_router.get("/transfer-requests")
+async def list_transfer_requests(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
+    not_status: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    query = {}
+    if status:
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    total = await db.transfer_requests.count_documents(query)
+    skip = (page - 1) * page_size
+    rows = await db.transfer_requests.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/transfer-requests/{str_id}")
+async def get_transfer_request(str_id: str, user=Depends(get_current_user)):
+    doc = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Transfer request not found")
+    await _enrich_note_items([doc])
+    return doc
+
+
+@api_router.put("/transfer-requests/{str_id}", response_model=TransferRequest)
+async def update_transfer_request(str_id: str, payload: TransferRequestCreate, user=Depends(get_current_user)):
+    existing = await db.transfer_requests.find_one({"id": str_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Transfer request not found")
+    _enforce_assignee(existing, user, "edit this transfer request")
+    if await db.transfer_notes.find_one({"transfer_request_id": str_id}):
+        raise HTTPException(status_code=409, detail="Cannot edit — transfer notes have been created. Delete those first.")
+    _validate_transfer_request_items(payload.items)
+    await _validate_transfer_request_qty(payload.items, exclude_str_id=str_id)
+    assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_transfer")
+    update = {
+        "purpose": (payload.purpose or "").strip(),
+        "items": [it.model_dump() for it in payload.items],
+        "updated_at": now_iso(),
+        **assignee,
+    }
+    await db.transfer_requests.update_one({"id": str_id}, {"$set": update})
+    new_aid = assignee.get("assigned_to_user_id")
+    if new_aid and new_aid != existing.get("assigned_to_user_id"):
+        await _notify(
+            actor=user, type="transfer_request.assigned", module="stock_transfer",
+            title=f"Assigned to you: {existing.get('str_no', '')}",
+            message=f"{user.get('email')} assigned Transfer Request {existing.get('str_no', '')} to you.",
+            audience="user", target_user_id=new_aid,
+            ref_collection="transfer_requests", ref_id=str_id,
+        )
+    doc = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    return doc
+
+
+@api_router.delete("/transfer-requests/{str_id}")
+async def delete_transfer_request(str_id: str, user=Depends(get_current_user)):
+    existing = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Transfer request not found")
+    _enforce_assignee(existing, user, "delete this transfer request")
+    if await db.transfer_notes.find_one({"transfer_request_id": str_id}):
+        raise HTTPException(status_code=409, detail="Cannot delete — transfer notes exist. Delete them first.")
+    await db.transfer_requests.delete_one({"id": str_id})
+    return {"ok": True}
+
+
+# ---------- Transfer Note ----------
+@api_router.get("/transfer-notes/next-no")
+async def next_transfer_note_no(user=Depends(get_current_user)):
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    last = await db.transfer_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    next_serial = (last[0]["serial"] if last else 0) + 1
+    return {
+        "fy": fy,
+        "next_serial": next_serial,
+        "next_stn_no": f"STN/{fy}/{next_serial:03d}",
+        "stn_date": today.date().isoformat(),
+    }
+
+
+@api_router.get("/transfer-notes/prepare/{str_id}")
+async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = None, user=Depends(get_current_user)):
+    s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Transfer request not found")
+    if s.get("status") == "FULLY_TRANSFERRED" and not exclude_stn_id:
+        raise HTTPException(status_code=409, detail="This transfer request is already fully transferred")
+
+    other_sums = await _transfer_other_qty(str_id, exclude_stn_id)
+    other_loc_sums = await _transfer_other_src_loc_qty(exclude_stn_id)
+
+    items_out = []
+    for it in s.get("items", []):
+        part_no = it.get("part_no", "")
+        make = it.get("make", "")
+        requested_qty = it.get("quantity", 0) or 0
+        already = other_sums.get(_key(part_no, make), 0)
+        pending = requested_qty - already
+        if pending <= 0:
+            continue
+        master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+        locs = await _stock_locations_for(part_no, make)
+        for L in locs:
+            reserved = other_loc_sums.get(f"{part_no}||{make}||{L['box_id']}", 0)
+            L["available_qty"] = max(0, L["current_qty"] - reserved)
+        pickable = [L for L in locs if L["available_qty"] > 0]
+        prefill = pickable[0] if len(pickable) == 1 and pickable[0]["available_qty"] >= pending else None
+
+        items_out.append({
+            "part_no": part_no, "make": make,
+            "requested_qty": requested_qty,
+            "already_transferred_qty": already,
+            "pending_qty": pending,
+            "quantity": prefill["available_qty"] if prefill else (min(pending, pickable[0]["available_qty"]) if pickable else 0),
+            "model": master.get("model", ""),
+            "old_part_no": master.get("old_part_no", ""),
+            "make_part_no": master.get("make_part_no", ""),
+            "description_1": master.get("description_1", ""),
+            "description_2": master.get("description_2", ""),
+            "remarks_oem": master.get("remarks_oem", ""),
+            "remarks_others": master.get("remarks_others", ""),
+            "item_category": master.get("item_category", ""),
+            # Source prefill
+            "src_godown_id": prefill["godown_id"] if prefill else "",
+            "src_godown_name": prefill["godown_name"] if prefill else "",
+            "src_rack_id": prefill["rack_id"] if prefill else "",
+            "src_rack_no": prefill["rack_no"] if prefill else "",
+            "src_box_id": prefill["box_id"] if prefill else "",
+            "src_box_no": prefill["box_no"] if prefill else "",
+            "src_box_category": prefill.get("box_category", "") if prefill else "",
+            # Destination from request
+            "dest_godown_id": it.get("dest_godown_id", "") or "",
+            "dest_godown_name": it.get("dest_godown_name", "") or "",
+            "dest_rack_id": it.get("dest_rack_id", "") or "",
+            "dest_rack_no": it.get("dest_rack_no", "") or "",
+            "dest_box_id": it.get("dest_box_id", "") or "",
+            "dest_box_no": it.get("dest_box_no", "") or "",
+            "dest_box_category": it.get("dest_box_category", "") or "",
+            "available_locations": locs,
+        })
+
+    return {
+        "transfer_request": {
+            "id": s["id"], "str_no": s["str_no"], "str_date": s["str_date"],
+            "purpose": s.get("purpose", ""), "status": s.get("status"),
+        },
+        "items": items_out,
+    }
+
+
+def _validate_transfer_note_items(items):
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        if it.quantity is None or it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
+        if not (it.src_godown_id or "").strip() or not (it.src_rack_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
+        if not (it.dest_godown_id or "").strip() or not (it.dest_rack_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown and Rack are required")
+        # Disallow source == destination
+        if (
+            it.src_godown_id == it.dest_godown_id
+            and it.src_rack_id == it.dest_rack_id
+            and (it.src_box_id or "") == (it.dest_box_id or "")
+        ):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination locations must differ")
+
+
+async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None):
+    s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=400, detail="Transfer request not found")
+    requested = {}
+    for it in s.get("items", []):
+        k = _key(it.get("part_no"), it.get("make"))
+        requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
+    other_sums = await _transfer_other_qty(str_id, exclude_stn_id)
+    other_loc_sums = await _transfer_other_src_loc_qty(exclude_stn_id)
+
+    new_sums = {}
+    new_loc_sums = {}
+    for it in items:
+        k = _key(it.part_no, it.make)
+        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
+        loc_key = f"{it.part_no}||{it.make}||{it.src_box_id or ''}"
+        new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
+        if k not in requested:
+            raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
+
+    # Cumulative qty cap vs request
+    for k, new_q in new_sums.items():
+        recv = requested.get(k, 0)
+        used = other_sums.get(k, 0)
+        if used + new_q > recv + 1e-6:
+            part, make = k.split("||", 1)
+            raise HTTPException(status_code=400, detail=(
+                f"Quantity exceeds transfer request for {part} / {make}: "
+                f"requested {recv}, already transferred elsewhere {used}, this note {new_q} "
+                f"(total {used + new_q} > {recv})"
+            ))
+
+    # Per-source-location stock check
+    loc_cache = {}
+    for k_full, new_q in new_loc_sums.items():
+        part_no, make, box_id = k_full.split("||", 2)
+        if (part_no, make) not in loc_cache:
+            loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
+        locs = loc_cache[(part_no, make)]
+        loc = next((L for L in locs if (L.get("box_id") or "") == box_id), None)
+        if not loc:
+            raise HTTPException(status_code=400, detail=f"{part_no} / {make}: no stock at the chosen source location")
+        already_pending_here = other_loc_sums.get(k_full, 0)
+        available = (loc.get("current_qty") or 0) - already_pending_here
+        if new_q > available + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{part_no} / {make}: trying to transfer {new_q} but only {available} available at "
+                f"{loc.get('godown_name')}/{loc.get('rack_no')}/{loc.get('box_no') or '—'}"
+            ))
+
+
+@api_router.post("/transfer-notes", response_model=TransferNote)
+async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_current_user)):
+    s = await db.transfer_requests.find_one({"id": payload.transfer_request_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=400, detail="Transfer request not found")
+    _enforce_assignee(s, user, "create a transfer note for this request")
+    if s.get("status") == "FULLY_TRANSFERRED":
+        raise HTTPException(status_code=409, detail="This transfer request is already fully transferred")
+    _validate_transfer_note_items(payload.items)
+    for idx, it in enumerate(payload.items, start=1):
+        if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
+        if not (it.dest_box_id or "").strip() and await _box_id_required_for_rack(it.dest_rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
+    await _validate_transfer_note_constraints(s["id"], payload.items, exclude_stn_id=None)
+
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    from pymongo.errors import DuplicateKeyError
+    last_err = None
+    for _ in range(5):
+        last = await db.transfer_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+        serial = (last[0]["serial"] if last else 0) + 1
+        stn_no = f"STN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "stn_no": stn_no,
+            "stn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "transfer_request_id": s["id"],
+            "transfer_request_no": s["str_no"],
+            "transfer_request_date": s["str_date"],
+            "items": [it.model_dump() for it in payload.items],
+            "status": "DRAFT",
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+        }
+        try:
+            await db.transfer_notes.insert_one(doc)
+            doc.pop("_id", None)
+            await _recompute_str_status(s["id"])
+            return doc
+        except DuplicateKeyError as e:
+            last_err = e
+    raise HTTPException(status_code=500, detail=f"Could not allocate transfer-note number: {last_err}")
+
+
+@api_router.get("/transfer-notes")
+async def list_transfer_notes(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    user=Depends(get_current_user),
+):
+    total = await db.transfer_notes.count_documents({})
+    skip = (page - 1) * page_size
+    rows = await db.transfer_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
+    await _enrich_with_parent_assignee(rows, "transfer_requests", "transfer_request_id")
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/transfer-notes/{stn_id}")
+async def get_transfer_note(stn_id: str, user=Depends(get_current_user)):
+    doc = await db.transfer_notes.find_one({"id": stn_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Transfer note not found")
+    await _enrich_note_items([doc])
+    await _enrich_with_parent_assignee([doc], "transfer_requests", "transfer_request_id")
+    return doc
+
+
+@api_router.put("/transfer-notes/{stn_id}", response_model=TransferNote)
+async def update_transfer_note(stn_id: str, payload: TransferNoteCreate, user=Depends(get_current_user)):
+    existing = await db.transfer_notes.find_one({"id": stn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Transfer note not found")
+    if existing.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Cannot edit — already recorded as Stock Transfer")
+    parent = await db.transfer_requests.find_one({"id": existing.get("transfer_request_id")}, {"_id": 0}) or {}
+    _enforce_assignee(parent, user, "edit this transfer note")
+    _validate_transfer_note_items(payload.items)
+    for idx, it in enumerate(payload.items, start=1):
+        if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
+        if not (it.dest_box_id or "").strip() and await _box_id_required_for_rack(it.dest_rack_id):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
+    await _validate_transfer_note_constraints(existing.get("transfer_request_id"), payload.items, exclude_stn_id=stn_id)
+    update = {
+        "items": [it.model_dump() for it in payload.items],
+        "updated_at": now_iso(),
+    }
+    await db.transfer_notes.update_one({"id": stn_id}, {"$set": update})
+    await _recompute_str_status(existing.get("transfer_request_id"))
+    doc = await db.transfer_notes.find_one({"id": stn_id}, {"_id": 0})
+    return doc
+
+
+@api_router.delete("/transfer-notes/{stn_id}")
+async def delete_transfer_note(stn_id: str, user=Depends(get_current_user)):
+    existing = await db.transfer_notes.find_one({"id": stn_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Transfer note not found")
+    if existing.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock Transfer")
+    parent = await db.transfer_requests.find_one({"id": existing.get("transfer_request_id")}, {"_id": 0}) or {}
+    _enforce_assignee(parent, user, "delete this transfer note")
+    await db.transfer_notes.delete_one({"id": stn_id})
+    if existing.get("transfer_request_id"):
+        await _recompute_str_status(existing["transfer_request_id"])
+    return {"ok": True}
+
+
+@api_router.post("/transfer-notes/{stn_id}/record")
+async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
+    stn = await db.transfer_notes.find_one({"id": stn_id}, {"_id": 0})
+    if not stn:
+        raise HTTPException(status_code=404, detail="Transfer note not found")
+    if stn.get("status") == "RECORDED":
+        raise HTTPException(status_code=409, detail="Already recorded")
+    parent = await db.transfer_requests.find_one({"id": stn.get("transfer_request_id")}, {"_id": 0}) or {}
+    _enforce_assignee(parent, user, "record this transfer note")
+    items = stn.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="No items to record")
+    # Final source-balance check (real balance, not DRAFT-aware)
+    for idx, it in enumerate(items, start=1):
+        bal = await db.transactions.aggregate([
+            {"$match": {"part_no": it["part_no"], "make": it["make"], "box_id": it.get("src_box_id", "")}},
+            {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+        ]).to_list(1)
+        avail = (bal[0]["q"] if bal else 0)
+        if avail < it["quantity"] - 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at source "
+                f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: have {avail}, need {it['quantity']}"
+            ))
+
+    now = now_iso()
+    tx_docs = []
+    for it in items:
+        master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
+        common = {
+            "part_no": it["part_no"], "make": it["make"],
+            "model": master.get("model", it.get("model", "")),
+            "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
+            "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
+            "description_1": master.get("description_1", it.get("description_1", "")),
+            "description_2": master.get("description_2", it.get("description_2", "")),
+            "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
+            "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
+            "item_category": master.get("item_category", it.get("item_category", "")),
+            "image": master.get("image", ""),
+            "quantity": it["quantity"],
+            "transfer_note_id": stn["id"], "transfer_note_no": stn["stn_no"],
+            "transfer_request_id": stn.get("transfer_request_id", ""),
+            "transfer_request_no": stn.get("transfer_request_no", ""),
+            "created_at": now, "created_by": user.get("email"),
+        }
+        tx_docs.append({
+            **common,
+            "id": str(uuid.uuid4()),
+            "type": "OUT",
+            "godown_id": it["src_godown_id"], "godown_name": it.get("src_godown_name", ""),
+            "rack_id": it["src_rack_id"], "rack_no": it.get("src_rack_no", ""),
+            "box_id": it.get("src_box_id", ""), "box_no": it.get("src_box_no", ""), "box_category": it.get("src_box_category", ""),
+        })
+        tx_docs.append({
+            **common,
+            "id": str(uuid.uuid4()),
+            "type": "IN",
+            "godown_id": it["dest_godown_id"], "godown_name": it.get("dest_godown_name", ""),
+            "rack_id": it["dest_rack_id"], "rack_no": it.get("dest_rack_no", ""),
+            "box_id": it.get("dest_box_id", ""), "box_no": it.get("dest_box_no", ""), "box_category": it.get("dest_box_category", ""),
+        })
+    if tx_docs:
+        await db.transactions.insert_many(tx_docs)
+    await db.transfer_notes.update_one({"id": stn_id}, {"$set": {"status": "RECORDED", "recorded_at": now}})
+    if stn.get("transfer_request_id"):
+        await _recompute_str_status(stn["transfer_request_id"])
+    total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    await _notify(
+        actor=user, type="stock_transfer.recorded", module="stock_transfer",
+        title=f"Stock Transfer recorded ({stn['stn_no']})",
+        message=f"{user.get('email')} transferred {len(items)} item(s), total qty {total_qty}, from {stn.get('transfer_request_no') or 'STR'}.",
+        audience="module", ref_collection="transfer_notes", ref_id=stn_id,
+    )
+    return {"ok": True, "transactions_created": len(tx_docs)}
+
+
 # -------------------- STOCK BALANCE --------------------
 @api_router.get("/stock-balance")
 async def stock_balance(search: Optional[str] = None, user=Depends(get_current_user)):
@@ -3068,6 +3747,15 @@ async def startup():
     await db.picking_notes.create_index("created_at")
     await db.picking_notes.create_index("status")
     await db.picking_notes.create_index("issue_note_id")
+    await db.transfer_requests.create_index("id", unique=True)
+    await db.transfer_requests.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.transfer_requests.create_index("created_at")
+    await db.transfer_requests.create_index("status")
+    await db.transfer_notes.create_index("id", unique=True)
+    await db.transfer_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.transfer_notes.create_index("created_at")
+    await db.transfer_notes.create_index("status")
+    await db.transfer_notes.create_index("transfer_request_id")
     # Backfill: ensure every existing receipt note has a status
     await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_PENDING"}})
     # Migrate old "RACKED" value to new "FULLY_RACKED"
@@ -3125,6 +3813,12 @@ async def startup():
     await db.users.update_many({"is_active": {"$exists": False}}, {"$set": {"is_active": True}})
     await db.users.update_many({"role": "user"}, {"$set": {"role": "staff"}})
     await db.users.update_many({"module_access": {"$exists": False}}, {"$set": {"module_access": {m: True for m in APP_MODULES}}})
+    # Backfill any newly-added module key onto existing user docs (default-allow)
+    for _m in APP_MODULES:
+        await db.users.update_many(
+            {f"module_access.{_m}": {"$exists": False}},
+            {"$set": {f"module_access.{_m}": True}},
+        )
     await db.users.update_many({"force_password_reset": {"$exists": False}}, {"$set": {"force_password_reset": False}})
     await db.users.update_many({"failed_login_attempts": {"$exists": False}}, {"$set": {"failed_login_attempts": 0}})
     await db.users.create_index("id", unique=True)
@@ -3152,6 +3846,8 @@ PATH_TO_MODULE = [
     ("/api/stock-out", "stock_out"),
     ("/api/issue-notes", "stock_out"),
     ("/api/picking-notes", "stock_out"),
+    ("/api/transfer-requests", "stock_transfer"),
+    ("/api/transfer-notes", "stock_transfer"),
     ("/api/stock-balance", "stock_summary"),
     ("/api/low-stock", "low_stock"),
     ("/api/transactions", "transactions"),

@@ -75,8 +75,20 @@ Build a warehouse stock management system with:
 
 ### Backend Tests
 - `/app/backend/tests/test_user_management.py` — 16/16 PASS (lockout, RBAC, CRUD, force-reset, module middleware)
-- `/app/backend/tests/test_notifications.py` — 14/14 PASS (list, unread count, triggers, staff visibility, mark-read variants)
-- `/app/backend/tests/test_phase3_assignment.py` — 10/10 PASS (assignable users, RN/IN assignment, RKN/PN gating, admin bypass, unassigned-allows-anyone, parent enrichment)
+- `/app/backend/tests/test_notifications.py` — 14/14 PASS
+- `/app/backend/tests/test_phase3_assignment.py` — 10/10 PASS
+- `/app/backend/tests/test_stock_transfer.py` — 6/6 PASS (next-no, qty validation, end-to-end flow with balance shift, src≠dest, assignment gating, module-access middleware)
+
+### Stock Transfer Module (2026-04-25, COMPLETE, 6/6 tests pass)
+- **New module**: `stock_transfer` added to `APP_MODULES` (granular RBAC) + middleware path mappings for `/api/transfer-requests` and `/api/transfer-notes`
+- **Schema**: `TransferRequest` (`STR/FY/###`, optional preferred destination per item, `assigned_to_*`, status `PENDING / PARTIALLY_TRANSFERRED / FULLY_TRANSFERRED`) + `TransferNote` (`STN/FY/###`, source loc + dest loc per item, status `DRAFT / RECORDED`)
+- **Endpoints**: full CRUD + `/lookup/{part_no}` (stock-aware makes), `/next-no`, `/prepare/{str_id}` (prefilled with available source locations), `/{stn_id}/record`
+- **Recording**: each item creates 2 transactions (1 OUT from src + 1 IN at dest) atomically; net balance unchanged
+- **Validation**: cumulative qty across all STNs ≤ STR qty; per-source-location stock check (DRAFT-aware reservations); src ≠ dest; box required when rack has boxes
+- **Phase 3 gating**: STR `assigned_to_user_id` propagates → STN POST/PUT/DELETE/`/record` enforce parent assignee; admin bypasses; unassigned = anyone with module access
+- **Notifications**: `transfer_request.created` (audience=module), `transfer_request.assigned` (audience=user), `stock_transfer.recorded` (audience=module)
+- **Frontend** (`/app/frontend/src/pages/StockTransferPage.jsx`): top-level sidebar nav between Stock Out and Stock Summary; 2 tabs (Transfer Request + Transfer Note); cascading source/destination dropdowns + available-location chips; assignee select on STR form; assignee badge on lists; locked tooltips for non-assignee staff
+- **Migrations**: startup backfills `module_access[stock_transfer]=true` on existing user docs (default-allow)
 
 ### Phase 3 — Workflow Assignment Gating (2026-04-25, COMPLETE, 10/10 tests pass)
 - **Models extended**: `assigned_to_user_id`, `assigned_to_name`, `assigned_to_email` on Receipt Notes and Issue Notes
@@ -96,12 +108,13 @@ Build a warehouse stock management system with:
 - **Detail dialogs** all show `Assigned To` row (parent assignee for RKN/PN)
 
 ## Backlog / Next Tasks
-- **P1 — Stock Transfer (between locations)**: similar to Stock In/Stock Out — Stock Transfer Request + Stock Transfer Note workflow (user-requested 2026-04-25)
 - **P1 — Dashboard Activity Widget** (proposed; not yet started)
-- **P2**: Barcode/QR generation for scan-based Stock In/Out
-- **P2**: Refactor `server.py` (~3100 lines) into routers under `/app/backend/routes/`
+  - Recent activity feed using existing notifications collection
+  - Top widgets: pending racking/picking/transfers, low-stock count, my-assigned-notes count
+- **P2**: Barcode/QR generation for scan-based Stock In/Out/Transfer
+- **P2**: Refactor `server.py` (~3500 lines) into routers under `/app/backend/routes/`
 - **P2**: Date-range filters on Transactions
-- **P2**: Add `<DialogDescription>` to Radix DialogContent components to silence a11y console warnings
+- **P2**: Add `<DialogDescription>` to Radix DialogContent components to silence a11y warnings
 - **P3**: Object storage for images (currently base64)
 
 ## Test Credentials
