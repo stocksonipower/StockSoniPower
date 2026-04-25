@@ -19,7 +19,7 @@ const NAV = [
   { to: "/locations", label: "Location Master", icon: Buildings, testid: "nav-locations" },
   { to: "/stock-in", label: "Stock In", icon: ArrowDown, testid: "nav-stock-in" },
   { to: "/stock-out", label: "Stock Out", icon: ArrowUp, testid: "nav-stock-out" },
-  { to: "/balance", label: "Stock Balance", icon: Scales, testid: "nav-balance" },
+  { to: "/balance", label: "Stock Summary", icon: Scales, testid: "nav-balance" },
   { to: "/transactions", label: "Transactions", icon: ClockCounterClockwise, testid: "nav-transactions" },
   { to: "/low-stock", label: "Low Stock", icon: Warning, testid: "nav-low-stock" },
 ];

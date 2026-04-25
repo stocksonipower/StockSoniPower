@@ -18,7 +18,7 @@ export default function StockBalancePage() {
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="balance-page">
       <div className="mb-6">
         <div className="label-sm mb-2">Current State</div>
-        <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Balance</h1>
+        <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Summary</h1>
       </div>
 
       <div className="relative mb-4">
