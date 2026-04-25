@@ -1180,11 +1180,13 @@ async def list_transactions(
     # Backward compat: if `limit` query param is provided, return first `limit` rows (no pagination headers consumer needed)
     if limit is not None and limit > 0:
         rows = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+        await _enrich_items(rows)
         response.headers["X-Total-Count"] = str(total)
         response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
         return rows
     skip = (page - 1) * page_size
     rows = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1284,6 +1286,7 @@ async def list_receipt_notes(
     total = await db.receipt_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.receipt_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1296,6 +1299,7 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
     doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Receipt note not found")
+    await _enrich_note_items([doc])
     return doc
 
 
@@ -1452,6 +1456,72 @@ def _key(p, m):
     return f"{(p or '').strip()}||{(m or '').strip()}"
 
 
+# ----------- Live-join helper for consistent master / location data -----------
+_MASTER_FIELDS = (
+    "model", "old_part_no", "make_part_no",
+    "description_1", "description_2",
+    "remarks_oem", "remarks_others",
+    "item_category", "image", "reorder_level",
+)
+
+
+async def _enrich_items(items: list):
+    """In-place: overwrite snapshotted master & location fields on each dict
+    with the LATEST values from stock_master / godowns / racks / boxes.
+    Items that don't have a corresponding live master are left untouched.
+    Accepts a list of dicts that have part_no/make and/or godown_id/rack_id/box_id.
+    """
+    if not items:
+        return
+    # 1. Build pair sets to query
+    sm_pairs = list({(it.get("part_no", ""), it.get("make", "")) for it in items if it.get("part_no")})
+    g_ids = list({it.get("godown_id") for it in items if it.get("godown_id")})
+    r_ids = list({it.get("rack_id") for it in items if it.get("rack_id")})
+    b_ids = list({it.get("box_id") for it in items if it.get("box_id")})
+    sm_map, g_map, r_map, b_map = {}, {}, {}, {}
+    if sm_pairs:
+        or_q = [{"part_no": p, "make": m} for p, m in sm_pairs]
+        async for sm in db.stock_master.find({"$or": or_q}, {"_id": 0}):
+            sm_map[(sm.get("part_no"), sm.get("make"))] = sm
+    if g_ids:
+        async for g in db.godowns.find({"id": {"$in": g_ids}}, {"_id": 0}):
+            g_map[g["id"]] = g
+    if r_ids:
+        async for r in db.racks.find({"id": {"$in": r_ids}}, {"_id": 0}):
+            r_map[r["id"]] = r
+    if b_ids:
+        async for b in db.boxes.find({"id": {"$in": b_ids}}, {"_id": 0}):
+            b_map[b["id"]] = b
+    # 2. Overwrite each item's snapshot fields with live values where available
+    for it in items:
+        sm = sm_map.get((it.get("part_no"), it.get("make")))
+        if sm:
+            for f in _MASTER_FIELDS:
+                if f in sm:
+                    it[f] = sm.get(f) or ("" if f != "reorder_level" else 0)
+        g = g_map.get(it.get("godown_id"))
+        if g and g.get("godown_name") is not None:
+            it["godown_name"] = g["godown_name"]
+        rk = r_map.get(it.get("rack_id"))
+        if rk and rk.get("rack_no") is not None:
+            it["rack_no"] = rk["rack_no"]
+        bx = b_map.get(it.get("box_id"))
+        if bx:
+            if bx.get("box_no") is not None:
+                it["box_no"] = bx["box_no"]
+            it["box_category"] = bx.get("box_category", it.get("box_category", ""))
+
+
+async def _enrich_note_items(notes: list):
+    """For documents that contain nested `items[]`, enrich each item."""
+    flat = []
+    for n in notes:
+        for it in (n.get("items") or []):
+            flat.append(it)
+    await _enrich_items(flat)
+    return notes
+
+
 async def _aggregate_other_rkn_qty(rn_id: str, exclude_rkn_id: Optional[str] = None) -> dict:
     """Sum the qty per (part_no, make) across all OTHER racking notes for an RN."""
     q = {"receipt_note_id": rn_id}
@@ -1582,6 +1652,7 @@ async def list_racking_notes(
     total = await db.racking_notes.count_documents({})
     skip = (page - 1) * page_size
     rows = await db.racking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1594,6 +1665,7 @@ async def get_racking_note(rkn_id: str, user=Depends(get_current_user)):
     doc = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Racking note not found")
+    await _enrich_note_items([doc])
     return doc
 
 
@@ -1816,6 +1888,7 @@ async def list_issue_notes(
     total = await db.issue_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.issue_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1828,6 +1901,7 @@ async def get_issue_note(in_id: str, user=Depends(get_current_user)):
     doc = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Issue note not found")
+    await _enrich_note_items([doc])
     return doc
 
 
@@ -2132,6 +2206,7 @@ async def list_picking_notes(
     total = await db.picking_notes.count_documents({})
     skip = (page - 1) * page_size
     rows = await db.picking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    await _enrich_note_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -2144,6 +2219,7 @@ async def get_picking_note(pn_id: str, user=Depends(get_current_user)):
     doc = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Picking note not found")
+    await _enrich_note_items([doc])
     return doc
 
 
