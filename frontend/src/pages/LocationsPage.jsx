@@ -26,6 +26,11 @@ export default function LocationsPage() {
   const [selectedRackIds, setSelectedRackIds] = useState(new Set());
   const [selectedBoxIds, setSelectedBoxIds] = useState(new Set());
 
+  // Edit-mode toggles (only when ON, checkboxes appear)
+  const [editModeGodown, setEditModeGodown] = useState(false);
+  const [editModeRack, setEditModeRack] = useState(false);
+  const [editModeBox, setEditModeBox] = useState(false);
+
   const godownFileRef = useRef(null);
   const rackFileRef = useRef(null);
   const boxFileRef = useRef(null);
@@ -111,8 +116,9 @@ export default function LocationsPage() {
     return next;
   };
   const toggleAll = (set, items) => {
-    if (set.size === items.length && items.length > 0) return new Set();
-    return new Set(items.map((x) => x.id));
+    const selectable = items.filter((x) => !x.in_use);
+    if (set.size === selectable.length && selectable.length > 0) return new Set();
+    return new Set(selectable.map((x) => x.id));
   };
 
   const bulkDelete = async (kind, ids, reload, clear) => {
@@ -120,7 +126,10 @@ export default function LocationsPage() {
     if (!window.confirm(`Delete ${ids.size} ${kind}(s)? This cannot be undone.`)) return;
     try {
       const { data } = await api.post(`/${kind}/bulk-delete`, { ids: [...ids] });
-      toast.success(`Deleted ${data.deleted} ${kind}`);
+      const blocked = data.blocked || 0;
+      let msg = `Deleted ${data.deleted} ${kind}`;
+      if (blocked) msg += ` • ${blocked} skipped (in use by stock entries)`;
+      blocked ? toast.warning(msg) : toast.success(msg);
       clear(new Set());
       reload();
     } catch (e) {
@@ -179,12 +188,13 @@ export default function LocationsPage() {
         <ColumnCard
           title="Godowns" icon={Buildings} count={godowns.length}
           toolbar={
-            <>
-              <input ref={godownFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
-                onChange={(e) => bulkImport(e, "/godowns/bulk-upload", loadGodowns)} data-testid="godown-bulk-upload-input" />
-              <ToolbarBtn onClick={() => downloadCsv("/godowns/download/template", "godowns_template.csv")} icon={DownloadSimple} label="Template" testid="godown-template-btn" />
-              <ToolbarBtn onClick={() => godownFileRef.current?.click()} icon={UploadSimple} label="Import" testid="godown-import-btn" />
-            </>
+            <ToolbarBtn
+              onClick={() => { setEditModeGodown((v) => !v); setSelectedGodownIds(new Set()); }}
+              icon={Pencil}
+              label={editModeGodown ? "Done" : "Edit"}
+              active={editModeGodown}
+              testid="godown-edit-toggle"
+            />
           }
           form={
             <div className="flex gap-2">
@@ -199,14 +209,15 @@ export default function LocationsPage() {
             <EmptyState text="No godowns yet. Add one above." />
           ) : (
             <>
-              <SelectAllBar
-                count={selectedGodownIds.size}
-                allChecked={selectedGodownIds.size === godowns.length && godowns.length > 0}
-                someChecked={selectedGodownIds.size > 0 && selectedGodownIds.size < godowns.length}
-                onToggleAll={() => setSelectedGodownIds((s) => toggleAll(s, godowns))}
-                onBulkDelete={() => bulkDelete("godowns", selectedGodownIds, loadGodowns, setSelectedGodownIds)}
-                testidPrefix="godown"
-              />
+              {editModeGodown && (
+                <SelectAllBar
+                  count={selectedGodownIds.size}
+                  totalSelectable={godowns.filter((x) => !x.in_use).length}
+                  onToggleAll={() => setSelectedGodownIds((s) => toggleAll(s, godowns))}
+                  onBulkDelete={() => bulkDelete("godowns", selectedGodownIds, loadGodowns, setSelectedGodownIds)}
+                  testidPrefix="godown"
+                />
+              )}
               <ul>
                 {godowns.map((g) => (
                   <li
@@ -216,13 +227,17 @@ export default function LocationsPage() {
                     }`}
                     data-testid={`godown-item-${g.id}`}
                   >
-                    <Checkbox
-                      checked={selectedGodownIds.has(g.id)}
-                      onCheckedChange={() => setSelectedGodownIds((s) => toggleSet(s, g.id))}
-                      onClick={(e) => e.stopPropagation()}
-                      className={selectedGodown === g.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
-                      data-testid={`select-godown-${g.id}`}
-                    />
+                    {editModeGodown && (
+                      <Checkbox
+                        checked={selectedGodownIds.has(g.id)}
+                        disabled={g.in_use}
+                        onCheckedChange={() => !g.in_use && setSelectedGodownIds((s) => toggleSet(s, g.id))}
+                        onClick={(e) => e.stopPropagation()}
+                        className={selectedGodown === g.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
+                        data-testid={`select-godown-${g.id}`}
+                        title={g.in_use ? "In use by stock entries" : ""}
+                      />
+                    )}
                     {isEditing("godown", g.id) ? (
                     <>
                       <Input
@@ -261,12 +276,13 @@ export default function LocationsPage() {
           disabled={!selectedGodown}
           disabledText="Select a godown"
           toolbar={
-            <>
-              <input ref={rackFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
-                onChange={(e) => bulkImport(e, "/racks/bulk-upload", () => selectedGodown && loadRacks(selectedGodown))} data-testid="rack-bulk-upload-input" />
-              <ToolbarBtn onClick={() => downloadCsv("/racks/download/template", "racks_template.csv")} icon={DownloadSimple} label="Template" testid="rack-template-btn" />
-              <ToolbarBtn onClick={() => rackFileRef.current?.click()} icon={UploadSimple} label="Import" testid="rack-import-btn" />
-            </>
+            <ToolbarBtn
+              onClick={() => { setEditModeRack((v) => !v); setSelectedRackIds(new Set()); }}
+              icon={Pencil}
+              label={editModeRack ? "Done" : "Edit"}
+              active={editModeRack}
+              testid="rack-edit-toggle"
+            />
           }
           form={
             <div className="flex gap-2">
@@ -282,14 +298,15 @@ export default function LocationsPage() {
             <EmptyState text="No racks. Add one above." />
           ) : (
             <>
-              <SelectAllBar
-                count={selectedRackIds.size}
-                allChecked={selectedRackIds.size === racks.length && racks.length > 0}
-                someChecked={selectedRackIds.size > 0 && selectedRackIds.size < racks.length}
-                onToggleAll={() => setSelectedRackIds((s) => toggleAll(s, racks))}
-                onBulkDelete={() => bulkDelete("racks", selectedRackIds, () => loadRacks(selectedGodown), setSelectedRackIds)}
-                testidPrefix="rack"
-              />
+              {editModeRack && (
+                <SelectAllBar
+                  count={selectedRackIds.size}
+                  totalSelectable={racks.filter((x) => !x.in_use).length}
+                  onToggleAll={() => setSelectedRackIds((s) => toggleAll(s, racks))}
+                  onBulkDelete={() => bulkDelete("racks", selectedRackIds, () => loadRacks(selectedGodown), setSelectedRackIds)}
+                  testidPrefix="rack"
+                />
+              )}
               <ul>
               {racks.map((r) => (
                 <li
@@ -299,13 +316,17 @@ export default function LocationsPage() {
                   }`}
                   data-testid={`rack-item-${r.id}`}
                 >
-                  <Checkbox
-                    checked={selectedRackIds.has(r.id)}
-                    onCheckedChange={() => setSelectedRackIds((s) => toggleSet(s, r.id))}
-                    onClick={(e) => e.stopPropagation()}
-                    className={selectedRack === r.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
-                    data-testid={`select-rack-${r.id}`}
-                  />
+                  {editModeRack && (
+                    <Checkbox
+                      checked={selectedRackIds.has(r.id)}
+                      disabled={r.in_use}
+                      onCheckedChange={() => !r.in_use && setSelectedRackIds((s) => toggleSet(s, r.id))}
+                      onClick={(e) => e.stopPropagation()}
+                      className={selectedRack === r.id ? "border-white data-[state=checked]:bg-white data-[state=checked]:text-slate-900" : ""}
+                      data-testid={`select-rack-${r.id}`}
+                      title={r.in_use ? "In use by stock entries" : ""}
+                    />
+                  )}
                   {isEditing("rack", r.id) ? (
                     <>
                       <Input
@@ -352,12 +373,13 @@ export default function LocationsPage() {
           disabled={!selectedRack}
           disabledText="Select a rack"
           toolbar={
-            <>
-              <input ref={boxFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
-                onChange={(e) => bulkImport(e, "/boxes/bulk-upload", () => selectedRack && loadBoxes(selectedRack))} data-testid="box-bulk-upload-input" />
-              <ToolbarBtn onClick={() => downloadCsv("/boxes/download/template", "boxes_template.csv")} icon={DownloadSimple} label="Template" testid="box-template-btn" />
-              <ToolbarBtn onClick={() => boxFileRef.current?.click()} icon={UploadSimple} label="Import" testid="box-import-btn" />
-            </>
+            <ToolbarBtn
+              onClick={() => { setEditModeBox((v) => !v); setSelectedBoxIds(new Set()); }}
+              icon={Pencil}
+              label={editModeBox ? "Done" : "Edit"}
+              active={editModeBox}
+              testid="box-edit-toggle"
+            />
           }
           form={
             <div className="flex gap-2">
@@ -373,14 +395,15 @@ export default function LocationsPage() {
             <EmptyState text="No boxes. Add one above." />
           ) : (
             <>
-              <SelectAllBar
-                count={selectedBoxIds.size}
-                allChecked={selectedBoxIds.size === boxes.length && boxes.length > 0}
-                someChecked={selectedBoxIds.size > 0 && selectedBoxIds.size < boxes.length}
-                onToggleAll={() => setSelectedBoxIds((s) => toggleAll(s, boxes))}
-                onBulkDelete={() => bulkDelete("boxes", selectedBoxIds, () => loadBoxes(selectedRack), setSelectedBoxIds)}
-                testidPrefix="box"
-              />
+              {editModeBox && (
+                <SelectAllBar
+                  count={selectedBoxIds.size}
+                  totalSelectable={boxes.filter((x) => !x.in_use).length}
+                  onToggleAll={() => setSelectedBoxIds((s) => toggleAll(s, boxes))}
+                  onBulkDelete={() => bulkDelete("boxes", selectedBoxIds, () => loadBoxes(selectedRack), setSelectedBoxIds)}
+                  testidPrefix="box"
+                />
+              )}
               <ul>
                 {boxes.map((b) => (
                   <li
@@ -388,12 +411,16 @@ export default function LocationsPage() {
                     className="px-4 py-2.5 border-b border-slate-100 flex items-center gap-2 group hover:bg-slate-50 text-slate-800"
                     data-testid={`box-item-${b.id}`}
                   >
-                    <Checkbox
-                      checked={selectedBoxIds.has(b.id)}
-                      onCheckedChange={() => setSelectedBoxIds((s) => toggleSet(s, b.id))}
-                      onClick={(e) => e.stopPropagation()}
-                      data-testid={`select-box-${b.id}`}
-                    />
+                    {editModeBox && (
+                      <Checkbox
+                        checked={selectedBoxIds.has(b.id)}
+                        disabled={b.in_use}
+                        onCheckedChange={() => !b.in_use && setSelectedBoxIds((s) => toggleSet(s, b.id))}
+                        onClick={(e) => e.stopPropagation()}
+                        data-testid={`select-box-${b.id}`}
+                        title={b.in_use ? "In use by stock entries" : ""}
+                      />
+                    )}
                     {isEditing("box", b.id) ? (
                     <>
                       <Input
@@ -616,11 +643,14 @@ function ColumnCard({ title, icon: Icon, count, form, disabled, disabledText, to
   );
 }
 
-function ToolbarBtn({ onClick, icon: Icon, label, testid }) {
+function ToolbarBtn({ onClick, icon: Icon, label, testid, active }) {
+  const cls = active
+    ? "bg-slate-900 text-white border-slate-900"
+    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100 border-slate-200";
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-sm border border-slate-200"
+      className={`flex items-center gap-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider rounded-sm border ${cls}`}
       data-testid={testid}
       title={label}
     >
@@ -633,17 +663,20 @@ function EmptyState({ text }) {
   return <div className="p-8 text-center text-sm text-slate-400">{text}</div>;
 }
 
-function SelectAllBar({ count, allChecked, someChecked, onToggleAll, onBulkDelete, testidPrefix }) {
+function SelectAllBar({ count, totalSelectable, onToggleAll, onBulkDelete, testidPrefix }) {
+  const allChecked = count === totalSelectable && totalSelectable > 0;
+  const someChecked = count > 0 && count < totalSelectable;
   return (
     <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex items-center gap-2 sticky top-0 z-10">
       <Checkbox
         checked={allChecked}
         data-state={allChecked ? "checked" : someChecked ? "indeterminate" : "unchecked"}
         onCheckedChange={onToggleAll}
+        disabled={totalSelectable === 0}
         data-testid={`select-all-${testidPrefix}`}
       />
       <span className="text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500">
-        {count > 0 ? `${count} selected` : "Select all"}
+        {count > 0 ? `${count} selected` : `Select all (${totalSelectable})`}
       </span>
       {count > 0 && (
         <button

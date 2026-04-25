@@ -581,25 +581,31 @@ class BulkDeleteRequest(BaseModel):
 @api_router.post("/godowns/bulk-delete")
 async def godowns_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
     if not payload.ids:
-        return {"deleted": 0}
-    res = await db.godowns.delete_many({"id": {"$in": payload.ids}})
-    return {"deleted": res.deleted_count}
+        return {"deleted": 0, "blocked": 0}
+    used = set(await db.transactions.distinct("godown_id", {"godown_id": {"$in": payload.ids}}))
+    deletable = [i for i in payload.ids if i not in used]
+    res = await db.godowns.delete_many({"id": {"$in": deletable}})
+    return {"deleted": res.deleted_count, "blocked": len(payload.ids) - len(deletable)}
 
 
 @api_router.post("/racks/bulk-delete")
 async def racks_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
     if not payload.ids:
-        return {"deleted": 0}
-    res = await db.racks.delete_many({"id": {"$in": payload.ids}})
-    return {"deleted": res.deleted_count}
+        return {"deleted": 0, "blocked": 0}
+    used = set(await db.transactions.distinct("rack_id", {"rack_id": {"$in": payload.ids}}))
+    deletable = [i for i in payload.ids if i not in used]
+    res = await db.racks.delete_many({"id": {"$in": deletable}})
+    return {"deleted": res.deleted_count, "blocked": len(payload.ids) - len(deletable)}
 
 
 @api_router.post("/boxes/bulk-delete")
 async def boxes_bulk_delete(payload: BulkDeleteRequest, user=Depends(get_current_user)):
     if not payload.ids:
-        return {"deleted": 0}
-    res = await db.boxes.delete_many({"id": {"$in": payload.ids}})
-    return {"deleted": res.deleted_count}
+        return {"deleted": 0, "blocked": 0}
+    used = set(await db.transactions.distinct("box_id", {"box_id": {"$in": payload.ids}}))
+    deletable = [i for i in payload.ids if i not in used]
+    res = await db.boxes.delete_many({"id": {"$in": deletable}})
+    return {"deleted": res.deleted_count, "blocked": len(payload.ids) - len(deletable)}
 
 
 class RackRangeRequest(BaseModel):
@@ -678,9 +684,13 @@ async def create_godown(payload: GodownCreate, user=Depends(get_current_user)):
     return doc
 
 
-@api_router.get("/godowns", response_model=List[Godown])
+@api_router.get("/godowns")
 async def list_godowns(user=Depends(get_current_user)):
-    return await db.godowns.find({}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    godowns = await db.godowns.find({}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    used = set(await db.transactions.distinct("godown_id"))
+    for g in godowns:
+        g["in_use"] = g["id"] in used
+    return godowns
 
 
 @api_router.put("/godowns/{godown_id}", response_model=Godown)
@@ -694,6 +704,8 @@ async def update_godown(godown_id: str, payload: GodownCreate, user=Depends(get_
 
 @api_router.delete("/godowns/{godown_id}")
 async def delete_godown(godown_id: str, user=Depends(get_current_user)):
+    if await db.transactions.find_one({"godown_id": godown_id}):
+        raise HTTPException(status_code=400, detail="Godown is in use by stock entries")
     await db.godowns.delete_one({"id": godown_id})
     return {"ok": True}
 
@@ -709,10 +721,14 @@ async def create_rack(payload: RackCreate, user=Depends(get_current_user)):
     return doc
 
 
-@api_router.get("/racks", response_model=List[Rack])
+@api_router.get("/racks")
 async def list_racks(godown_id: Optional[str] = None, user=Depends(get_current_user)):
     query = {"godown_id": godown_id} if godown_id else {}
-    return await db.racks.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    racks = await db.racks.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    used = set(await db.transactions.distinct("rack_id"))
+    for r in racks:
+        r["in_use"] = r["id"] in used
+    return racks
 
 
 class RackUpdate(BaseModel):
@@ -734,6 +750,8 @@ async def update_rack(rack_id: str, payload: RackUpdate, user=Depends(get_curren
 
 @api_router.delete("/racks/{rack_id}")
 async def delete_rack(rack_id: str, user=Depends(get_current_user)):
+    if await db.transactions.find_one({"rack_id": rack_id}):
+        raise HTTPException(status_code=400, detail="Rack is in use by stock entries")
     await db.racks.delete_one({"id": rack_id})
     return {"ok": True}
 
@@ -749,10 +767,14 @@ async def create_box(payload: BoxCreate, user=Depends(get_current_user)):
     return doc
 
 
-@api_router.get("/boxes", response_model=List[Box])
+@api_router.get("/boxes")
 async def list_boxes(rack_id: Optional[str] = None, user=Depends(get_current_user)):
     query = {"rack_id": rack_id} if rack_id else {}
-    return await db.boxes.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    boxes = await db.boxes.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    used = set(await db.transactions.distinct("box_id"))
+    for b in boxes:
+        b["in_use"] = b["id"] in used
+    return boxes
 
 
 class BoxUpdate(BaseModel):
@@ -774,6 +796,8 @@ async def update_box(box_id: str, payload: BoxUpdate, user=Depends(get_current_u
 
 @api_router.delete("/boxes/{box_id}")
 async def delete_box(box_id: str, user=Depends(get_current_user)):
+    if await db.transactions.find_one({"box_id": box_id}):
+        raise HTTPException(status_code=400, detail="Box is in use by stock entries")
     await db.boxes.delete_one({"id": box_id})
     return {"ok": True}
 
