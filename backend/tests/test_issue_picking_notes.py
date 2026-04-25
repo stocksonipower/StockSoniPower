@@ -12,7 +12,7 @@ import pytest
 import requests
 import uuid
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://godown-stock-tracker.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://warehouse-ops-65.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 ADMIN_EMAIL = "admin@stockmgmt.com"
 ADMIN_PASSWORD = "admin123"
