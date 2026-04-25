@@ -284,6 +284,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [invoiceNo, setInvoiceNo] = useState("");
   const [invoiceDate, setInvoiceDate] = useState("");
   const [items, setItems] = useState([emptyItem()]);
+  const [addCount, setAddCount] = useState(""); // bulk-add quantity
   const [saving, setSaving] = useState(false);
 
   // Inline "Create New Master" dialog
@@ -325,7 +326,11 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, isEdit]);
 
-  const addItem = () => setItems((p) => [...p, emptyItem()]);
+  const addItem = () => {
+    const n = Math.max(1, Math.min(500, parseInt(addCount, 10) || 1));
+    setItems((p) => [...p, ...Array.from({ length: n }, emptyItem)]);
+    setAddCount("");
+  };
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
@@ -451,9 +456,23 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             <div className="label-sm">Items Received</div>
             <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""}</div>
           </div>
-          <Button onClick={addItem} variant="outline" className="rounded-sm" data-testid="rn-add-row-button">
-            <Plus size={14} weight="bold" className="mr-1" /> Add Row
-          </Button>
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              min="1"
+              max="500"
+              value={addCount}
+              onChange={(e) => setAddCount(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItem(); } }}
+              placeholder="Qty"
+              className="rounded-sm font-mono h-9 w-24 text-center"
+              data-testid="rn-add-row-count"
+              title="Number of rows to add at once (default 1)"
+            />
+            <Button onClick={addItem} variant="outline" className="rounded-sm" data-testid="rn-add-row-button">
+              <Plus size={14} weight="bold" className="mr-1" /> Add Row{addCount && parseInt(addCount, 10) > 1 ? "s" : ""}
+            </Button>
+          </div>
         </div>
 
         <table className="data-table w-full">
