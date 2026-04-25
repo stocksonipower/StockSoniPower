@@ -1,5 +1,5 @@
 import React from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./lib/auth";
 import LoginPage from "./pages/LoginPage";
 import Layout from "./components/Layout";
@@ -18,9 +18,13 @@ import "./App.css";
 
 function Protected({ children, module, adminOnly }) {
   const { user, loading, isAdmin, canAccess } = useAuth();
+  const loc = useLocation();
   if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-500 text-sm">Loading…</div>;
   if (!user) return <Navigate to="/login" replace />;
-  if (user.force_password_reset) return <Navigate to="/profile?reset=1" replace />;
+  // Force reset: redirect anywhere except /profile itself (otherwise ProfilePage never renders)
+  if (user.force_password_reset && loc.pathname !== "/profile") {
+    return <Navigate to="/profile?reset=1" replace />;
+  }
   if (adminOnly && !isAdmin) return <Layout><AccessDenied moduleName="Users" /></Layout>;
   if (module && !canAccess(module)) return <Layout><AccessDenied moduleName={module} /></Layout>;
   return <Layout>{children}</Layout>;

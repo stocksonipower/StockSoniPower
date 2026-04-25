@@ -9,42 +9,65 @@ Build a warehouse stock management system with:
 - Search (part_no/make/description), Low stock alerts, Bulk Excel upload, Image upload, JWT login
 - Light, clean enterprise/warehouse dashboard
 
+## Recent Additions (User-requested)
+- Remove public registration; Admin-only User Management (CRUD)
+- Module-level RBAC (per-user feature flags)
+- 5-failed-login lockout (15 min)
+- Track `last_login`
+- In-App Notifications for all data entries / logins (Phase 2)
+- Assign Receipt Notes / Issue Notes to specific users for downstream completion gating (Phase 3)
+
 ## Architecture
-- **Backend**: FastAPI (`/api` prefix), MongoDB (motor), JWT Bearer auth, bcrypt, pandas for Excel/CSV, phosphor icons
-- **Frontend**: React 19, React Router 7, shadcn/ui, Tailwind (custom CSS vars, Swiss/High-Contrast theme), JetBrains Mono for part numbers, Chivo headings, IBM Plex Sans body
-- **DB collections**: `users`, `stock_master`, `godowns`, `racks`, `boxes`, `transactions`
+- **Backend**: FastAPI (`/api` prefix), MongoDB (motor), JWT Bearer auth, bcrypt, pandas for Excel/CSV
+- **Frontend**: React 19, React Router 7, shadcn/ui, Tailwind, JetBrains Mono for part numbers
+- **DB collections**: `users`, `stock_master`, `godowns`, `racks`, `boxes`, `transactions`, `receipt_notes`, `racking_notes`, `issue_notes`, `picking_notes`
 
 ## User Personas
-- **Warehouse admin** — catalog management, location setup, dashboards
-- **Warehouse operator** — daily stock in/out entry
+- **Warehouse admin** — catalog, locations, user management, dashboards
+- **Warehouse staff** — daily stock in/out, only the modules admin grants
 
-## What's Implemented (2026-02)
-- JWT auth (register/login/me) + admin seeding (`admin@stockmgmt.com / admin123`)
-- Stock Master: full CRUD (delete blocked when transactions exist; trash button disabled in UI), base64 image upload, uniqueness on `(part_no, make)`, multi-field global search (9 fields), CSV/Excel bulk upload, CSV export, Refresh button + Excel-style per-column filter & sort dropdowns, server-side pagination 5000/page with X-Total-Count header (2026-02-25)
-- Lookups: `/stock-master/lookup/makes?part_no=`, `/stock-master/lookup/item?part_no=&make=`
-- Godown / Rack / Box CRUD with hierarchical filters
-- Stock In / Stock Out transactions with auto-fill and validation (qty > 0, sufficient balance on OUT)
-- **Stock In → Receipt Note tab** (2026-02-25, 51/51 tests pass cumulative): list view (DD-MM-YYYY dates, right-aligned ITEMS + TOTAL QUANTITY columns, STATUS badge "Racking Pending"/"Racked", Edit + Delete actions per row — disabled when RACKED); Create form auto RN Date + auto RN No `RN/YY-YY/NNN` per Indian FY using **max(serial)+1 algorithm with DuplicateKey retry**; bulk Add Rows (qty input next to button); inline "+ Create New Master" dialog (Part No pre-filled); 3-condition Make dropdown; Edit reuses the create form (PUT preserves rn_no/rn_date/serial/fy); Delete with confirm. Receipt notes ARE blocked from edit/delete when RACKED.
-- **Live data consistency** (2026-02-25): every read endpoint now overwrites snapshotted master/location fields with the latest from `stock_master`, `godowns`, `racks`, `boxes`. Editing description_1, item_category, reorder_level on a Stock Master entry — or renaming a Godown/Rack/Box — instantly reflects across Transactions, Receipt Notes, Racking Notes, Issue Notes, Picking Notes, Stock Summary and Low Stock. Snapshot fields are kept on disk for audit but never returned stale. Helper: `_enrich_items` / `_enrich_note_items` (server.py). 11/11 backend tests + frontend smoke confirm propagation through UI.
-- **Stock In → Receipt Note + Racking Note tabs** (existing) and **Stock Out → Issue Note + Picking Note tabs** (2026-02-25, 47/47 cumulative tests pass). Stock Out mirrors Stock In design exactly:
-  - **Issue Note** (`IN/YY-YY/NNN`): records what's being requested + Issued To (user/department); auto FY-numbered with max+1; status `PICKING_PENDING / PARTIALLY_PICKED / FULLY_PICKED`; edit/delete blocked when any picking note exists.
-  - **Picking Note** (`PN/YY-YY/NNN`): per-Issue-Note location allocation. Loads items via `/prepare/{in_id}` returning available_qty per location (current stock - other DRAFT pending picks). Cascading Godown→Rack→Box, available-location chips, per-row +Split, "Pending X of Y" + "Avail N at loc" hints, client-side AND server-side over-allocation blocks (cumulative AND per-location). `Record Stock Out` button creates one OUT transaction per item; only flips PN→RECORDED, IN status independent.
-- Stock Balance (aggregation on transactions, IN positive / OUT negative)
-- Low Stock alerts with configurable threshold
-- Dashboard stats (items, stock, godowns, racks, boxes, low-stock count)
-- Transactions history with IN/OUT filter, **server-side pagination 10000/page with X-Total-Count header** (2026-02-25), legacy `?limit=` preserved for Dashboard widget
-- UI: Sidebar layout, 8 routes, sharp-edge Swiss design, hover states, sonner toasts, responsive grid
-- 25/25 backend tests + frontend verified
+## What's Implemented
+### Core (pre-2026-02)
+- JWT auth (login/me) + admin seed (`admin@stockmgmt.com / admin123`)
+- Stock Master CRUD with images (base64), bulk CSV/Excel upload, server-side pagination, per-column filter/sort, delete-block when in-use
+- Godown / Rack / Box CRUD, range create, bulk upload, hierarchical filters
+- Stock In / Stock Out (legacy direct transactions) with auto-fill + qty validation
+- Stock In → Receipt Note + Racking Note (FY-numbered, partial racking, split locations, edit/delete blocked when racked)
+- Stock Out → Issue Note + Picking Note (cascading locations, available-qty hints, over-allocation blocks both client + server)
+- Stock Balance, Low Stock alerts, Transactions history with pagination + filter
+- Live data consistency: `_enrich_items` overwrites snapshotted master/location fields with latest values on every read
+
+### Phase 1 — User Management & Auth Security (2026-02-25, COMPLETE)
+- **Public `/auth/register` removed** (returns 404)
+- **5-failed-login lockout**: 423 response, 15-min `lockout_until`, auto-cleared on admin reactivation or successful login
+- **`last_login` tracking** on every successful login
+- **`force_password_reset` flag**: user redirected to `/profile?reset=1` until they set a new password
+- **Admin `/users` CRUD**:
+  - GET / POST / PUT / DELETE (soft-deactivate)
+  - Module access map (7 modules)
+  - Cannot self-deactivate (UI hides Power button on own row)
+- **Module-level RBAC middleware** (`_module_dep`): admin always allowed; staff blocked with 403 when module flag is false
+- **`PUT /api/auth/me`**: self-service name + password change; clears `force_password_reset` on password change
+- **`GET /api/meta/modules`**: returns the 7 module keys
+- **Frontend**:
+  - `UsersPage.jsx` — list with status badges (Active/Locked/Deactivated), New/Edit dialog with module checkboxes, deactivate/reactivate, clear lockout button
+  - `ProfilePage.jsx` — read-only email/role, editable name + password, force-reset banner, post-save redirect home
+  - `Layout.jsx` — sidebar filters nav by `module_access`/`adminOnly`; Profile link in footer
+  - `App.js` `Protected` route — redirects on `force_password_reset` (skips redirect when already on `/profile`), shows 403 AccessDenied for missing module/admin role
+
+### Backend Tests
+- `/app/backend/tests/test_user_management.py` — 16/16 PASS (lockout, RBAC, CRUD, force-reset, module middleware)
 
 ## Backlog / Next Tasks
-- **P1**: Pagination on stock_master & transactions (currently limit 1000)
-- **P1**: Password policy on register (min length), rate-limit login
-- **P1**: Edit existing godown/rack/box fields (delete only today)
-- **P2**: Barcode/QR generation per item
-- **P2**: Export stock balance to Excel
-- **P2**: Multi-user roles (admin vs operator vs viewer)
-- **P2**: Date-range filters on Transactions page
-- **P2**: Reorder quantity threshold per-item (vs global)
+- **P1 — Phase 2: In-App Notifications & Activity Log**
+  - Backend: `notifications` collection; hook on Stock In/Out, all Note creates, logins/lockouts
+  - Frontend: bell icon in Layout with unread count + dropdown
+- **P1 — Phase 3: Workflow Assignment Gating**
+  - Optional `assigned_to` user dropdown on Receipt Note / Issue Note creation
+  - Restrict Racking/Picking creation to assignee (or any user when null)
+- **P2**: Barcode/QR generation for scan-based Stock In/Out
+- **P2**: Refactor `server.py` (~3000 lines) into routers under `/app/backend/routes/`
+- **P2**: Date-range filters on Transactions
 - **P3**: Stock transfer between locations (single txn)
 - **P3**: Object storage for images (currently base64)
 

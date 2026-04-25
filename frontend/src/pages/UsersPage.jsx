@@ -6,7 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Checkbox } from "../components/ui/checkbox";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "../components/ui/dialog";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -286,6 +286,9 @@ export default function UsersPage() {
             <DialogTitle className="text-2xl font-black tracking-tight">
               {editing ? "Edit User" : "New User"}
             </DialogTitle>
+            <DialogDescription className="text-sm text-slate-600">
+              {editing ? "Update account details, role, and module access." : "Create a new staff or admin account with controlled module access."}
+            </DialogDescription>
           </DialogHeader>
           <form onSubmit={submit} className="space-y-5 pt-2">
             <div className="grid grid-cols-2 gap-4">
