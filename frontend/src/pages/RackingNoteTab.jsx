@@ -11,7 +11,7 @@ import {
 } from "../components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin,
+  Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
 } from "@phosphor-icons/react";
 
 const PAGE_SIZE = 5000;
@@ -300,20 +300,26 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       setRknDate(editing.rkn_date);
       setSelectedRnId(editing.receipt_note_id);
       setPendingRns([{ id: editing.receipt_note_id, rn_no: editing.receipt_note_no, rn_date: editing.receipt_note_date }]);
-      setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [] })));
+      // Fetch a fresh prepare to learn pending_qty per (part,make) excluding THIS rkn so user can edit safely
+      api.get(`/racking-notes/prepare/${editing.receipt_note_id}`, { params: { exclude_rkn_id: editing.id } })
+        .then((r) => {
+          const pendingMap = {};
+          (r.data.items || []).forEach((p) => { pendingMap[`${p.part_no}||${p.make}`] = p; });
+          setItems((editing.items || []).map((it) => {
+            const p = pendingMap[`${it.part_no}||${it.make}`] || {};
+            return { ...it, existing_locations: p.existing_locations || [], pending_qty: p.pending_qty ?? 0, received_qty: p.received_qty ?? 0 };
+          }));
+        }).catch(() => {
+          setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [], pending_qty: 0, received_qty: 0 })));
+        });
     } else {
       api.get("/racking-notes/next-no").then((r) => {
         setRknNo(r.data.next_rkn_no);
         setRknDate(r.data.rkn_date);
       }).catch(() => toast.error("Could not preview racking-note number"));
-      api.get("/receipt-notes", { params: { status: "RACKING_PENDING", page_size: 5000 } })
-        .then((r) => {
-          // Filter out RNs that already have a draft racking note, by checking via the racking-notes list
-          api.get("/racking-notes", { params: { page_size: 5000 } }).then((rk) => {
-            const usedRnIds = new Set((rk.data || []).map((x) => x.receipt_note_id));
-            setPendingRns(r.data.filter((rn) => !usedRnIds.has(rn.id)));
-          });
-        });
+      // Show RNs that are NOT FULLY_RACKED (pending + partially racked)
+      api.get("/receipt-notes", { params: { not_status: "FULLY_RACKED", page_size: 5000 } })
+        .then((r) => setPendingRns(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEdit, editing]);
@@ -387,21 +393,69 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     });
   };
 
+  // Split a row: duplicate the part_no/make/master fields with empty location and qty 0
+  const splitRow = (i) => {
+    setItems((prev) => {
+      const src = prev[i];
+      const copy = {
+        ...src,
+        quantity: 0,
+        godown_id: "", godown_name: "",
+        rack_id: "", rack_no: "",
+        box_id: "", box_no: "", box_category: "",
+        // existing_locations & received/pending hint stay the same so the chips still appear
+      };
+      const out = [...prev];
+      out.splice(i + 1, 0, copy);
+      return out;
+    });
+  };
+
+  // Remove a row entirely
+  const removeRow = (i) => {
+    setItems((prev) => prev.filter((_, idx) => idx !== i));
+  };
+
+  // Sum of qty per (part_no, make) across the current rows -- used to display "Allocated X of Y" hints
+  const allocatedByKey = useMemo(() => {
+    const map = {};
+    items.forEach((r) => {
+      const k = `${r.part_no}||${r.make}`;
+      map[k] = (map[k] || 0) + (parseFloat(r.quantity) || 0);
+    });
+    return map;
+  }, [items]);
+
   const save = async () => {
     if (!selectedRnId) { toast.error("Select a Receipt Note"); return; }
     if (items.length === 0) { toast.error("No items to rack"); return; }
+    // Per-row checks
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (!it.godown_id || !it.rack_id) {
         toast.error(`Row ${i + 1}: pick Godown / Rack`); return;
       }
-      // Box is required only if the chosen rack has any boxes
       const hasBoxesForRack = (boxesByRack[it.rack_id] || []).length > 0;
       if (hasBoxesForRack && !it.box_id) {
         toast.error(`Row ${i + 1}: pick Box`); return;
       }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
+    }
+    // Cumulative-vs-pending check (client-side; backend re-validates)
+    // Build a map of pending_qty per key from the current rows (any row carries it)
+    const pendingMap = {};
+    items.forEach((r) => {
+      const k = `${r.part_no}||${r.make}`;
+      if (pendingMap[k] === undefined && r.pending_qty !== undefined) pendingMap[k] = r.pending_qty;
+    });
+    for (const [k, allocated] of Object.entries(allocatedByKey)) {
+      const pending = pendingMap[k];
+      if (pending !== undefined && allocated > pending + 1e-6) {
+        const [p, m] = k.split("||");
+        toast.error(`${p} / ${m}: allocated ${allocated} exceeds pending ${pending}`);
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -490,14 +544,20 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 <th className="min-w-[120px]">BOX *</th>
                 <th>BOX CATEGORY</th>
                 <th>EXISTING LOCATIONS</th>
+                <th className="w-20"></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
                 const racks = racksByGodown[it.godown_id] || [];
                 const boxes = boxesByRack[it.rack_id] || [];
+                const key = `${it.part_no}||${it.make}`;
+                const allocated = allocatedByKey[key] || 0;
+                const pending = it.pending_qty;
+                const received = it.received_qty;
+                const overAllocated = pending !== undefined && allocated > pending + 1e-6;
                 return (
-                  <tr key={idx} data-testid={`rkn-item-row-${idx}`}>
+                  <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td className="font-mono font-semibold">{it.part_no}</td>
                     <td>{it.make}</td>
@@ -512,7 +572,12 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-right">
                       <Input type="number" min="0.001" step="any" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className="rounded-sm font-mono h-8 text-right w-20" data-testid={`rkn-qty-${idx}`} />
+                        className={`rounded-sm font-mono h-8 text-right w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
+                      {pending !== undefined && (
+                        <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`rkn-pending-hint-${idx}`}>
+                          {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${received}`}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <Select value={it.godown_id || undefined} onValueChange={(v) => onGodownChange(idx, v)}>
@@ -560,6 +625,25 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                           })}
                         </div>
                       )}
+                    </td>
+                    <td className="whitespace-nowrap">
+                      <button
+                        onClick={() => splitRow(idx)}
+                        className="p-1 hover:bg-blue-50 text-blue-700 rounded-sm mr-1"
+                        title="Split into another row (same part, different location)"
+                        data-testid={`rkn-split-${idx}`}
+                      >
+                        <ArrowsSplit size={14} weight="bold" />
+                      </button>
+                      <button
+                        onClick={() => removeRow(idx)}
+                        disabled={items.length === 1}
+                        className={`p-1 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                        title="Remove row"
+                        data-testid={`rkn-remove-${idx}`}
+                      >
+                        <Trash size={14} />
+                      </button>
                     </td>
                   </tr>
                 );

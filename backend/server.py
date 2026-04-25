@@ -1198,11 +1198,17 @@ async def list_receipt_notes(
     page: int = Query(1, ge=1),
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
+    not_status: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    # Allow comma-separated lists for both filters
     if status:
-        query["status"] = status.upper()
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
     total = await db.receipt_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.receipt_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
@@ -1226,8 +1232,8 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     existing = await db.receipt_notes.find_one({"id": rn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
-    if existing.get("status") == "RACKED":
-        raise HTTPException(status_code=409, detail="Cannot edit — this receipt note has already been racked. Delete the linked racking note first.")
+    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
+        raise HTTPException(status_code=409, detail="Cannot edit — racking notes have been created against this receipt note. Delete those racking notes first.")
     if not payload.items or len(payload.items) == 0:
         raise HTTPException(status_code=400, detail="At least one item is required")
     for idx, it in enumerate(payload.items, start=1):
@@ -1253,11 +1259,9 @@ async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
     existing = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
-    if existing.get("status") == "RACKED":
-        raise HTTPException(status_code=409, detail="Cannot delete — this receipt note has already been racked. Delete the linked racking note first.")
     # Block delete if any racking note (DRAFT or RECORDED) references it
     if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
-        raise HTTPException(status_code=409, detail="Cannot delete — a racking note has been created against this receipt note. Delete the racking note first.")
+        raise HTTPException(status_code=409, detail="Cannot delete — racking notes exist for this receipt note. Delete them first.")
     await db.receipt_notes.delete_one({"id": rn_id})
     return {"ok": True}
 
@@ -1278,18 +1282,25 @@ async def next_racking_note_no(user=Depends(get_current_user)):
 
 
 @api_router.get("/racking-notes/prepare/{rn_id}")
-async def prepare_racking_note(rn_id: str, user=Depends(get_current_user)):
-    """Given a receipt-note id, return prefilled items (master fields + existing locations from balance)."""
+async def prepare_racking_note(rn_id: str, exclude_rkn_id: Optional[str] = None, user=Depends(get_current_user)):
+    """Given a receipt-note id, return prefilled items (master + existing locations + pending qty)."""
     rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not rn:
         raise HTTPException(status_code=404, detail="Receipt note not found")
-    if rn.get("status") == "RACKED":
-        raise HTTPException(status_code=409, detail="This receipt note is already racked")
+    if rn.get("status") == "FULLY_RACKED" and not exclude_rkn_id:
+        raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
+
+    other_sums = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id)
 
     items_out = []
     for it in rn.get("items", []):
         part_no = it.get("part_no", "")
         make = it.get("make", "")
+        received_qty = it.get("quantity", 0) or 0
+        already = other_sums.get(_key(part_no, make), 0)
+        pending = received_qty - already
+        if pending <= 0:
+            continue  # this item is fully racked elsewhere — skip
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         # Existing locations with positive qty
         pipeline = [
@@ -1308,13 +1319,15 @@ async def prepare_racking_note(rn_id: str, user=Depends(get_current_user)):
         raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
         existing_locations = [{**r["_id"], "current_qty": r["quantity"]} for r in raw_locs]
 
-        # Pre-fill location: if exactly 1 existing, use it; else leave blank
         prefill = existing_locations[0] if len(existing_locations) == 1 else None
 
         items_out.append({
             "part_no": part_no,
             "make": make,
-            "quantity": it.get("quantity", 0),
+            "received_qty": received_qty,
+            "already_racked_qty": already,
+            "pending_qty": pending,
+            "quantity": pending,  # default suggested qty for this RKN row
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -1330,13 +1343,14 @@ async def prepare_racking_note(rn_id: str, user=Depends(get_current_user)):
             "box_id": prefill["box_id"] if prefill else "",
             "box_no": prefill["box_no"] if prefill else "",
             "box_category": prefill.get("box_category", "") if prefill else "",
-            "existing_locations": existing_locations,  # informational; UI shows as chips
+            "existing_locations": existing_locations,
         })
 
     return {
         "receipt_note": {
             "id": rn["id"], "rn_no": rn["rn_no"], "rn_date": rn["rn_date"],
             "invoice_no": rn.get("invoice_no", ""), "invoice_date": rn.get("invoice_date", ""),
+            "status": rn.get("status"),
         },
         "items": items_out,
     }
@@ -1362,21 +1376,96 @@ async def _box_id_required_for_rack(rack_id: str) -> bool:
     return await db.boxes.count_documents({"rack_id": rack_id}) > 0
 
 
+def _key(p, m):
+    return f"{(p or '').strip()}||{(m or '').strip()}"
+
+
+async def _aggregate_other_rkn_qty(rn_id: str, exclude_rkn_id: Optional[str] = None) -> dict:
+    """Sum the qty per (part_no, make) across all OTHER racking notes for an RN."""
+    q = {"receipt_note_id": rn_id}
+    if exclude_rkn_id:
+        q["id"] = {"$ne": exclude_rkn_id}
+    sums = {}
+    async for rkn in db.racking_notes.find(q, {"_id": 0, "items": 1}):
+        for it in rkn.get("items", []):
+            k = _key(it.get("part_no"), it.get("make"))
+            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0)
+    return sums
+
+
+async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[str] = None):
+    """Cumulative racked qty per (part_no, make) across all RKNs for this RN must not exceed received qty.
+    `items` is the new-payload list (Pydantic models)."""
+    rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if not rn:
+        raise HTTPException(status_code=400, detail="Receipt note not found")
+    received = {}
+    for it in rn.get("items", []):
+        k = _key(it.get("part_no"), it.get("make"))
+        received[k] = received.get(k, 0) + (it.get("quantity") or 0)
+    other_sums = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id)
+    new_sums = {}
+    for it in items:
+        k = _key(it.part_no, it.make)
+        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
+        if k not in received:
+            raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked receipt note")
+    for k, new_q in new_sums.items():
+        recv = received.get(k, 0)
+        used = other_sums.get(k, 0)
+        total = used + new_q
+        if total > recv + 1e-6:
+            part, make = k.split("||", 1)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Quantity exceeds receipt note for {part} / {make}: "
+                    f"received {recv}, already racked elsewhere {used}, this note {new_q} "
+                    f"(total {total} > {recv})"
+                ),
+            )
+
+
+async def _recompute_rn_status(rn_id: str):
+    """Set RN status based on total racked qty across DRAFT + RECORDED RKNs vs received qty."""
+    rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if not rn:
+        return
+    received = {}
+    for it in rn.get("items", []):
+        k = _key(it.get("part_no"), it.get("make"))
+        received[k] = received.get(k, 0) + (it.get("quantity") or 0)
+    racked = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id=None)
+    if not received:
+        new_status = "RACKING_PENDING"
+    elif sum(racked.values()) == 0:
+        new_status = "RACKING_PENDING"
+    else:
+        all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in received.items())
+        new_status = "FULLY_RACKED" if all_full else "PARTIALLY_RACKED"
+    update = {"status": new_status}
+    if new_status == "FULLY_RACKED":
+        update["racked_at"] = rn.get("racked_at") or now_iso()
+    else:
+        # If reverting from FULLY_RACKED back to anything else, clear racked_at
+        if rn.get("racked_at"):
+            await db.receipt_notes.update_one({"id": rn_id}, {"$unset": {"racked_at": ""}})
+    await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
+
+
 @api_router.post("/racking-notes", response_model=RackingNote)
 async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_current_user)):
     rn = await db.receipt_notes.find_one({"id": payload.receipt_note_id}, {"_id": 0})
     if not rn:
         raise HTTPException(status_code=400, detail="Receipt note not found")
-    if rn.get("status") == "RACKED":
-        raise HTTPException(status_code=409, detail="This receipt note is already racked")
-    # Block creating a second draft against the same receipt note
-    if await db.racking_notes.find_one({"receipt_note_id": payload.receipt_note_id}):
-        raise HTTPException(status_code=409, detail="A racking note already exists for this receipt note")
+    if rn.get("status") == "FULLY_RACKED":
+        raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
     _validate_racking_items(payload.items)
     # Per-row: box_id required only if the chosen rack has boxes
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
+    await _validate_cumulative_qty(rn["id"], payload.items, exclude_rkn_id=None)
 
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
@@ -1403,6 +1492,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_curre
         try:
             await db.racking_notes.insert_one(doc)
             doc.pop("_id", None)
+            await _recompute_rn_status(rn["id"])
             return doc
         except DuplicateKeyError as e:
             last_err = e
@@ -1446,11 +1536,13 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
+    await _validate_cumulative_qty(existing.get("receipt_note_id"), payload.items, exclude_rkn_id=rkn_id)
     update = {
         "items": [it.model_dump() for it in payload.items],
         "updated_at": now_iso(),
     }
     await db.racking_notes.update_one({"id": rkn_id}, {"$set": update})
+    await _recompute_rn_status(existing.get("receipt_note_id"))
     doc = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
     return doc
 
@@ -1463,6 +1555,8 @@ async def delete_racking_note(rkn_id: str, user=Depends(get_current_user)):
     if existing.get("status") == "RECORDED":
         raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock In")
     await db.racking_notes.delete_one({"id": rkn_id})
+    if existing.get("receipt_note_id"):
+        await _recompute_rn_status(existing["receipt_note_id"])
     return {"ok": True}
 
 
@@ -1525,11 +1619,10 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
         {"id": rkn_id},
         {"$set": {"status": "RECORDED", "recorded_at": now}},
     )
+    # RN status is computed off saved racking-note items, not record state.
+    # Recording an RKN doesn't change RN status (the qty was already counted at save time).
     if rkn.get("receipt_note_id"):
-        await db.receipt_notes.update_one(
-            {"id": rkn["receipt_note_id"]},
-            {"$set": {"status": "RACKED", "racked_at": now}},
-        )
+        await _recompute_rn_status(rkn["receipt_note_id"])
     return {"ok": True, "transactions_created": len(tx_docs)}
 
 
@@ -1708,6 +1801,14 @@ async def startup():
     await db.racking_notes.create_index("receipt_note_id")
     # Backfill: ensure every existing receipt note has a status
     await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_PENDING"}})
+    # Migrate old "RACKED" value to new "FULLY_RACKED"
+    await db.receipt_notes.update_many({"status": "RACKED"}, {"$set": {"status": "FULLY_RACKED"}})
+    # Recompute every RN's status off saved racking notes (idempotent)
+    async for rn in db.receipt_notes.find({}, {"_id": 0, "id": 1}):
+        try:
+            await _recompute_rn_status(rn["id"])
+        except Exception:
+            pass
 
     # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others
     cursor = db.stock_master.find({"$or": [{"oem": {"$exists": True}}, {"remarks": {"$exists": True}}]})

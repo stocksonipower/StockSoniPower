@@ -161,7 +161,13 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
           <tbody>
             {rows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
-              const isRacked = r.status === "RACKED";
+              const isFully = r.status === "FULLY_RACKED";
+              const isPartial = r.status === "PARTIALLY_RACKED";
+              const hasRacking = isFully || isPartial; // any RKN exists -> edit/delete blocked
+              const statusLabel = isFully ? "Fully Racked" : (isPartial ? "Partially Racked" : "Racking Pending");
+              const statusClass = isFully
+                ? "bg-green-100 text-green-800"
+                : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
                 <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
                   <td className="font-mono text-slate-500">{(page - 1) * PAGE_SIZE + idx + 1}</td>
@@ -180,26 +186,26 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
-                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${isRacked ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusClass}`}
                       data-testid={`rn-status-${r.rn_no}`}>
-                      {isRacked ? "Racked" : "Racking Pending"}
+                      {statusLabel}
                     </span>
                   </td>
                   <td className="text-right whitespace-nowrap">
                     <button
                       onClick={() => onEdit(r)}
-                      disabled={isRacked}
-                      title={isRacked ? "Cannot edit — already racked" : "Edit"}
-                      className={`p-1.5 rounded-sm mr-1 ${isRacked ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                      disabled={hasRacking}
+                      title={hasRacking ? "Cannot edit — racking notes exist for this receipt" : "Edit"}
+                      className={`p-1.5 rounded-sm mr-1 ${hasRacking ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`rn-edit-${r.rn_no}`}
                     >
                       <Pencil size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(r)}
-                      disabled={isRacked}
-                      title={isRacked ? "Cannot delete — already racked" : "Delete"}
-                      className={`p-1.5 rounded-sm ${isRacked ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      disabled={hasRacking}
+                      title={hasRacking ? "Cannot delete — racking notes exist for this receipt" : "Delete"}
+                      className={`p-1.5 rounded-sm ${hasRacking ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                       data-testid={`rn-delete-${r.rn_no}`}
                     >
                       <Trash size={14} />
