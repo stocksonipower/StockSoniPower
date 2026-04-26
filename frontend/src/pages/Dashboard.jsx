@@ -34,39 +34,41 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    api.get("/dashboard/stats").then((r) => setStats(r.data));
+    api.get("/dashboard/stats")
+      .then((r) => setStats(r.data))
+      .catch((e) => { console.error("[dashboard] /dashboard/stats failed:", e); });
 
-    // Receipt notes: RACKING_PENDING + PARTIALLY_RACKED
+    // Receipt notes pending = anything not FULLY_RACKED
     api.get("/receipt-notes", {
-      params: { status: "RACKING_PENDING,PARTIALLY_RACKED", page_size: 1 }
+      params: { not_status: "FULLY_RACKED", page_size: 1 }
     }).then((r) => {
       const total = r.headers["x-total-count"];
-      setStockIn((prev) => ({ ...prev, receiptPending: total ? parseInt(total) : 0 }));
-    });
+      setStockIn((prev) => ({ ...prev, receiptPending: total ? parseInt(total, 10) : 0 }));
+    }).catch((e) => { console.error("[dashboard] /receipt-notes failed:", e); });
 
-    // Racking notes: DRAFT only — filter client side
+    // Racking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
     api.get("/racking-notes", {
-      params: { page_size: 5000 }
-    }).then((r) => {
-      const draftCount = r.data.filter((n) => n.status === "DRAFT").length;
-      setStockIn((prev) => ({ ...prev, rackingDraft: draftCount }));
-    });
-
-    // Issue notes: PICKING_PENDING + PARTIALLY_PICKED
-    api.get("/issue-notes", {
-      params: { status: "PICKING_PENDING,PARTIALLY_PICKED", page_size: 1 }
+      params: { status: "DRAFT", page_size: 1 }
     }).then((r) => {
       const total = r.headers["x-total-count"];
-      setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total) : 0 }));
-    });
+      setStockIn((prev) => ({ ...prev, rackingDraft: total ? parseInt(total, 10) : 0 }));
+    }).catch((e) => { console.error("[dashboard] /racking-notes failed:", e); });
 
-    // Picking notes: DRAFT only — filter client side
-    api.get("/picking-notes", {
-      params: { page_size: 5000 }
+    // Issue notes pending = anything not FULLY_PICKED
+    api.get("/issue-notes", {
+      params: { not_status: "FULLY_PICKED", page_size: 1 }
     }).then((r) => {
-      const draftCount = r.data.filter((n) => n.status === "DRAFT").length;
-      setStockOut((prev) => ({ ...prev, pickingDraft: draftCount }));
-    });
+      const total = r.headers["x-total-count"];
+      setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total, 10) : 0 }));
+    }).catch((e) => { console.error("[dashboard] /issue-notes failed:", e); });
+
+    // Picking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
+    api.get("/picking-notes", {
+      params: { status: "DRAFT", page_size: 1 }
+    }).then((r) => {
+      const total = r.headers["x-total-count"];
+      setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));
+    }).catch((e) => { console.error("[dashboard] /picking-notes failed:", e); });
 
     api.get("/stock-balance").then((r) => {
       const rows = r.data;
@@ -80,7 +82,7 @@ export default function Dashboard() {
         .map(([godown_name, total_quantity]) => ({ godown_name, total_quantity }))
         .sort((a, b) => a.godown_name.localeCompare(b.godown_name));
       setGodownSummary(summary);
-    });
+    }).catch((e) => { console.error("[dashboard] /stock-balance failed:", e); });
   }, []);
 
   return (

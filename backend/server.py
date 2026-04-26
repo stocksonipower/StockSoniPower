@@ -2328,11 +2328,20 @@ async def list_racking_notes(
     response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
+    not_status: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    total = await db.racking_notes.count_documents({})
+    query = {}
+    if status:
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    total = await db.racking_notes.count_documents(query)
     skip = (page - 1) * page_size
-    rows = await db.racking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    rows = await db.racking_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
     await _enrich_with_parent_assignee(rows, "receipt_notes", "receipt_note_id")
     response.headers["X-Total-Count"] = str(total)
@@ -2928,11 +2937,20 @@ async def list_picking_notes(
     response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
+    not_status: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    total = await db.picking_notes.count_documents({})
+    query = {}
+    if status:
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    total = await db.picking_notes.count_documents(query)
     skip = (page - 1) * page_size
-    rows = await db.picking_notes.find({}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    rows = await db.picking_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
     await _enrich_with_parent_assignee(rows, "issue_notes", "issue_note_id")
     response.headers["X-Total-Count"] = str(total)
