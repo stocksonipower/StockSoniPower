@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import NotificationBell from "./NotificationBell";
@@ -15,6 +15,8 @@ import {
   Warning,
   Users,
   UserCircle,
+  DotsSixVertical,
+  ArrowCounterClockwise,
 } from "@phosphor-icons/react";
 
 const NAV = [
@@ -30,9 +32,118 @@ const NAV = [
   { to: "/users", label: "Users", icon: Users, testid: "nav-users", adminOnly: true },
 ];
 
+const STORAGE_KEY_PREFIX = "stockmgmt:nav_order:v1:";
+
+function loadOrder(userId) {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + (userId || "anon"));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveOrder(userId, order) {
+  try {
+    localStorage.setItem(STORAGE_KEY_PREFIX + (userId || "anon"), JSON.stringify(order));
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
+/**
+ * Returns NAV reordered by `order` (array of `to` paths). Items present in NAV but
+ * missing from `order` are appended in their original order (for forward compatibility
+ * when new nav items are added in code).
+ */
+function applyOrder(items, order) {
+  if (!order || order.length === 0) return items;
+  const byTo = new Map(items.map((it) => [it.to, it]));
+  const ordered = [];
+  const seen = new Set();
+  for (const to of order) {
+    const it = byTo.get(to);
+    if (it) { ordered.push(it); seen.add(to); }
+  }
+  for (const it of items) if (!seen.has(it.to)) ordered.push(it);
+  return ordered;
+}
+
 export default function Layout({ children }) {
   const { user, logout, isAdmin, canAccess } = useAuth();
   const nav = useNavigate();
+
+  // Visible items (after permission filter)
+  const visibleItems = useMemo(() => NAV.filter((item) => {
+    if (item.adminOnly) return isAdmin;
+    if (item.module) return canAccess(item.module);
+    return true;
+  }), [isAdmin, canAccess]);
+
+  // Persisted order — initialise from localStorage; default to permission-filtered code order
+  const [order, setOrder] = useState(() => {
+    const saved = loadOrder(user?.id);
+    return saved || visibleItems.map((i) => i.to);
+  });
+
+  // If permissions/user change, reconcile order with newly visible items
+  useEffect(() => {
+    setOrder((prev) => {
+      const allowed = new Set(visibleItems.map((i) => i.to));
+      const filtered = prev.filter((to) => allowed.has(to));
+      const additions = visibleItems.map((i) => i.to).filter((to) => !filtered.includes(to));
+      return [...filtered, ...additions];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleItems.length, user?.id]);
+
+  // Persist whenever order changes
+  useEffect(() => {
+    if (order && order.length) saveOrder(user?.id, order);
+  }, [order, user?.id]);
+
+  const orderedItems = applyOrder(visibleItems, order);
+
+  // Drag state
+  const [dragFrom, setDragFrom] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+
+  const onDragStart = (idx) => (e) => {
+    setDragFrom(idx);
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    } catch { /* some browsers throw if not configured */ }
+  };
+  const onDragOver = (idx) => (e) => {
+    e.preventDefault();
+    if (dragOver !== idx) setDragOver(idx);
+    e.dataTransfer.dropEffect = "move";
+  };
+  const onDrop = (idx) => (e) => {
+    e.preventDefault();
+    const from = dragFrom !== null ? dragFrom : Number(e.dataTransfer.getData("text/plain"));
+    setDragFrom(null);
+    setDragOver(null);
+    if (from === null || isNaN(from) || from === idx) return;
+    setOrder((prev) => {
+      // operate on the currently-visible (filtered) list; map back to all-tos
+      const visibleTos = orderedItems.map((i) => i.to);
+      const moved = visibleTos[from];
+      const next = visibleTos.filter((_, i) => i !== from);
+      next.splice(idx, 0, moved);
+      // include any non-visible (out-of-permission but persisted) order entries at the end so we don't drop them
+      const visibleSet = new Set(visibleTos);
+      const hidden = prev.filter((to) => !visibleSet.has(to));
+      return [...next, ...hidden];
+    });
+  };
+  const onDragEnd = () => { setDragFrom(null); setDragOver(null); };
+
+  const resetOrder = () => {
+    const def = visibleItems.map((i) => i.to);
+    setOrder(def);
+  };
 
   const handleLogout = () => {
     logout();
@@ -53,30 +164,61 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
-          {NAV.filter((item) => {
-            if (item.adminOnly) return isAdmin;
-            if (item.module) return canAccess(item.module);
-            return true;
-          }).map((item) => {
+        <div className="px-3 pt-3 pb-1 flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-400">Navigation</span>
+          <button
+            onClick={resetOrder}
+            className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 hover:text-slate-700 flex items-center gap-1"
+            title="Reset menu order"
+            data-testid="nav-reset-order"
+          >
+            <ArrowCounterClockwise size={11} weight="bold" /> Reset
+          </button>
+        </div>
+
+        <nav className="flex-1 px-3 pb-3 space-y-0.5 overflow-y-auto" data-testid="nav-list">
+          {orderedItems.map((item, idx) => {
             const Icon = item.icon;
+            const isDragging = dragFrom === idx;
+            const isDropTarget = dragOver === idx && dragFrom !== null && dragFrom !== idx;
             return (
-              <NavLink
+              <div
                 key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                data-testid={item.testid}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-sm text-sm font-medium transition-colors duration-100 ${
-                    isActive
-                      ? "bg-slate-900 text-white"
-                      : "text-slate-700 hover:bg-slate-100"
-                  }`
-                }
+                onDragOver={onDragOver(idx)}
+                onDrop={onDrop(idx)}
+                onDragEnd={onDragEnd}
+                className={`group relative flex items-stretch rounded-sm transition-opacity ${isDragging ? "opacity-40" : ""} ${isDropTarget ? "ring-2 ring-blue-500 ring-offset-1" : ""}`}
+                data-testid={`nav-row-${item.to}`}
               >
-                <Icon size={18} weight="bold" />
-                {item.label}
-              </NavLink>
+                {/* Drag handle — only this initiates drag */}
+                <button
+                  type="button"
+                  draggable
+                  onDragStart={onDragStart(idx)}
+                  onDragEnd={onDragEnd}
+                  className="flex items-center justify-center w-5 cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Drag to reorder"
+                  aria-label={`Reorder ${item.label}`}
+                  data-testid={`nav-drag-handle-${item.to}`}
+                >
+                  <DotsSixVertical size={14} weight="bold" />
+                </button>
+                <NavLink
+                  to={item.to}
+                  end={item.to === "/"}
+                  data-testid={item.testid}
+                  className={({ isActive }) =>
+                    `flex-1 flex items-center gap-3 pl-1 pr-3 py-2.5 rounded-sm text-sm font-medium transition-colors duration-100 ${
+                      isActive
+                        ? "bg-slate-900 text-white"
+                        : "text-slate-700 hover:bg-slate-100"
+                    }`
+                  }
+                >
+                  <Icon size={18} weight="bold" />
+                  {item.label}
+                </NavLink>
+              </div>
             );
           })}
         </nav>
