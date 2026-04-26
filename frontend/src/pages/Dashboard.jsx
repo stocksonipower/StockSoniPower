@@ -10,6 +10,7 @@ import {
   Buildings,
   ArrowDown,
   ArrowUp,
+  ArrowsLeftRight,
   ArrowsClockwise,
 } from "@phosphor-icons/react";
 
@@ -34,6 +35,7 @@ export default function Dashboard() {
   const [godownSummary, setGodownSummary] = useState([]);
   const [stockIn, setStockIn] = useState({ receiptPending: null, rackingDraft: null });
   const [stockOut, setStockOut] = useState({ issuePending: null, pickingDraft: null });
+  const [stockTransfer, setStockTransfer] = useState({ requestPending: null, noteDraft: null });
   const [refreshing, setRefreshing] = useState(false);
   const navigate = useNavigate();
   const { isAdmin, canAccess } = useAuth();
@@ -86,6 +88,22 @@ export default function Dashboard() {
         const total = r.headers["x-total-count"];
         setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /picking-notes failed:", e); }),
+
+      // Transfer requests pending = anything not FULLY_TRANSFERRED
+      api.get("/transfer-requests", {
+        params: { not_status: "FULLY_TRANSFERRED", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockTransfer((prev) => ({ ...prev, requestPending: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /transfer-requests failed:", e); }),
+
+      // Transfer notes DRAFT — server-side filter (status=DRAFT) using x-total-count
+      api.get("/transfer-notes", {
+        params: { status: "DRAFT", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockTransfer((prev) => ({ ...prev, noteDraft: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /transfer-notes failed:", e); }),
 
       api.get("/stock-balance").then((r) => {
         const rows = r.data;
@@ -204,6 +222,35 @@ export default function Dashboard() {
               <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Picking Note Pending</span>
               <span className="text-2xl font-black font-mono text-slate-900">
                 {stockOut.pickingDraft ?? "–"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Stock Transfer Widget */}
+        <div
+          className="bg-white border border-slate-200 rounded-sm p-5 cursor-pointer transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md hover:border-blue-300"
+          onClick={() => goIfAllowed("stock_transfer", "/stock-transfer")}
+          data-testid="widget-stock-transfer"
+        >
+          <div className="flex items-center gap-3 mb-4">
+            <div className="h-10 w-10 flex items-center justify-center rounded-sm bg-blue-50 text-blue-700">
+              <ArrowsLeftRight size={22} weight="bold" />
+            </div>
+            <div className="text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500">Stock Transfer</div>
+          </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Transfer Request Pending</span>
+              <span className="text-2xl font-black font-mono text-slate-900">
+                {stockTransfer.requestPending ?? "–"}
+              </span>
+            </div>
+            <div className="border-t border-slate-100" />
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Transfer Note Pending</span>
+              <span className="text-2xl font-black font-mono text-slate-900">
+                {stockTransfer.noteDraft ?? "–"}
               </span>
             </div>
           </div>
