@@ -147,5 +147,13 @@ Build a warehouse stock management system with:
 - **Files touched**: `/app/backend/storage.py` (new), `/app/backend/server.py`, `/app/frontend/src/components/AuthImage.jsx` (new), `/app/frontend/src/components/ImageViewerDialog.jsx` (new), `/app/frontend/src/components/StockMasterImageUploader.jsx` (new), `/app/frontend/src/pages/StockMasterPage.jsx`, `/app/frontend/src/pages/StockBalancePage.jsx`
 - **Tests**: `/app/backend/tests/test_image_storage.py` (13 pytest, 100% pass) + Playwright E2E (100% pass)
 
+## Sidebar Nav Reorder (2026-04-25, COMPLETE — iteration_17.json 100% pass)
+- **Drag-and-drop reordering** of left sidebar nav items via native HTML5 drag&drop (no extra deps).
+- Each row gets a small grip handle (`DotsSixVertical`) revealed on row hover; only the handle is `draggable`, so clicking the rest of the row still navigates normally.
+- Order **persists in localStorage** per-user (key `stockmgmt:nav_order:v1:<userId>`); survives reloads.
+- **Reset** link at top of nav restores default code order. New nav items added in code are auto-appended to end of saved order (forward-compatible).
+- Permission filter still applied: items are filtered first, then reordered. Drop zones highlight with a blue ring.
+- File: `/app/frontend/src/components/Layout.jsx` rewritten (263 lines, lint clean).
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
