@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { api } from "../lib/api";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../lib/auth";
+import { toast } from "sonner";
 import {
   Package,
   Warning,
@@ -8,6 +10,7 @@ import {
   Buildings,
   ArrowDown,
   ArrowUp,
+  ArrowsClockwise,
 } from "@phosphor-icons/react";
 
 const Stat = ({ icon: Icon, label, value, accent = "slate", testid, onClick }) => (
@@ -31,59 +34,87 @@ export default function Dashboard() {
   const [godownSummary, setGodownSummary] = useState([]);
   const [stockIn, setStockIn] = useState({ receiptPending: null, rackingDraft: null });
   const [stockOut, setStockOut] = useState({ issuePending: null, pickingDraft: null });
+  const [refreshing, setRefreshing] = useState(false);
   const navigate = useNavigate();
+  const { isAdmin, canAccess } = useAuth();
+
+  // Permission-checked navigation for cards/widgets
+  const goIfAllowed = (module, path) => {
+    const allowed = isAdmin || !module || canAccess(module);
+    if (!allowed) {
+      toast.error("Access Denied");
+      return;
+    }
+    navigate(path);
+  };
+
+  const fetchDashboardData = useCallback(() => {
+    setRefreshing(true);
+    const calls = [
+      api.get("/dashboard/stats")
+        .then((r) => setStats(r.data))
+        .catch((e) => { console.error("[dashboard] /dashboard/stats failed:", e); }),
+
+      // Receipt notes pending = anything not FULLY_RACKED
+      api.get("/receipt-notes", {
+        params: { not_status: "FULLY_RACKED", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockIn((prev) => ({ ...prev, receiptPending: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /receipt-notes failed:", e); }),
+
+      // Racking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
+      api.get("/racking-notes", {
+        params: { status: "DRAFT", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockIn((prev) => ({ ...prev, rackingDraft: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /racking-notes failed:", e); }),
+
+      // Issue notes pending = anything not FULLY_PICKED
+      api.get("/issue-notes", {
+        params: { not_status: "FULLY_PICKED", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /issue-notes failed:", e); }),
+
+      // Picking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
+      api.get("/picking-notes", {
+        params: { status: "DRAFT", page_size: 1 }
+      }).then((r) => {
+        const total = r.headers["x-total-count"];
+        setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));
+      }).catch((e) => { console.error("[dashboard] /picking-notes failed:", e); }),
+
+      api.get("/stock-balance").then((r) => {
+        const rows = r.data;
+        const map = {};
+        rows.forEach((row) => {
+          const name = row.godown_name || "Unknown";
+          if (!map[name]) map[name] = 0;
+          map[name] += row.total_quantity || 0;
+        });
+        const summary = Object.entries(map)
+          .map(([godown_name, total_quantity]) => ({ godown_name, total_quantity }))
+          .sort((a, b) => a.godown_name.localeCompare(b.godown_name));
+        setGodownSummary(summary);
+      }).catch((e) => { console.error("[dashboard] /stock-balance failed:", e); }),
+    ];
+    Promise.all(calls).finally(() => setRefreshing(false));
+  }, []);
 
   useEffect(() => {
-    api.get("/dashboard/stats")
-      .then((r) => setStats(r.data))
-      .catch((e) => { console.error("[dashboard] /dashboard/stats failed:", e); });
+    fetchDashboardData();
+  }, [fetchDashboardData]);
 
-    // Receipt notes pending = anything not FULLY_RACKED
-    api.get("/receipt-notes", {
-      params: { not_status: "FULLY_RACKED", page_size: 1 }
-    }).then((r) => {
-      const total = r.headers["x-total-count"];
-      setStockIn((prev) => ({ ...prev, receiptPending: total ? parseInt(total, 10) : 0 }));
-    }).catch((e) => { console.error("[dashboard] /receipt-notes failed:", e); });
-
-    // Racking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
-    api.get("/racking-notes", {
-      params: { status: "DRAFT", page_size: 1 }
-    }).then((r) => {
-      const total = r.headers["x-total-count"];
-      setStockIn((prev) => ({ ...prev, rackingDraft: total ? parseInt(total, 10) : 0 }));
-    }).catch((e) => { console.error("[dashboard] /racking-notes failed:", e); });
-
-    // Issue notes pending = anything not FULLY_PICKED
-    api.get("/issue-notes", {
-      params: { not_status: "FULLY_PICKED", page_size: 1 }
-    }).then((r) => {
-      const total = r.headers["x-total-count"];
-      setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total, 10) : 0 }));
-    }).catch((e) => { console.error("[dashboard] /issue-notes failed:", e); });
-
-    // Picking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
-    api.get("/picking-notes", {
-      params: { status: "DRAFT", page_size: 1 }
-    }).then((r) => {
-      const total = r.headers["x-total-count"];
-      setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));
-    }).catch((e) => { console.error("[dashboard] /picking-notes failed:", e); });
-
-    api.get("/stock-balance").then((r) => {
-      const rows = r.data;
-      const map = {};
-      rows.forEach((row) => {
-        const name = row.godown_name || "Unknown";
-        if (!map[name]) map[name] = 0;
-        map[name] += row.total_quantity || 0;
-      });
-      const summary = Object.entries(map)
-        .map(([godown_name, total_quantity]) => ({ godown_name, total_quantity }))
-        .sort((a, b) => a.godown_name.localeCompare(b.godown_name));
-      setGodownSummary(summary);
-    }).catch((e) => { console.error("[dashboard] /stock-balance failed:", e); });
-  }, []);
+  // Auto-refresh every 60s
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchDashboardData();
+    }, 60000);
+    return () => clearInterval(id);
+  }, [fetchDashboardData]);
 
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="dashboard-page">
@@ -92,16 +123,29 @@ export default function Dashboard() {
           <div className="label-sm mb-2">Overview</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Dashboard</h1>
         </div>
-        <div className="text-xs font-mono text-slate-500">
-          {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric", weekday: "long" }).replace(/\//g, "-")}
+        <div className="flex items-center gap-3">
+          <div className="text-xs font-mono text-slate-500">
+            {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric", weekday: "long" }).replace(/\//g, "-")}
+          </div>
+          <button
+            type="button"
+            onClick={fetchDashboardData}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 border border-slate-300 rounded-sm hover:bg-slate-50 disabled:opacity-50"
+            data-testid="dashboard-refresh-button"
+            title="Refresh"
+          >
+            <ArrowsClockwise size={12} weight="bold" className={refreshing ? "animate-spin" : ""} />
+            Refresh
+          </button>
         </div>
       </div>
 
       {/* Row 1 — Master stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-        <Stat icon={Package} label="Stock Master" value={stats?.total_items ?? "–"} testid="stat-total-items" onClick={() => navigate("/stock-master")} />
-        <Stat icon={TrendUp} label="Stock Summary" value={stats?.total_stock_qty ?? "–"} accent="blue" testid="stat-total-stock" onClick={() => navigate("/balance")} />
-        <Stat icon={Warning} label="Low Stock" value={stats?.low_stock_count ?? "–"} accent="red" testid="stat-low-stock" onClick={() => navigate("/low-stock")} />
+        <Stat icon={Package} label="Stock Master" value={stats?.total_items ?? "–"} testid="stat-total-items" onClick={() => goIfAllowed("stock_master", "/stock-master")} />
+        <Stat icon={TrendUp} label="Stock Summary" value={stats?.total_stock_qty ?? "–"} accent="blue" testid="stat-total-stock" onClick={() => goIfAllowed("stock_summary", "/balance")} />
+        <Stat icon={Warning} label="Low Stock" value={stats?.low_stock_count ?? "–"} accent="red" testid="stat-low-stock" onClick={() => goIfAllowed("low_stock", "/low-stock")} />
       </div>
 
       {/* Row 2 — Workflow widgets */}
@@ -110,7 +154,7 @@ export default function Dashboard() {
         {/* Stock In Widget */}
         <div
           className="bg-white border border-slate-200 rounded-sm p-5 cursor-pointer transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md hover:border-blue-300"
-          onClick={() => navigate("/stock-in")}
+          onClick={() => goIfAllowed("stock_in", "/stock-in")}
           data-testid="widget-stock-in"
         >
           <div className="flex items-center gap-3 mb-4">
@@ -139,7 +183,7 @@ export default function Dashboard() {
         {/* Stock Out Widget */}
         <div
           className="bg-white border border-slate-200 rounded-sm p-5 cursor-pointer transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md hover:border-blue-300"
-          onClick={() => navigate("/stock-out")}
+          onClick={() => goIfAllowed("stock_out", "/stock-out")}
           data-testid="widget-stock-out"
         >
           <div className="flex items-center gap-3 mb-4">
@@ -196,11 +240,11 @@ export default function Dashboard() {
                     <td className="px-5 py-2.5 w-1/2 font-mono font-bold text-slate-900 text-sm">{g.total_quantity}</td>
                   </tr>
                 ))}
-                <tr className="border-t-2 border-slate-300 bg-slate-50">
-                  <td className="px-5 py-2.5 w-1/2 text-[11px] uppercase tracking-[0.12em] font-bold text-slate-500">
+                <tr className="total-row sticky bottom-0 bg-white border-t-2 border-slate-300 z-10">
+                  <td className="px-5 py-2.5 w-1/2 text-[11px] uppercase tracking-[0.12em] font-bold text-slate-500 bg-slate-50">
                     {godownSummary.length} godown{godownSummary.length !== 1 ? "s" : ""}
                   </td>
-                  <td className="px-5 py-2.5 w-1/2 font-mono font-black text-slate-900 text-sm">
+                  <td className="px-5 py-2.5 w-1/2 font-mono font-black text-slate-900 text-sm bg-slate-50">
                     {godownSummary.reduce((sum, g) => sum + g.total_quantity, 0)}
                   </td>
                 </tr>
