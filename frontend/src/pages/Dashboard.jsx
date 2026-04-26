@@ -2,11 +2,10 @@ import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import {
   Package,
-  Buildings,
-  Stack,
-  Archive,
   Warning,
   TrendUp,
+  ArrowDown,
+  ArrowUp,
 } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 
@@ -45,13 +44,10 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
-        <Stat icon={Package} label="Items" value={stats?.total_items ?? "–"} testid="stat-total-items" />
+      {/* Stats grid — 3 cards only */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <Stat icon={Package} label="Total Items" value={stats?.total_items ?? "–"} testid="stat-total-items" />
         <Stat icon={TrendUp} label="Total Stock" value={stats?.total_stock_qty ?? "–"} accent="blue" testid="stat-total-stock" />
-        <Stat icon={Buildings} label="Godowns" value={stats?.total_godowns ?? "–"} testid="stat-godowns" />
-        <Stat icon={Stack} label="Racks" value={stats?.total_racks ?? "–"} testid="stat-racks" />
-        <Stat icon={Archive} label="Boxes" value={stats?.total_boxes ?? "–"} testid="stat-boxes" />
         <Stat icon={Warning} label="Low Stock" value={stats?.low_stock_count ?? "–"} accent="red" testid="stat-low-stock" />
       </div>
 
@@ -119,8 +115,13 @@ export default function Dashboard() {
                     <tr key={t.id}>
                       <td>
                         <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${
-                          t.type === "IN" ? "bg-green-50 text-green-700" : "bg-orange-50 text-orange-700"
+                          t.type === "IN"
+                            ? "bg-green-50 text-green-700"
+                            : "bg-orange-50 text-orange-700"
                         }`}>
+                          {t.type === "IN"
+                            ? <ArrowDown size={10} className="inline mr-1" weight="bold" />
+                            : <ArrowUp size={10} className="inline mr-1" weight="bold" />}
                           {t.type}
                         </span>
                       </td>
