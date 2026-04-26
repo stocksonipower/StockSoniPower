@@ -28,19 +28,15 @@ export default function Dashboard() {
 
     api.get("/stock-balance").then((r) => {
       const rows = r.data;
-
       const map = {};
       rows.forEach((row) => {
         const name = row.godown_name || "Unknown";
         if (!map[name]) map[name] = 0;
         map[name] += row.total_quantity || 0;
       });
-
-      // Sort alphabetically by godown name
       const summary = Object.entries(map)
         .map(([godown_name, total_quantity]) => ({ godown_name, total_quantity }))
         .sort((a, b) => a.godown_name.localeCompare(b.godown_name));
-
       setGodownSummary(summary);
     });
   }, []);
@@ -57,7 +53,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Stats grid — 3 cards only */}
+      {/* Stats grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         <Stat icon={Package} label="Total Items" value={stats?.total_items ?? "–"} testid="stat-total-items" />
         <Stat icon={TrendUp} label="Total Stock" value={stats?.total_stock_qty ?? "–"} accent="blue" testid="stat-total-stock" />
@@ -80,18 +76,18 @@ export default function Dashboard() {
           {godownSummary.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-500">No stock data available.</div>
           ) : (
-            <table className="data-table w-full" data-testid="godown-summary-table">
+            <table className="w-full" data-testid="godown-summary-table">
               <thead>
-                <tr>
-                  <th>Godown Name</th>
-                  <th className="text-right">Total Quantity</th>
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  <th className="text-left text-[11px] uppercase tracking-[0.12em] font-bold text-slate-500 px-5 py-2 w-1/2">Godown Name</th>
+                  <th className="text-left text-[11px] uppercase tracking-[0.12em] font-bold text-slate-500 px-5 py-2 w-1/2">Total Quantity</th>
                 </tr>
               </thead>
               <tbody>
                 {godownSummary.map((g, i) => (
-                  <tr key={i} data-testid={`godown-row-${i}`}>
-                    <td className="font-medium text-slate-800">{g.godown_name}</td>
-                    <td className="text-right font-mono font-bold text-slate-900">{g.total_quantity}</td>
+                  <tr key={i} className="border-b border-slate-100 hover:bg-slate-50" data-testid={`godown-row-${i}`}>
+                    <td className="px-5 py-2.5 w-1/2 font-medium text-slate-800 text-sm">{g.godown_name}</td>
+                    <td className="px-5 py-2.5 w-1/2 font-mono font-bold text-slate-900 text-sm">{g.total_quantity}</td>
                   </tr>
                 ))}
               </tbody>
