@@ -532,8 +532,6 @@ export default function StockMasterPage() {
     setExportProgress({ loaded: 0, total: 0, label: "Fetching all items…" });
     try {
       const all = await fetchAllPages(false, "Fetching all items…");
-    try {
-      const all = await fetchAllPages(false, "Fetching all items…");
       if (!all.length) { toast.error("No items to export"); return; }
       setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
       const ts = new Date().toISOString().slice(0, 10);
