@@ -40,7 +40,7 @@ const emptyForm = {
   description_1: "", description_2: "",
   remarks_oem: "", remarks_others: "",
   make: "", item_category: "", reorder_level: 0,
-  image: "", images: [],
+  images: [],
 };
 
 // ─── Import Preview Dialog ────────────────────────────────────────────────────
@@ -201,14 +201,32 @@ export default function StockMasterPage() {
     } finally { setLoading(false); }
   };
 
- // Reset to page 1 whenever the filtering criteria change
-  useEffect(() => { setPage(1); }, [search, colFilters, sort]);
-  // Debounced reload whenever any input that affects the query changes
+ // Reset to page 1 whenever search/filters/sort change, then debounce-load.
+  // Merging the two effects avoids the race that fired two API requests
+  // (one for the old page, one for page 1).
+  const isFirstLoad = useRef(true);
   useEffect(() => {
+    if (page !== 1) {
+      // Resetting to page 1 will re-trigger this effect with page=1 → load happens then
+      setPage(1);
+      return;
+    }
     const t = setTimeout(load, 150);
     return () => clearTimeout(t);
     /* eslint-disable-next-line */
-  }, [search, page, colFilters, sort]);
+  }, [search, colFilters, sort]);
+
+  // Reload when the user changes pages directly via Prev/Next
+  useEffect(() => {
+    if (isFirstLoad.current) {
+      // The effect above already triggers the very first load on mount
+      isFirstLoad.current = false;
+      return;
+    }
+    const t = setTimeout(load, 150);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line */
+  }, [page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -292,10 +310,21 @@ export default function StockMasterPage() {
     }
   }, [matchIdx, matches.length]);
 
-  // Ctrl+F / Cmd+F focuses the search box (overrides browser Find)
+  // Ctrl+F / Cmd+F focuses the search box (overrides browser Find).
+  // Skip when any dialog is open or an export is running.
+  // Uses a ref-mirror so we don't have to depend on `viewer` (declared later).
+  const dialogStateRef = useRef({ open: false, previewOpen: false, importing: false, exporting: false, viewerOpen: false });
+  useEffect(() => {
+    dialogStateRef.current = {
+      open, previewOpen, importing, exporting,
+      viewerOpen: !!viewer,
+    };
+  });
   useEffect(() => {
     const handler = (e) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+        const s = dialogStateRef.current;
+        if (s.open || s.previewOpen || s.importing || s.exporting || s.viewerOpen) return;
         e.preventDefault();
         if (searchInputRef.current) {
           searchInputRef.current.focus();
@@ -614,7 +643,7 @@ export default function StockMasterPage() {
               </div>
             )}
           </div>
-          <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileSelected} className="hidden" data-testid="bulk-upload-input" />
+         <input ref={excelInput} type="file" accept=".xlsx,.csv" onChange={handleFileSelected} className="hidden" data-testid="bulk-upload-input" />
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
             <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
           </Button>
