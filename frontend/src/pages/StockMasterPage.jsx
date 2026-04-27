@@ -178,11 +178,22 @@ export default function StockMasterPage() {
 
   const load = async () => {
     setLoading(true);
-    const requestSearch = search; // capture the search term this request is for
+    const requestSearch = search;
     try {
-      const params = { page, page_size: PAGE_SIZE };
-      if (requestSearch) params.search = requestSearch;
-      const res = await api.get("/stock-master", { params });
+      // Build URLSearchParams so we can send filter[<field>]=A&filter[<field>]=B repeated keys
+      const sp = new URLSearchParams();
+      sp.set("page", String(page));
+      sp.set("page_size", String(PAGE_SIZE));
+      if (requestSearch) sp.set("search", requestSearch);
+      if (sort.key && sort.dir) {
+        sp.set("sort_by", sort.key);
+        sp.set("sort_dir", sort.dir);
+      }
+      Object.entries(colFilters).forEach(([key, set]) => {
+        if (!set || set.size === 0) return;
+        for (const v of set) sp.append(`filter[${key}]`, v);
+      });
+      const res = await api.get(`/stock-master?${sp.toString()}`);
       setItems(res.data);
       setLoadedSearch(requestSearch);
       const t = parseInt(res.headers["x-total-count"], 10);
@@ -190,63 +201,61 @@ export default function StockMasterPage() {
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { setPage(1); }, [search]);
-  useEffect(() => { const t = setTimeout(load, 150); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search, page]);
+ // Reset to page 1 whenever the filtering criteria change
+  useEffect(() => { setPage(1); }, [search, colFilters, sort]);
+  // Debounced reload whenever any input that affects the query changes
+  useEffect(() => {
+    const t = setTimeout(load, 150);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line */
+  }, [search, page, colFilters, sort]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const uniqueValues = React.useMemo(() => {
-    const map = {};
-    COLUMNS.forEach((c) => {
-      if (c.isImage) { map[c.key] = ["Has image", "No image"]; return; }
-      const seen = new Set();
-      items.forEach((it) => {
-        const raw = it[c.key];
-        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-        seen.add(v);
-      });
-      map[c.key] = [...seen].sort((a, b) => {
-        if (a === BLANK) return 1;
-        if (b === BLANK) return -1;
-        const na = Number(a), nb = Number(b);
-        if (!isNaN(na) && !isNaN(nb)) return na - nb;
-        return a.localeCompare(b);
-      });
-    });
-    return map;
-  }, [items]);
+  // Distinct values per column come from the server (whole DB, not just current page).
+  // We lazy-load them once on mount.
+  const [uniqueValues, setUniqueValues] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const map = {};
+      for (const c of COLUMNS) {
+        if (c.isImage) { map[c.key] = ["Has image", "No image"]; continue; }
+        try {
+          const res = await api.get(`/stock-master/distinct/${c.key}`);
+          map[c.key] = Array.isArray(res.data?.values) ? res.data.values : [];
+        } catch {
+          map[c.key] = [];
+        }
+      }
+      if (!cancelled) setUniqueValues(map);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Refresh distinct values whenever items change (e.g. after add/edit/import) — debounced
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      const map = {};
+      for (const c of COLUMNS) {
+        if (c.isImage) { map[c.key] = ["Has image", "No image"]; continue; }
+        try {
+          const res = await api.get(`/stock-master/distinct/${c.key}`);
+          map[c.key] = Array.isArray(res.data?.values) ? res.data.values : [];
+        } catch {
+          map[c.key] = [];
+        }
+      }
+      setUniqueValues(map);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [total]);
 
   const itemHasImage = (row) => Array.isArray(row.images) && row.images.length > 0;
 
-  const visibleItems = React.useMemo(() => {
-    const activeKeys = Object.keys(colFilters);
-    let out = items;
-    if (activeKeys.length) {
-      out = out.filter((row) => activeKeys.every((k) => {
-        const allowed = colFilters[k];
-        if (!allowed || allowed.size === 0) return true;
-        const col = COLUMNS.find((c) => c.key === k);
-        if (col?.isImage) return allowed.has(itemHasImage(row) ? "Has image" : "No image");
-        const raw = row[k];
-        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-        return allowed.has(v);
-      }));
-    }
-    if (sort.key && sort.dir) {
-      const col = COLUMNS.find((c) => c.key === sort.key);
-      const numeric = col?.isNumeric;
-      out = [...out].sort((a, b) => {
-        const av = a[sort.key]; const bv = b[sort.key];
-        const aS = av === null || av === undefined ? "" : String(av);
-        const bS = bv === null || bv === undefined ? "" : String(bv);
-        let cmp;
-        if (numeric) cmp = (Number(av) || 0) - (Number(bv) || 0);
-        else cmp = aS.localeCompare(bS);
-        return sort.dir === "asc" ? cmp : -cmp;
-      });
-    }
-    return out;
-  }, [items, colFilters, sort]);
+  // Filtering & sorting are now done by the backend. The frontend just renders
+  // whatever the server returns for this page.
+  const visibleItems = items;
 
   // ── Search matches inside the currently visible rows ─────────────────────
  const matches = React.useMemo(() => {
@@ -275,7 +284,14 @@ export default function StockMasterPage() {
     if (matches.length > 0 && matchIdx >= matches.length) setMatchIdx(0);
   }, [matches.length, matchIdx]);
 
-  // Auto-scroll the current match cell into view (within the table scroll container)
+ // Auto-scroll the active search match cell into view
+  useEffect(() => {
+    const el = currentCellRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    }
+  }, [matchIdx, matches.length]);
+
   // Ctrl+F / Cmd+F focuses the search box (overrides browser Find)
   useEffect(() => {
     const handler = (e) => {
@@ -453,14 +469,27 @@ export default function StockMasterPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, [exportMenuOpen]);
 
-  // Fetch every page from the server, optionally filtered by a search term
-  const fetchAllPages = async (searchTerm, label) => {
+  // Fetch every page from the server. If `useCurrentView` is true, also forward
+  // the active search, column filters, and sort.
+  const fetchAllPages = async (useCurrentView, label) => {
     const all = [];
     let pageNum = 1;
     while (true) {
-      const params = { page: pageNum, page_size: PAGE_SIZE };
-      if (searchTerm) params.search = searchTerm;
-      const res = await api.get("/stock-master", { params });
+      const sp = new URLSearchParams();
+      sp.set("page", String(pageNum));
+      sp.set("page_size", String(PAGE_SIZE));
+      if (useCurrentView) {
+        if (search) sp.set("search", search);
+        if (sort.key && sort.dir) {
+          sp.set("sort_by", sort.key);
+          sp.set("sort_dir", sort.dir);
+        }
+        Object.entries(colFilters).forEach(([key, set]) => {
+          if (!set || set.size === 0) return;
+          for (const v of set) sp.append(`filter[${key}]`, v);
+        });
+      }
+      const res = await api.get(`/stock-master?${sp.toString()}`);
       all.push(...res.data);
       const totalCount = parseInt(res.headers["x-total-count"], 10) || all.length;
       setExportProgress({ loaded: all.length, total: totalCount, label });
@@ -468,37 +497,6 @@ export default function StockMasterPage() {
       pageNum += 1;
     }
     return all;
-  };
-
-  // Mirror of visibleItems memo: apply current column filters + sort to any list
-  const applyClientFiltersAndSort = (rows) => {
-    const activeKeys = Object.keys(colFilters);
-    let out = rows;
-    if (activeKeys.length) {
-      out = out.filter((row) => activeKeys.every((k) => {
-        const allowed = colFilters[k];
-        if (!allowed || allowed.size === 0) return true;
-        const col = COLUMNS.find((c) => c.key === k);
-        if (col?.isImage) return allowed.has(itemHasImage(row) ? "Has image" : "No image");
-        const raw = row[k];
-        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-        return allowed.has(v);
-      }));
-    }
-    if (sort.key && sort.dir) {
-      const col = COLUMNS.find((c) => c.key === sort.key);
-      const numeric = col?.isNumeric;
-      out = [...out].sort((a, b) => {
-        const av = a[sort.key]; const bv = b[sort.key];
-        const aS = av === null || av === undefined ? "" : String(av);
-        const bS = bv === null || bv === undefined ? "" : String(bv);
-        let cmp;
-        if (numeric) cmp = (Number(av) || 0) - (Number(bv) || 0);
-        else cmp = aS.localeCompare(bS);
-        return sort.dir === "asc" ? cmp : -cmp;
-      });
-    }
-    return out;
   };
 
   // Build a real .xlsx file with one worksheet and trigger a download
@@ -528,12 +526,14 @@ export default function StockMasterPage() {
     XLSX.writeFile(wb, filename);
   };
 
-  const exportFullStockMaster = async () => {
+ const exportFullStockMaster = async () => {
     setExportMenuOpen(false);
     setExporting(true);
     setExportProgress({ loaded: 0, total: 0, label: "Fetching all items…" });
     try {
-      const all = await fetchAllPages("", "Fetching all items…");
+      const all = await fetchAllPages(false, "Fetching all items…");
+    try {
+      const all = await fetchAllPages(false, "Fetching all items…");
       if (!all.length) { toast.error("No items to export"); return; }
       setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
       const ts = new Date().toISOString().slice(0, 10);
@@ -551,14 +551,12 @@ export default function StockMasterPage() {
     setExporting(true);
     setExportProgress({ loaded: 0, total: 0, label: "Fetching matching items…" });
     try {
-      const all = await fetchAllPages(search, "Fetching matching items…");
-      setExportProgress({ loaded: all.length, total: all.length, label: "Applying filters & sort…" });
-      const filtered = applyClientFiltersAndSort(all);
-      if (!filtered.length) { toast.error("Nothing matches the current view"); return; }
-      setExportProgress({ loaded: filtered.length, total: filtered.length, label: "Generating Excel file…" });
+      const all = await fetchAllPages(true, "Fetching matching items…");
+      if (!all.length) { toast.error("Nothing matches the current view"); return; }
+      setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
       const ts = new Date().toISOString().slice(0, 10);
-      buildAndDownloadXlsx(filtered, `stock_master_view_${ts}.xlsx`);
-      toast.success(`Exported ${filtered.length.toLocaleString()} item(s)`);
+      buildAndDownloadXlsx(all, `stock_master_view_${ts}.xlsx`);
+      toast.success(`Exported ${all.length.toLocaleString()} item(s)`);
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Export failed");
     } finally {
@@ -792,9 +790,8 @@ export default function StockMasterPage() {
           {total === 0 ? "No items" : (
             <>
               Showing <span className="font-semibold text-slate-900">{visibleItems.length}</span>
-              {visibleItems.length !== items.length && <> of <span className="font-semibold text-slate-900">{items.length}</span> on page</>}
               {" · "}<span className="font-semibold text-slate-900">{total}</span> total
-              {(activeFilterCount > 0) && <span className="text-slate-500"> (page filtered locally)</span>}
+              {(activeFilterCount > 0 || !!sort.key) && <span className="text-slate-500"> (filtered)</span>}
             </>
           )}
         </div>

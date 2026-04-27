@@ -920,18 +920,44 @@ async def create_stock_master(payload: StockMasterCreate, user=Depends(get_curre
     return doc
 
 
+# Whitelist of fields that may be filtered/sorted via query params (security)
+_FILTERABLE_FIELDS = {
+    "model", "part_no", "old_part_no", "make_part_no",
+    "description_1", "description_2",
+    "remarks_oem", "remarks_others",
+    "make", "item_category", "reorder_level",
+}
+# Sentinel used by frontend to represent "blank/empty" cells in column filters
+_BLANK_TOKEN = "(Blanks)"
+
+
 @api_router.get("/stock-master", response_model=List[StockMaster])
 async def list_stock_master(
+    request: Request,
     response: Response,
     search: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(5000, ge=1, le=5000),
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,   # "asc" | "desc"
     user=Depends(get_current_user),
 ):
-    query = {}
+    """List stock master items.
+
+    Supports:
+      - `search` (free text across multiple fields)
+      - `page` / `page_size` (pagination)
+      - `sort_by` / `sort_dir` (server-side sort on a whitelisted field)
+      - `filter[<field>]` repeated query params for column filters, e.g.
+            ?filter[make]=Cummins&filter[make]=Tata
+        A value of "(Blanks)" matches empty/missing values.
+    """
+    query: dict = {}
+
+    # Free-text search across many fields
     if search:
         s = search.strip()
-        query = {"$or": [
+        query["$or"] = [
             {"part_no": {"$regex": s, "$options": "i"}},
             {"old_part_no": {"$regex": s, "$options": "i"}},
             {"make_part_no": {"$regex": s, "$options": "i"}},
@@ -941,11 +967,93 @@ async def list_stock_master(
             {"remarks_others": {"$regex": s, "$options": "i"}},
             {"make": {"$regex": s, "$options": "i"}},
             {"item_category": {"$regex": s, "$options": "i"}},
-        ]}
+        ]
+
+    # Per-column filters: ?filter[make]=A&filter[make]=B  → make ∈ {A, B}
+    # Also accept the "images" virtual filter: filter[images]=Has image / No image
+    column_clauses: list = []
+    for raw_key, raw_val in request.query_params.multi_items():
+        if not (raw_key.startswith("filter[") and raw_key.endswith("]")):
+            continue
+        field = raw_key[len("filter["):-1]
+        # Collect all values for this field (multi-select)
+        values = request.query_params.getlist(raw_key)
+        if not values:
+            continue
+
+        if field == "images":
+            # Special case: "Has image" => images array non-empty OR legacy image set
+            wants_has = "Has image" in values
+            wants_none = "No image" in values
+            sub = []
+            if wants_has:
+                sub.append({"$or": [
+                    {"images": {"$exists": True, "$type": "array", "$ne": []}},
+                    {"image": {"$exists": True, "$nin": [None, ""]}},
+                ]})
+            if wants_none:
+                sub.append({"$and": [
+                    {"$or": [
+                        {"images": {"$exists": False}},
+                        {"images": {"$size": 0}},
+                    ]},
+                    {"$or": [
+                        {"image": {"$exists": False}},
+                        {"image": {"$in": [None, ""]}},
+                    ]},
+                ]})
+            if sub:
+                column_clauses.append({"$or": sub} if len(sub) > 1 else sub[0])
+            continue
+
+        if field not in _FILTERABLE_FIELDS:
+            continue  # silently ignore unknown fields
+
+        concrete = [v for v in values if v != _BLANK_TOKEN]
+        wants_blank = _BLANK_TOKEN in values
+
+        sub = []
+        if concrete:
+            # For numeric reorder_level we need to coerce to int when possible
+            if field == "reorder_level":
+                ints = []
+                for v in concrete:
+                    try:
+                        ints.append(int(float(v)))
+                    except Exception:
+                        pass
+                if ints:
+                    sub.append({field: {"$in": ints}})
+            else:
+                sub.append({field: {"$in": concrete}})
+        if wants_blank:
+            sub.append({"$or": [
+                {field: {"$exists": False}},
+                {field: None},
+                {field: ""},
+            ]})
+        if sub:
+            column_clauses.append({"$or": sub} if len(sub) > 1 else sub[0])
+
+    if column_clauses:
+        # Combine column filters with each other (AND), then with any existing query (AND)
+        if len(column_clauses) == 1:
+            query.update(column_clauses[0])
+        else:
+            query.setdefault("$and", []).extend(column_clauses)
+
+    # Sort: default is created_at desc; otherwise whitelisted field
+    if sort_by and sort_by in _FILTERABLE_FIELDS:
+        direction = -1 if (sort_dir or "asc").lower() == "desc" else 1
+        sort_spec = [(sort_by, direction)]
+    else:
+        sort_spec = [("created_at", -1)]
+
     total = await db.stock_master.count_documents(query)
     skip = (page - 1) * page_size
-    items = await db.stock_master.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
-    # Mark which items have transactions recorded against them (part_no + make pair)
+    items = await db.stock_master.find(query, {"_id": 0}).sort(sort_spec).skip(skip).limit(page_size).to_list(page_size)
+
+    # Mark which items have transactions recorded against them
     used_pairs = set()
     if items:
         async for t in db.transactions.aggregate([
@@ -954,6 +1062,7 @@ async def list_stock_master(
             used_pairs.add((t["_id"]["part_no"], t["_id"]["make"]))
         for it in items:
             it["in_use"] = (it.get("part_no"), it.get("make")) in used_pairs
+
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -961,6 +1070,31 @@ async def list_stock_master(
     return items
 
 
+@api_router.get("/stock-master/distinct/{field}")
+async def stock_master_distinct(field: str, user=Depends(get_current_user)):
+    """Return all distinct values of a field across the entire stock_master collection.
+    Used by the column-filter dropdowns so they reflect the full DB (not just one page)."""
+    if field == "images":
+        # Special virtual column: only two possible values
+        return {"values": ["Has image", "No image"]}
+    if field not in _FILTERABLE_FIELDS:
+        raise HTTPException(status_code=400, detail="Field not filterable")
+    raw = await db.stock_master.distinct(field)
+    out = []
+    has_blank = False
+    for v in raw:
+        if v is None or v == "":
+            has_blank = True
+        else:
+            out.append(v)
+    # Numeric-aware sort for reorder_level, alphabetic otherwise
+    if field == "reorder_level":
+        out = sorted(out, key=lambda x: (x is None, x))
+    else:
+        out = sorted(out, key=lambda x: str(x).lower())
+    if has_blank:
+        out.append(_BLANK_TOKEN)
+    return {"values": [str(v) if not isinstance(v, str) else v for v in out]}
 @api_router.get("/stock-master/lookup/makes")
 async def get_makes_for_part(part_no: str = Query(...), user=Depends(get_current_user)):
     makes = await db.stock_master.distinct("make", {"part_no": part_no})
@@ -980,10 +1114,10 @@ async def download_template_route():
     sample_rows = [
         ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
-         "Cummins", "Engine Parts", "5", ""],
+         "Cummins", "Engine Parts", "5"],
         ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Qty per box 1",
-         "Tata", "Engine Parts", "10", ""],
+         "Tata", "Engine Parts", "10"],
     ]
     return _csv_response(sample_rows, TEMPLATE_COLUMNS, "stock_master_template.csv")
 
@@ -1006,7 +1140,6 @@ async def export_stock_master(user=Depends(get_current_user)):
             it.get("make", ""),
             it.get("item_category", ""),
             it.get("reorder_level", 0) or 0,
-            "",  # image (skip base64 data in export)
         ])
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return _csv_response(rows, TEMPLATE_COLUMNS, f"stock_master_export_{ts}.csv")
@@ -1074,13 +1207,12 @@ COLUMN_ALIASES = {
     "make": "make",
     "item category": "item_category", "item_category": "item_category", "category": "item_category",
     "reorder level": "reorder_level", "reorder_level": "reorder_level", "reorder": "reorder_level", "min stock": "reorder_level",
-    "image": "image",
 }
 
 TEMPLATE_COLUMNS = [
     "SL NO", "MODEL", "PART NO", "OLD PART NO", "MAKE PART NO",
     "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS OEM", "REMARKS OTHERS",
-    "MAKE", "ITEM CATEGORY", "REORDER LEVEL", "IMAGE"
+    "MAKE", "ITEM CATEGORY", "REORDER LEVEL"
 ]
 
 
