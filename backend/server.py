@@ -19,6 +19,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 
 from storage import init_storage, put_object, get_object, build_path
@@ -2592,10 +2594,11 @@ async def _alloc_serial(series: str, fy: str) -> int:
         {"_id": key},
         {"$inc": {"value": 1}},
         upsert=True,
-        return_document=True,  # pymongo 3.x: pymongo.ReturnDocument.AFTER
+        return_document=ReturnDocument.AFTER,
     )
     return int(res["value"])
-    
+
+
 
 def _validate_racking_items(items):
     if not items:
@@ -4692,6 +4695,48 @@ async def startup():
     await db.users.update_many({"failed_login_attempts": {"$exists": False}}, {"$set": {"failed_login_attempts": 0}})
     await db.users.create_index("id", unique=True)
     await db.users.create_index("email", unique=True)
+
+    # ---- Init/heal FY-scoped atomic serial counters ----
+    # `_alloc_serial` uses a `counters` collection keyed by "{series}:{fy}".
+    # If the counter is missing or lower than the existing max(serial) in the
+    # corresponding collection, fresh creates would collide with the unique
+    # (fy, serial) index. Self-heal by setting counter = max(max_existing, current).
+    try:
+        # Drop any legacy counter doc using underscore format (pre-_alloc_serial)
+        await db.counters.delete_many({"_id": {"$regex": r"^[a-z]+_\d+-\d+$"}})
+
+        counter_sources = [
+            ("rn", db.receipt_notes),
+            ("rkn", db.racking_notes),
+            ("in", db.issue_notes),
+            ("pn", db.picking_notes),
+            ("str", db.transfer_requests),
+            ("stn", db.transfer_notes),
+            ("srn", db.short_received_notes),
+            ("ern", db.extra_received_notes),
+        ]
+        for series, coll in counter_sources:
+            pipeline = [
+                {"$match": {"fy": {"$exists": True}, "serial": {"$exists": True}}},
+                {"$group": {"_id": "$fy", "max_serial": {"$max": "$serial"}}},
+            ]
+            async for doc in coll.aggregate(pipeline):
+                fy = doc["_id"]
+                max_serial = int(doc.get("max_serial") or 0)
+                if not fy or max_serial <= 0:
+                    continue
+                key = f"{series}:{fy}"
+                current = await db.counters.find_one({"_id": key}, {"_id": 0, "value": 1})
+                current_val = int((current or {}).get("value") or 0)
+                if current_val < max_serial:
+                    await db.counters.update_one(
+                        {"_id": key},
+                        {"$set": {"value": max_serial}},
+                        upsert=True,
+                    )
+                    logger.info(f"Counter healed {key}: {current_val} -> {max_serial}")
+    except Exception as e:
+        logger.error(f"Counter init failed: {e}")
 
 
 @app.on_event("shutdown")
