@@ -333,12 +333,17 @@ class StockOutCreate(BaseModel):
 class ReceiptNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    invoice_qty: float                       # what the invoice claims
+    received_qty: Optional[float] = None     # what physically arrived (None on draft)
+    # Legacy alias — kept so existing racking code keeps working without changes.
+    # Always written equal to received_qty when finalized, else equal to invoice_qty.
+    quantity: Optional[float] = None
 
 
 class ReceiptNoteCreate(BaseModel):
     invoice_no: Optional[str] = ""
-    invoice_date: Optional[str] = ""  # ISO "YYYY-MM-DD"
+    invoice_date: Optional[str] = ""           # ISO "YYYY-MM-DD"
+    goods_received_date: Optional[str] = ""    # ISO "YYYY-MM-DD"
     items: List[ReceiptNoteItem] = []
     assigned_to_user_id: Optional[str] = None  # null = unassigned (anyone with module access can rack)
 
@@ -351,8 +356,12 @@ class ReceiptNote(BaseModel):
     serial: int
     invoice_no: str = ""
     invoice_date: str = ""
+    goods_received_date: str = ""
     items: List[ReceiptNoteItem] = []
-    status: str = "RACKING_PENDING"  # RACKING_PENDING | RACKED
+    # New flow: DRAFT -> FINAL -> PARTIALLY_RACKED -> FULLY_RACKED
+    # Legacy "RACKING_PENDING" is migrated to "FINAL" on startup.
+    status: str = "DRAFT"
+    finalized_at: Optional[str] = None
     racked_at: Optional[str] = None
     created_at: str
     created_by: str = ""
@@ -360,6 +369,90 @@ class ReceiptNote(BaseModel):
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
 
+# ===================== SHORT RECEIVED NOTES (Phase 1: auto-created stubs) =====================
+
+class ShortReceivedNoteItem(BaseModel):
+    part_no: str
+    make: str
+    short_qty: float                          # qty that was short on the parent
+    received_qty: Optional[float] = None      # filled when this SRN is finalized
+    # Master snapshot — denormalized for display
+    model: Optional[str] = ""
+    old_part_no: Optional[str] = ""
+    make_part_no: Optional[str] = ""
+    description_1: Optional[str] = ""
+    description_2: Optional[str] = ""
+    remarks_oem: Optional[str] = ""
+    remarks_others: Optional[str] = ""
+    item_category: Optional[str] = ""
+
+
+class ShortReceivedNote(BaseModel):
+    id: str
+    srn_no: str                                # e.g. "SRN/26-27/001"
+    srn_date: str
+    fy: str
+    serial: int
+    parent_rn_id: str
+    parent_rn_no: str = ""
+    parent_srn_id: Optional[str] = None        # set if generated from another SRN's residual short
+    parent_srn_no: Optional[str] = ""
+    chain_remarks: str = ""                    # human-readable lineage
+    invoice_no: str = ""
+    invoice_date: str = ""
+    goods_received_date: str = ""              # set on Final Save of THIS SRN
+    items: List[ShortReceivedNoteItem] = []
+    status: str = "DRAFT"                      # DRAFT -> FINAL -> PARTIALLY_RACKED -> FULLY_RACKED
+    finalized_at: Optional[str] = None
+    racked_at: Optional[str] = None
+    created_at: str
+    created_by: str = ""                       # email or "system" when auto-generated
+    assigned_to_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = ""
+    assigned_to_email: Optional[str] = ""
+
+
+# ===================== EXTRA RECEIVED NOTES (Phase 1: auto-created stubs) =====================
+
+class ExtraReceivedNoteItem(BaseModel):
+    part_no: str
+    make: str
+    extra_qty: float                          # qty over the invoice
+    accepted_qty: Optional[float] = None      # filled when finalized; goes to racking
+    rejected_qty: Optional[float] = None      # filled when finalized; recorded but not racked
+    model: Optional[str] = ""
+    old_part_no: Optional[str] = ""
+    make_part_no: Optional[str] = ""
+    description_1: Optional[str] = ""
+    description_2: Optional[str] = ""
+    remarks_oem: Optional[str] = ""
+    remarks_others: Optional[str] = ""
+    item_category: Optional[str] = ""
+
+
+class ExtraReceivedNote(BaseModel):
+    id: str
+    ern_no: str                                # e.g. "ERN/26-27/001"
+    ern_date: str
+    fy: str
+    serial: int
+    parent_rn_id: str
+    parent_rn_no: str = ""
+    parent_ern_id: Optional[str] = None        # for chained ERNs (residual unaccepted/unrejected)
+    parent_ern_no: Optional[str] = ""
+    chain_remarks: str = ""
+    invoice_no: str = ""
+    invoice_date: str = ""
+    goods_received_date: str = ""              # carried from parent at create time
+    items: List[ExtraReceivedNoteItem] = []
+    status: str = "DRAFT"
+    finalized_at: Optional[str] = None
+    racked_at: Optional[str] = None
+    created_at: str
+    created_by: str = ""
+    assigned_to_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = ""
+    assigned_to_email: Optional[str] = ""
 
 class RackingNoteItem(BaseModel):
     part_no: str
@@ -2074,29 +2167,49 @@ async def next_receipt_note_no(user=Depends(get_current_user)):
 
 @api_router.post("/receipt-notes", response_model=ReceiptNote)
 async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+    """Create a Receipt Note. Always lands as DRAFT — Final Save happens via the
+    /finalize endpoint after received_qty is filled for every row."""
     if not payload.items or len(payload.items) == 0:
         raise HTTPException(status_code=400, detail="At least one item is required")
+
+    # Date validation
+    _no_future_date(payload.invoice_date, "Invoice Date")
+    _no_future_date(payload.goods_received_date, "Goods Received Date")
+
+    # Per-row validation (DRAFT-level — received_qty optional, invoice_qty required)
     for idx, it in enumerate(payload.items, start=1):
         if not it.part_no.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
+        if it.invoice_qty is None or it.invoice_qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Invoice Qty must be greater than 0")
+        if it.received_qty is not None and it.received_qty < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Received Qty cannot be negative")
 
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_in")
 
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
 
-    # Pick next serial = max(existing serial in this FY) + 1, with retry-on-conflict
-    # so that deleted RNs free up their slots and the sequence stays tight.
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.receipt_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _next_serial(db.receipt_notes, fy)
         rn_no = f"RN/{fy}/{serial:03d}"
+        items_out = []
+        for it in payload.items:
+            rec = it.received_qty if it.received_qty is not None else None
+            # Legacy `quantity` mirror — equals received_qty when set, else invoice_qty.
+            qty_legacy = float(rec) if rec is not None else float(it.invoice_qty)
+            items_out.append({
+                "part_no": it.part_no.strip(),
+                "make": it.make.strip(),
+                "invoice_qty": float(it.invoice_qty),
+                "received_qty": float(rec) if rec is not None else None,
+                "quantity": qty_legacy,
+            })
+
         doc = {
             "id": str(uuid.uuid4()),
             "rn_no": rn_no,
@@ -2105,8 +2218,9 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "serial": serial,
             "invoice_no": (payload.invoice_no or "").strip(),
             "invoice_date": (payload.invoice_date or "").strip(),
-            "items": [it.model_dump() for it in payload.items],
-            "status": "RACKING_PENDING",
+            "goods_received_date": (payload.goods_received_date or "").strip(),
+            "items": items_out,
+            "status": "DRAFT",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
             **assignee,
@@ -2116,25 +2230,23 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             doc.pop("_id", None)
             await _notify(
                 actor=user, type="receipt_note.created", module="stock_in",
-                title=f"Receipt Note {rn_no}",
-                message=f"{user.get('email')} created {rn_no} with {len(doc['items'])} item(s) — racking pending.",
+                title=f"Receipt Note {rn_no} (Draft)",
+                message=f"{user.get('email')} created draft {rn_no} with {len(doc['items'])} item(s).",
                 audience="module", ref_collection="receipt_notes", ref_id=doc["id"],
             )
             if assignee.get("assigned_to_user_id"):
                 await _notify(
                     actor=user, type="receipt_note.assigned", module="stock_in",
                     title=f"Assigned to you: {rn_no}",
-                    message=f"{user.get('email')} assigned Receipt Note {rn_no} to you for racking.",
+                    message=f"{user.get('email')} assigned Receipt Note {rn_no} to you.",
                     audience="user", target_user_id=assignee["assigned_to_user_id"],
                     ref_collection="receipt_notes", ref_id=doc["id"],
                 )
             return doc
         except DuplicateKeyError as e:
-            # Concurrent insert grabbed the same serial — retry with the next one
             last_err = e
             continue
     raise HTTPException(status_code=500, detail=f"Could not allocate receipt-note number: {last_err}")
-
 
 @api_router.get("/receipt-notes")
 async def list_receipt_notes(
@@ -2175,43 +2287,154 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
 
 @api_router.put("/receipt-notes/{rn_id}", response_model=ReceiptNote)
 async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+    """Edit a Receipt Note.
+       - DRAFT: editable by any user with stock_in access (assignee rules respected).
+       - FINAL (or beyond): editable only if no Racking Notes, no SRN, no ERN have been created.
+                            Re-finalization on save will re-trigger SRN/ERN auto-create."""
     existing = await db.receipt_notes.find_one({"id": rn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
-    _enforce_assignee(existing, user, "edit this receipt note")
-    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
-        raise HTTPException(status_code=409, detail="Cannot edit — racking notes have been created against this receipt note. Delete those racking notes first.")
+
+    is_draft = existing.get("status") == "DRAFT"
+
+    # Assignee enforcement: skip for DRAFT (anyone with module access can edit drafts).
+    if not is_draft:
+        _enforce_assignee(existing, user, "edit this receipt note")
+
+    # If the RN has already produced child documents, lock further edits.
+    if not is_draft:
+        if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
+            raise HTTPException(status_code=409, detail="Cannot edit — racking notes exist for this receipt note. Delete those first.")
+        if await db.short_received_notes.find_one({"parent_rn_id": rn_id}):
+            raise HTTPException(status_code=409, detail="Cannot edit — a Short Received Note exists for this receipt note. Delete it first.")
+        if await db.extra_received_notes.find_one({"parent_rn_id": rn_id}):
+            raise HTTPException(status_code=409, detail="Cannot edit — an Extra Received Note exists for this receipt note. Delete it first.")
+
     if not payload.items or len(payload.items) == 0:
         raise HTTPException(status_code=400, detail="At least one item is required")
+    _no_future_date(payload.invoice_date, "Invoice Date")
+    _no_future_date(payload.goods_received_date, "Goods Received Date")
+
     for idx, it in enumerate(payload.items, start=1):
         if not it.part_no.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be greater than 0")
+        if it.invoice_qty is None or it.invoice_qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Invoice Qty must be greater than 0")
+        if it.received_qty is not None and it.received_qty < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Received Qty cannot be negative")
+
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_in")
+
+    items_out = []
+    for it in payload.items:
+        rec = it.received_qty if it.received_qty is not None else None
+        qty_legacy = float(rec) if rec is not None else float(it.invoice_qty)
+        items_out.append({
+            "part_no": it.part_no.strip(),
+            "make": it.make.strip(),
+            "invoice_qty": float(it.invoice_qty),
+            "received_qty": float(rec) if rec is not None else None,
+            "quantity": qty_legacy,
+        })
+
     update = {
         "invoice_no": (payload.invoice_no or "").strip(),
         "invoice_date": (payload.invoice_date or "").strip(),
-        "items": [it.model_dump() for it in payload.items],
+        "goods_received_date": (payload.goods_received_date or "").strip(),
+        "items": items_out,
         "updated_at": now_iso(),
         **assignee,
     }
     await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
-    # Notify newly-assigned user (only if assignee actually changed)
+
     new_aid = assignee.get("assigned_to_user_id")
     if new_aid and new_aid != existing.get("assigned_to_user_id"):
         await _notify(
             actor=user, type="receipt_note.assigned", module="stock_in",
             title=f"Assigned to you: {existing.get('rn_no', '')}",
-            message=f"{user.get('email')} assigned Receipt Note {existing.get('rn_no', '')} to you for racking.",
+            message=f"{user.get('email')} assigned Receipt Note {existing.get('rn_no', '')} to you.",
             audience="user", target_user_id=new_aid,
             ref_collection="receipt_notes", ref_id=rn_id,
         )
+
     doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     return doc
 
+@api_router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
+async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
+    """Promote a DRAFT receipt note to FINAL.
+
+    Requires: every row has received_qty filled (>0), invoice_date and
+    goods_received_date are present and not in the future.
+
+    Side effects: if any row has received_qty < invoice_qty, a Short Received Note
+    is auto-created in DRAFT for the shortfall. If any row has received_qty >
+    invoice_qty, an Extra Received Note is auto-created in DRAFT for the overage.
+    Both can occur on the same RN (one SRN + one ERN, both linked).
+    """
+    rn = await db.receipt_notes.find_one({"id": rn_id})
+    if not rn:
+        raise HTTPException(status_code=404, detail="Receipt note not found")
+    if rn.get("status") != "DRAFT":
+        raise HTTPException(status_code=409, detail=f"Only DRAFT receipt notes can be finalized (current status: {rn.get('status')})")
+
+    # Header validation
+    if not rn.get("invoice_date"):
+        raise HTTPException(status_code=400, detail="Invoice Date is required for Final Save")
+    if not rn.get("goods_received_date"):
+        raise HTTPException(status_code=400, detail="Goods Received Date is required for Final Save")
+    _no_future_date(rn.get("invoice_date"), "Invoice Date")
+    _no_future_date(rn.get("goods_received_date"), "Goods Received Date")
+
+    items = rn.get("items", [])
+    if not _rn_items_have_all_received(items):
+        raise HTTPException(status_code=400, detail="Every row must have a Received Qty greater than 0 before Final Save")
+
+    # Update status + sync legacy `quantity` field with received_qty for racking compat
+    items_out = []
+    short_rows, extra_rows = [], []
+    for it in items:
+        inv = float(it.get("invoice_qty") or 0)
+        rec = float(it.get("received_qty") or 0)
+        out = {**it, "quantity": rec, "invoice_qty": inv, "received_qty": rec}
+        items_out.append(out)
+        diff = rec - inv
+        if diff < 0:
+            short_rows.append({**out, "short_qty": abs(diff)})
+        elif diff > 0:
+            extra_rows.append({**out, "extra_qty": diff})
+
+    now = now_iso()
+    await db.receipt_notes.update_one(
+        {"id": rn_id},
+        {"$set": {"items": items_out, "status": "FINAL", "finalized_at": now}},
+    )
+
+    await _recompute_rn_status(rn_id)
+    
+    # Auto-create child notes (these land as DRAFT — user finalizes them later).
+    srn_no, ern_no = None, None
+    if short_rows:
+        srn_no = await _auto_create_srn_for_rn(rn, short_rows, user)
+    if extra_rows:
+        ern_no = await _auto_create_ern_for_rn(rn, extra_rows, user)
+
+    msg = f"{user.get('email')} finalized {rn['rn_no']} with {len(items_out)} item(s)."
+    if srn_no:
+        msg += f" Auto-created {srn_no} for shortfall."
+    if ern_no:
+        msg += f" Auto-created {ern_no} for overage."
+    await _notify(
+        actor=user, type="receipt_note.finalized", module="stock_in",
+        title=f"Receipt Note finalized — {rn['rn_no']}",
+        message=msg, audience="module",
+        ref_collection="receipt_notes", ref_id=rn_id,
+    )
+
+    doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    return doc
 
 @api_router.delete("/receipt-notes/{rn_id}")
 async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
@@ -2252,11 +2475,54 @@ async def prepare_racking_note(rn_id: str, exclude_rkn_id: Optional[str] = None,
 
     other_sums = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id)
 
+def _no_future_date(value: str, field_label: str):
+    """Raise 400 if the ISO date string is after today (UTC). Empty/None passes."""
+    if not value:
+        return
+    try:
+        d = datetime.fromisoformat(value).date()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{field_label}: invalid date format")
+    today = datetime.now(timezone.utc).date()
+    if d > today:
+        raise HTTPException(status_code=400, detail=f"{field_label} cannot be in the future")
+
+
+def _qty_diff(it: dict) -> float:
+    """received_qty - invoice_qty. Positive = extra, negative = short, 0 = exact."""
+    inv = float(it.get("invoice_qty") or 0)
+    rec = float(it.get("received_qty") or 0)
+    return rec - inv
+
+
+def _rn_items_have_all_received(items: list) -> bool:
+    """True iff every row has a numeric, > 0 received_qty."""
+    if not items:
+        return False
+    for it in items:
+        rq = it.get("received_qty")
+        if rq is None or rq == "":
+            return False
+        try:
+            if float(rq) <= 0:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+async def _next_serial(collection, fy: str) -> int:
+    """Return max(serial) + 1 within the given FY for any of the FY-numbered collections."""
+    last = await collection.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    return (last[0]["serial"] if last else 0) + 1
+    
     items_out = []
     for it in rn.get("items", []):
         part_no = it.get("part_no", "")
         make = it.get("make", "")
-        received_qty = it.get("quantity", 0) or 0
+        received_qty = it.get("received_qty")
+        if received_qty is None:
+            received_qty = it.get("quantity", 0) or 0
         already = other_sums.get(_key(part_no, make), 0)
         pending = received_qty - already
         if pending <= 0:
@@ -2475,31 +2741,146 @@ async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[s
 
 
 async def _recompute_rn_status(rn_id: str):
-    """Set RN status based on total racked qty across DRAFT + RECORDED RKNs vs received qty."""
+    """Recompute racking-progress status. DRAFT and FINAL receipts that have not
+    yet been racked stay at their current label; only when racking begins do we
+    move into PARTIALLY_RACKED / FULLY_RACKED."""
     rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not rn:
         return
+    cur = rn.get("status")
+    # Drafts never get auto-promoted.
+    if cur == "DRAFT":
+        return
+
     received = {}
     for it in rn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
-        received[k] = received.get(k, 0) + (it.get("quantity") or 0)
+        # Use received_qty when present (post-migration / new flow); fall back to legacy quantity.
+        q = it.get("received_qty")
+        if q is None:
+            q = it.get("quantity") or 0
+        received[k] = received.get(k, 0) + (q or 0)
     racked = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id=None)
-    if not received:
-        new_status = "RACKING_PENDING"
-    elif sum(racked.values()) == 0:
-        new_status = "RACKING_PENDING"
+
+    if not received or sum(racked.values()) == 0:
+        new_status = "FINAL"
     else:
         all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in received.items())
         new_status = "FULLY_RACKED" if all_full else "PARTIALLY_RACKED"
+
     update = {"status": new_status}
     if new_status == "FULLY_RACKED":
         update["racked_at"] = rn.get("racked_at") or now_iso()
     else:
-        # If reverting from FULLY_RACKED back to anything else, clear racked_at
         if rn.get("racked_at"):
             await db.receipt_notes.update_one({"id": rn_id}, {"$unset": {"racked_at": ""}})
     await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
 
+# --- SRN / ERN auto-creation -------------------------------------------------
+
+async def _build_master_snapshot(part_no: str, make: str) -> dict:
+    """Pull denormalized master fields for an SRN/ERN item row."""
+    sm = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+    return {
+        "model": sm.get("model", ""),
+        "old_part_no": sm.get("old_part_no", ""),
+        "make_part_no": sm.get("make_part_no", ""),
+        "description_1": sm.get("description_1", ""),
+        "description_2": sm.get("description_2", ""),
+        "remarks_oem": sm.get("remarks_oem", ""),
+        "remarks_others": sm.get("remarks_others", ""),
+        "item_category": sm.get("item_category", ""),
+    }
+
+
+async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict) -> str:
+    """Create a DRAFT Short Received Note for the given parent RN's short rows.
+    Returns the SRN number. Items inherit master snapshots from stock_master."""
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    from pymongo.errors import DuplicateKeyError
+    for _ in range(5):
+        serial = await _next_serial(db.short_received_notes, fy)
+        srn_no = f"SRN/{fy}/{serial:03d}"
+        items = []
+        for r in short_rows:
+            snap = await _build_master_snapshot(r["part_no"], r["make"])
+            items.append({
+                "part_no": r["part_no"], "make": r["make"],
+                "short_qty": float(r["short_qty"]),
+                "received_qty": None,
+                **snap,
+            })
+        doc = {
+            "id": str(uuid.uuid4()),
+            "srn_no": srn_no, "srn_date": today.date().isoformat(),
+            "fy": fy, "serial": serial,
+            "parent_rn_id": rn["id"], "parent_rn_no": rn["rn_no"],
+            "parent_srn_id": None, "parent_srn_no": "",
+            "chain_remarks": f"Auto-generated from {rn['rn_no']} — short on {len(items)} item(s).",
+            "invoice_no": rn.get("invoice_no", ""),
+            "invoice_date": rn.get("invoice_date", ""),
+            "goods_received_date": "",
+            "items": items,
+            "status": "DRAFT",
+            "created_at": now_iso(),
+            "created_by": actor.get("email", "system"),
+            "assigned_to_user_id": rn.get("assigned_to_user_id"),
+            "assigned_to_name": rn.get("assigned_to_name", ""),
+            "assigned_to_email": rn.get("assigned_to_email", ""),
+        }
+        try:
+            await db.short_received_notes.insert_one(doc)
+            return srn_no
+        except DuplicateKeyError:
+            continue
+    logger.warning("Could not allocate SRN number after 5 attempts")
+    return ""
+
+
+async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict) -> str:
+    """Create a DRAFT Extra Received Note for the given parent RN's overage rows."""
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    from pymongo.errors import DuplicateKeyError
+    for _ in range(5):
+        serial = await _next_serial(db.extra_received_notes, fy)
+        ern_no = f"ERN/{fy}/{serial:03d}"
+        items = []
+        for r in extra_rows:
+            snap = await _build_master_snapshot(r["part_no"], r["make"])
+            items.append({
+                "part_no": r["part_no"], "make": r["make"],
+                "extra_qty": float(r["extra_qty"]),
+                "accepted_qty": None,
+                "rejected_qty": None,
+                **snap,
+            })
+        doc = {
+            "id": str(uuid.uuid4()),
+            "ern_no": ern_no, "ern_date": today.date().isoformat(),
+            "fy": fy, "serial": serial,
+            "parent_rn_id": rn["id"], "parent_rn_no": rn["rn_no"],
+            "parent_ern_id": None, "parent_ern_no": "",
+            "chain_remarks": f"Auto-generated from {rn['rn_no']} — extra on {len(items)} item(s).",
+            "invoice_no": rn.get("invoice_no", ""),
+            "invoice_date": rn.get("invoice_date", ""),
+            "goods_received_date": rn.get("goods_received_date", ""),
+            "items": items,
+            "status": "DRAFT",
+            "created_at": now_iso(),
+            "created_by": actor.get("email", "system"),
+            "assigned_to_user_id": rn.get("assigned_to_user_id"),
+            "assigned_to_name": rn.get("assigned_to_name", ""),
+            "assigned_to_email": rn.get("assigned_to_email", ""),
+        }
+        try:
+            await db.extra_received_notes.insert_one(doc)
+            return ern_no
+        except DuplicateKeyError:
+            continue
+    logger.warning("Could not allocate ERN number after 5 attempts")
+    return ""
 
 @api_router.post("/racking-notes", response_model=RackingNote)
 async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_current_user)):
@@ -2700,6 +3081,82 @@ async def record_racking_note(rkn_id: str, user=Depends(get_current_user)):
     )
     return {"ok": True, "transactions_created": len(tx_docs)}
 
+# ===================== SHORT RECEIVED NOTES — read-only endpoints (Phase 1) =====================
+
+@api_router.get("/short-received-notes")
+async def list_short_received_notes(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
+    not_status: Optional[str] = None,
+    parent_rn_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    query = {}
+    if parent_rn_id:
+        query["parent_rn_id"] = parent_rn_id
+    if status:
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    total = await db.short_received_notes.count_documents(query)
+    skip = (page - 1) * page_size
+    rows = await db.short_received_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/short-received-notes/{srn_id}")
+async def get_short_received_note(srn_id: str, user=Depends(get_current_user)):
+    doc = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Short Received Note not found")
+    return doc
+
+
+# ===================== EXTRA RECEIVED NOTES — read-only endpoints (Phase 1) =====================
+
+@api_router.get("/extra-received-notes")
+async def list_extra_received_notes(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    status: Optional[str] = None,
+    not_status: Optional[str] = None,
+    parent_rn_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    query = {}
+    if parent_rn_id:
+        query["parent_rn_id"] = parent_rn_id
+    if status:
+        vals = [s.strip().upper() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
+    if not_status:
+        nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
+        query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    total = await db.extra_received_notes.count_documents(query)
+    skip = (page - 1) * page_size
+    rows = await db.extra_received_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Page-Size"] = str(page_size)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count, X-Page, X-Page-Size"
+    return rows
+
+
+@api_router.get("/extra-received-notes/{ern_id}")
+async def get_extra_received_note(ern_id: str, user=Depends(get_current_user)):
+    doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Extra Received Note not found")
+    return doc
 
 # ===================== ISSUE NOTES (Stock Out) =====================
 async def _stock_total_for(part_no: str, make: str) -> float:
@@ -4100,17 +4557,58 @@ async def startup():
     await db.transfer_notes.create_index("created_at")
     await db.transfer_notes.create_index("status")
     await db.transfer_notes.create_index("transfer_request_id")
-    # Backfill: ensure every existing receipt note has a status
-    await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_PENDING"}})
-    # Migrate old "RACKED" value to new "FULLY_RACKED"
+   # ---- Receipt-note status migration (Phase 1) ----
+    # Default missing status to FINAL (the new equivalent of legacy RACKING_PENDING).
+    await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "FINAL"}})
+    # Legacy values -> new names
     await db.receipt_notes.update_many({"status": "RACKED"}, {"$set": {"status": "FULLY_RACKED"}})
-    # Recompute every RN's status off saved racking notes (idempotent)
+    await db.receipt_notes.update_many({"status": "RACKING_PENDING"}, {"$set": {"status": "FINAL"}})
+
+    # ---- Receipt-note item-shape migration (Phase 1) ----
+    # Older items had a single `quantity`. New items split it into invoice_qty + received_qty.
+    # Migration policy: invoice_qty = received_qty = legacy quantity (no implied shortfall).
+    async for rn in db.receipt_notes.find({}, {"_id": 0, "id": 1, "items": 1}):
+        items = rn.get("items") or []
+        if not items:
+            continue
+        changed = False
+        new_items = []
+        for it in items:
+            new_it = dict(it)
+            if "invoice_qty" not in new_it or new_it.get("invoice_qty") is None:
+                q = float(new_it.get("quantity") or 0)
+                new_it["invoice_qty"] = q
+                changed = True
+            if "received_qty" not in new_it:
+                # Legacy rows had no draft concept — treat as fully received.
+                new_it["received_qty"] = float(new_it.get("quantity") or 0)
+                changed = True
+            # Ensure legacy `quantity` mirrors received_qty so racking still works.
+            if new_it.get("quantity") in (None, 0) and new_it.get("received_qty") is not None:
+                new_it["quantity"] = float(new_it["received_qty"])
+                changed = True
+            new_items.append(new_it)
+        if changed:
+            await db.receipt_notes.update_one({"id": rn["id"]}, {"$set": {"items": new_items}})
+
+    # Recompute every RN's status off saved racking notes (idempotent — skips DRAFT)
     async for rn in db.receipt_notes.find({}, {"_id": 0, "id": 1}):
         try:
             await _recompute_rn_status(rn["id"])
         except Exception:
             pass
 
+    # ---- SRN / ERN collection indexes (Phase 1 — collections may be empty until first finalize) ----
+    await db.short_received_notes.create_index("id", unique=True)
+    await db.short_received_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.short_received_notes.create_index("created_at")
+    await db.short_received_notes.create_index("status")
+    await db.short_received_notes.create_index("parent_rn_id")
+    await db.extra_received_notes.create_index("id", unique=True)
+    await db.extra_received_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
+    await db.extra_received_notes.create_index("created_at")
+    await db.extra_received_notes.create_index("status")
+    await db.extra_received_notes.create_index("parent_rn_id")
     # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others
     cursor = db.stock_master.find({"$or": [{"oem": {"$exists": True}}, {"remarks": {"$exists": True}}]})
     migrated = 0
@@ -4195,6 +4693,8 @@ PATH_TO_MODULE = [
     ("/api/stock-balance", "stock_summary"),
     ("/api/low-stock", "low_stock"),
     ("/api/transactions", "transactions"),
+    ("/api/short-received-notes", "stock_in"),
+    ("/api/extra-received-notes", "stock_in"),
 ]
 
 
