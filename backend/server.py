@@ -2195,7 +2195,7 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        serial = await _next_serial(db.receipt_notes, fy)
+        serial = await _alloc_serial("rn", fy)
         rn_no = f"RN/{fy}/{serial:03d}"
         items_out = []
         for it in payload.items:
@@ -2363,7 +2363,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     return doc
 
 @api_router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
-async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
+async def finalize_receipt_note(rn_id: str, user=Depends(_module_dep("stock_in"))):
     """Promote a DRAFT receipt note to FINAL.
 
     Requires: every row has received_qty filled (>0), invoice_date and
@@ -2475,47 +2475,6 @@ async def prepare_racking_note(rn_id: str, exclude_rkn_id: Optional[str] = None,
 
     other_sums = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id)
 
-def _no_future_date(value: str, field_label: str):
-    """Raise 400 if the ISO date string is after today (UTC). Empty/None passes."""
-    if not value:
-        return
-    try:
-        d = datetime.fromisoformat(value).date()
-    except Exception:
-        raise HTTPException(status_code=400, detail=f"{field_label}: invalid date format")
-    today = datetime.now(timezone.utc).date()
-    if d > today:
-        raise HTTPException(status_code=400, detail=f"{field_label} cannot be in the future")
-
-
-def _qty_diff(it: dict) -> float:
-    """received_qty - invoice_qty. Positive = extra, negative = short, 0 = exact."""
-    inv = float(it.get("invoice_qty") or 0)
-    rec = float(it.get("received_qty") or 0)
-    return rec - inv
-
-
-def _rn_items_have_all_received(items: list) -> bool:
-    """True iff every row has a numeric, > 0 received_qty."""
-    if not items:
-        return False
-    for it in items:
-        rq = it.get("received_qty")
-        if rq is None or rq == "":
-            return False
-        try:
-            if float(rq) <= 0:
-                return False
-        except Exception:
-            return False
-    return True
-
-
-async def _next_serial(collection, fy: str) -> int:
-    """Return max(serial) + 1 within the given FY for any of the FY-numbered collections."""
-    last = await collection.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-    return (last[0]["serial"] if last else 0) + 1
-    
     items_out = []
     for it in rn.get("items", []):
         part_no = it.get("part_no", "")
@@ -2581,6 +2540,62 @@ async def _next_serial(collection, fy: str) -> int:
         "items": items_out,
     }
 
+
+def _no_future_date(value: str, field_label: str):
+    """Raise 400 if the ISO date string is after today (UTC). Empty/None passes."""
+    if not value:
+        return
+    try:
+        d = datetime.fromisoformat(value).date()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{field_label}: invalid date format")
+    today = datetime.now(timezone.utc).date()
+    if d > today:
+        raise HTTPException(status_code=400, detail=f"{field_label} cannot be in the future")
+
+
+def _qty_diff(it: dict) -> float:
+    """received_qty - invoice_qty. Positive = extra, negative = short, 0 = exact."""
+    inv = float(it.get("invoice_qty") or 0)
+    rec = float(it.get("received_qty") or 0)
+    return rec - inv
+
+
+def _rn_items_have_all_received(items: list) -> bool:
+    """True iff every row has a numeric, > 0 received_qty."""
+    if not items:
+        return False
+    for it in items:
+        rq = it.get("received_qty")
+        if rq is None or rq == "":
+            return False
+        try:
+            if float(rq) <= 0:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+async def _alloc_serial(series: str, fy: str) -> int:
+    """Atomically allocate the next serial number for a given series + FY.
+
+    Uses a `counters` collection where each (series, fy) pair has a single
+    document. `findOneAndUpdate` with $inc and upsert=True is atomic at the
+    document level — concurrent callers get distinct, monotonically-increasing
+    serials with no retry loop and no race window.
+
+    `series` is one of: rn, rkn, srn, ern, in, pn, str, stn
+    """
+    key = f"{series}:{fy}"
+    res = await db.counters.find_one_and_update(
+        {"_id": key},
+        {"$inc": {"value": 1}},
+        upsert=True,
+        return_document=True,  # pymongo 3.x: pymongo.ReturnDocument.AFTER
+    )
+    return int(res["value"])
+    
 
 def _validate_racking_items(items):
     if not items:
@@ -2802,12 +2817,21 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict) -> st
     for _ in range(5):
         serial = await _next_serial(db.short_received_notes, fy)
         srn_no = f"SRN/{fy}/{serial:03d}"
-        items = []
+       # Consolidate duplicate (part_no, make) rows from the parent RN — sum their short_qty
+        # so that racking sees one row per (part_no, make).
+        merged = {}
         for r in short_rows:
-            snap = await _build_master_snapshot(r["part_no"], r["make"])
+            key = (r["part_no"], r["make"])
+            if key in merged:
+                merged[key]["short_qty"] += float(r["short_qty"])
+            else:
+                merged[key] = {"part_no": r["part_no"], "make": r["make"], "short_qty": float(r["short_qty"])}
+        items = []
+        for m in merged.values():
+            snap = await _build_master_snapshot(m["part_no"], m["make"])
             items.append({
-                "part_no": r["part_no"], "make": r["make"],
-                "short_qty": float(r["short_qty"]),
+                "part_no": m["part_no"], "make": m["make"],
+                "short_qty": m["short_qty"],
                 "received_qty": None,
                 **snap,
             })
@@ -2846,12 +2870,20 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict) -> st
     for _ in range(5):
         serial = await _next_serial(db.extra_received_notes, fy)
         ern_no = f"ERN/{fy}/{serial:03d}"
-        items = []
+       # Consolidate duplicate (part_no, make) rows from the parent RN — sum their extra_qty.
+        merged = {}
         for r in extra_rows:
-            snap = await _build_master_snapshot(r["part_no"], r["make"])
+            key = (r["part_no"], r["make"])
+            if key in merged:
+                merged[key]["extra_qty"] += float(r["extra_qty"])
+            else:
+                merged[key] = {"part_no": r["part_no"], "make": r["make"], "extra_qty": float(r["extra_qty"])}
+        items = []
+        for m in merged.values():
+            snap = await _build_master_snapshot(m["part_no"], m["make"])
             items.append({
-                "part_no": r["part_no"], "make": r["make"],
-                "extra_qty": float(r["extra_qty"]),
+                "part_no": m["part_no"], "make": m["make"],
+                "extra_qty": m["extra_qty"],
                 "accepted_qty": None,
                 "rejected_qty": None,
                 **snap,
@@ -2902,8 +2934,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(get_curre
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.racking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _alloc_serial("rkn", fy)
         rkn_no = f"RKN/{fy}/{serial:03d}"
         doc = {
             "id": str(uuid.uuid4()),
@@ -3091,7 +3122,7 @@ async def list_short_received_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     parent_rn_id: Optional[str] = None,
-    user=Depends(get_current_user),
+    user=Depends(_module_dep("stock_in")),
 ):
     query = {}
     if parent_rn_id:
@@ -3113,7 +3144,7 @@ async def list_short_received_notes(
 
 
 @api_router.get("/short-received-notes/{srn_id}")
-async def get_short_received_note(srn_id: str, user=Depends(get_current_user)):
+async def get_short_received_note(srn_id: str, user=Depends(_module_dep("stock_in"))):
     doc = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Short Received Note not found")
@@ -3130,7 +3161,7 @@ async def list_extra_received_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     parent_rn_id: Optional[str] = None,
-    user=Depends(get_current_user),
+    user=Depends(_module_dep("stock_in")),
 ):
     query = {}
     if parent_rn_id:
@@ -3152,7 +3183,7 @@ async def list_extra_received_notes(
 
 
 @api_router.get("/extra-received-notes/{ern_id}")
-async def get_extra_received_note(ern_id: str, user=Depends(get_current_user)):
+async def get_extra_received_note(ern_id: str, user=Depends(_module_dep("stock_in"))):
     doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Extra Received Note not found")
@@ -3234,8 +3265,7 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.issue_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _alloc_serial("in", fy)
         in_no = f"IN/{fy}/{serial:03d}"
         doc = {
             "id": str(uuid.uuid4()),
@@ -3587,8 +3617,7 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.picking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _alloc_serial("pn", fy)
         pn_no = f"PN/{fy}/{serial:03d}"
         doc = {
             "id": str(uuid.uuid4()),
@@ -3878,8 +3907,7 @@ async def create_transfer_request(payload: TransferRequestCreate, user=Depends(g
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.transfer_requests.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _alloc_serial("str", fy)
         str_no = f"STR/{fy}/{serial:03d}"
         doc = {
             "id": str(uuid.uuid4()),
@@ -4177,8 +4205,7 @@ async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_cur
     from pymongo.errors import DuplicateKeyError
     last_err = None
     for _ in range(5):
-        last = await db.transfer_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
-        serial = (last[0]["serial"] if last else 0) + 1
+        serial = await _alloc_serial("stn", fy)
         stn_no = f"STN/{fy}/{serial:03d}"
         doc = {
             "id": str(uuid.uuid4()),
