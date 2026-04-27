@@ -712,13 +712,9 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     return true;
   };
 
-  const validateDates = (requireGRD) => {
+  const validateDates = (_requireGRD) => {
     if (invoiceDate && invoiceDate > todayISO()) { toast.error("Invoice Date cannot be in the future"); return false; }
     if (goodsReceivedDate && goodsReceivedDate > todayISO()) { toast.error("Goods Received Date cannot be in the future"); return false; }
-    if (requireGRD) {
-      if (!invoiceDate) { toast.error("Invoice Date is required for Final Save"); return false; }
-      if (!goodsReceivedDate) { toast.error("Goods Received Date is required for Final Save"); return false; }
-    }
     return true;
   };
 
@@ -874,14 +870,14 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             className="mt-2 rounded-sm font-mono"
             data-testid="rn-invoice-date-input"
           />
-          <div className="text-[11px] text-slate-500 mt-1">No future date</div>
+          <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
         </div>
         <div>
           <Label className="label-sm">Invoice No</Label>
           <Input
             value={invoiceNo}
             onChange={(e) => setInvoiceNo(e.target.value)}
-            placeholder="e.g. INV-1024"
+            placeholder="e.g. INV-1024 (optional)"
             className="mt-2 rounded-sm font-mono"
             data-testid="rn-invoice-no-input"
           />
@@ -896,7 +892,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             className="mt-2 rounded-sm font-mono"
             data-testid="rn-grd-input"
           />
-          <div className="text-[11px] text-slate-500 mt-1">Required for Final Save · no future date</div>
+          <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
         </div>
         <div className="col-span-2 lg:col-span-3">
           <AssigneeSelect

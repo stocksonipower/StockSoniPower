@@ -2382,11 +2382,8 @@ async def finalize_receipt_note(rn_id: str, user=Depends(_module_dep("stock_in")
     if rn.get("status") != "DRAFT":
         raise HTTPException(status_code=409, detail=f"Only DRAFT receipt notes can be finalized (current status: {rn.get('status')})")
 
-    # Header validation
-    if not rn.get("invoice_date"):
-        raise HTTPException(status_code=400, detail="Invoice Date is required for Final Save")
-    if not rn.get("goods_received_date"):
-        raise HTTPException(status_code=400, detail="Goods Received Date is required for Final Save")
+    # Header validation — invoice_date, invoice_no and goods_received_date are OPTIONAL.
+    # Only future-date sanity check if supplied.
     _no_future_date(rn.get("invoice_date"), "Invoice Date")
     _no_future_date(rn.get("goods_received_date"), "Goods Received Date")
 
