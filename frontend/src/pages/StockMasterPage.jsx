@@ -14,6 +14,7 @@ import {
   FunnelSimple, X, CaretLeft, CaretRight, CaretUp, CaretDown,
   FileText, CheckCircle, Warning, ArrowsLeftRight,
 } from "@phosphor-icons/react";
+import * as XLSX from "xlsx";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
 import StockMasterImageUploader from "../components/StockMasterImageUploader";
 import AuthImage from "../components/AuthImage";
@@ -165,6 +166,12 @@ export default function StockMasterPage() {
   const [matchIdx, setMatchIdx] = useState(0);
   const currentCellRef = useRef(null);
   const searchInputRef = useRef(null);
+
+  // Export state
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState({ loaded: 0, total: 0, label: "" });
+  const exportMenuRef = useRef(null);
   // Tracks which search term the currently-displayed `items` correspond to.
   // Used to suppress stale highlights while the API is catching up.
   const [loadedSearch, setLoadedSearch] = useState("");
@@ -434,16 +441,129 @@ export default function StockMasterPage() {
     } catch { toast.error("Could not download template"); }
   };
 
-  const handleExport = async () => {
+   // Close export menu when clicking outside
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handler = (e) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [exportMenuOpen]);
+
+  // Fetch every page from the server, optionally filtered by a search term
+  const fetchAllPages = async (searchTerm, label) => {
+    const all = [];
+    let pageNum = 1;
+    while (true) {
+      const params = { page: pageNum, page_size: PAGE_SIZE };
+      if (searchTerm) params.search = searchTerm;
+      const res = await api.get("/stock-master", { params });
+      all.push(...res.data);
+      const totalCount = parseInt(res.headers["x-total-count"], 10) || all.length;
+      setExportProgress({ loaded: all.length, total: totalCount, label });
+      if (all.length >= totalCount || res.data.length === 0) break;
+      pageNum += 1;
+    }
+    return all;
+  };
+
+  // Mirror of visibleItems memo: apply current column filters + sort to any list
+  const applyClientFiltersAndSort = (rows) => {
+    const activeKeys = Object.keys(colFilters);
+    let out = rows;
+    if (activeKeys.length) {
+      out = out.filter((row) => activeKeys.every((k) => {
+        const allowed = colFilters[k];
+        if (!allowed || allowed.size === 0) return true;
+        const col = COLUMNS.find((c) => c.key === k);
+        if (col?.isImage) return allowed.has(itemHasImage(row) ? "Has image" : "No image");
+        const raw = row[k];
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        return allowed.has(v);
+      }));
+    }
+    if (sort.key && sort.dir) {
+      const col = COLUMNS.find((c) => c.key === sort.key);
+      const numeric = col?.isNumeric;
+      out = [...out].sort((a, b) => {
+        const av = a[sort.key]; const bv = b[sort.key];
+        const aS = av === null || av === undefined ? "" : String(av);
+        const bS = bv === null || bv === undefined ? "" : String(bv);
+        let cmp;
+        if (numeric) cmp = (Number(av) || 0) - (Number(bv) || 0);
+        else cmp = aS.localeCompare(bS);
+        return sort.dir === "asc" ? cmp : -cmp;
+      });
+    }
+    return out;
+  };
+
+  // Build a real .xlsx file with one worksheet and trigger a download
+  const buildAndDownloadXlsx = (rows, filename) => {
+    const data = rows.map((r, idx) => ({
+      "SL NO": idx + 1,
+      "MODEL": r.model || "",
+      "PART NO": r.part_no || "",
+      "OLD PART NO": r.old_part_no || "",
+      "MAKE PART NO": r.make_part_no || "",
+      "DESCRIPTION 1": r.description_1 || "",
+      "DESCRIPTION 2": r.description_2 || "",
+      "REMARKS OEM": r.remarks_oem || "",
+      "REMARKS OTHERS": r.remarks_others || "",
+      "MAKE": r.make || "",
+      "ITEM CATEGORY": r.item_category || "",
+      "REORDER LEVEL": r.reorder_level || 0,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [
+      { wch: 6 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
+      { wch: 30 }, { wch: 30 }, { wch: 22 }, { wch: 22 }, { wch: 14 },
+      { wch: 18 }, { wch: 14 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Stock Master");
+    XLSX.writeFile(wb, filename);
+  };
+
+  const exportFullStockMaster = async () => {
+    setExportMenuOpen(false);
+    setExporting(true);
+    setExportProgress({ loaded: 0, total: 0, label: "Fetching all items…" });
     try {
-      const res = await api.get("/stock-master/download/export", { responseType: "blob" });
-      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = `stock_master_export_${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a); a.click(); a.remove();
-      window.URL.revokeObjectURL(url);
-      toast.success(`Export downloaded`);
-    } catch { toast.error("Could not export"); }
+      const all = await fetchAllPages("", "Fetching all items…");
+      if (!all.length) { toast.error("No items to export"); return; }
+      setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
+      const ts = new Date().toISOString().slice(0, 10);
+      buildAndDownloadXlsx(all, `stock_master_full_${ts}.xlsx`);
+      toast.success(`Exported ${all.length.toLocaleString()} item(s)`);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportCurrentView = async () => {
+    setExportMenuOpen(false);
+    setExporting(true);
+    setExportProgress({ loaded: 0, total: 0, label: "Fetching matching items…" });
+    try {
+      const all = await fetchAllPages(search, "Fetching matching items…");
+      setExportProgress({ loaded: all.length, total: all.length, label: "Applying filters & sort…" });
+      const filtered = applyClientFiltersAndSort(all);
+      if (!filtered.length) { toast.error("Nothing matches the current view"); return; }
+      setExportProgress({ loaded: filtered.length, total: filtered.length, label: "Generating Excel file…" });
+      const ts = new Date().toISOString().slice(0, 10);
+      buildAndDownloadXlsx(filtered, `stock_master_view_${ts}.xlsx`);
+      toast.success(`Exported ${filtered.length.toLocaleString()} item(s)`);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Export failed");
+    } finally {
+      setExporting(false);
+    }
   };
 
   // Sticky header cell base style
@@ -463,9 +583,41 @@ export default function StockMasterPage() {
           <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
             <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
           </Button>
-          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="export-button">
-            <FileArrowDown size={16} weight="bold" className="mr-2" /> Export
-          </Button>
+          <div className="relative" ref={exportMenuRef}>
+            <Button
+              onClick={() => setExportMenuOpen((v) => !v)}
+              variant="outline"
+              className="rounded-sm border-slate-300"
+              disabled={exporting}
+              data-testid="export-button"
+            >
+              <FileArrowDown size={16} weight="bold" className="mr-2" /> Export
+              <CaretDown size={12} weight="bold" className="ml-2" />
+            </Button>
+            {exportMenuOpen && (
+              <div
+                className="absolute right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded-sm shadow-lg w-72 py-1"
+                data-testid="export-menu"
+              >
+                <button
+                  onClick={exportFullStockMaster}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-50 flex flex-col gap-0.5"
+                  data-testid="export-full"
+                >
+                  <span className="text-sm font-semibold text-slate-800">Export Full Stock Master</span>
+                  <span className="text-[11px] text-slate-500">Every item in the master, ignoring filters.</span>
+                </button>
+                <button
+                  onClick={exportCurrentView}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-50 flex flex-col gap-0.5"
+                  data-testid="export-view"
+                >
+                  <span className="text-sm font-semibold text-slate-800">Export Current View</span>
+                  <span className="text-[11px] text-slate-500">All pages, with current search, filters &amp; sort applied.</span>
+                </button>
+              </div>
+            )}
+          </div>
           <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileSelected} className="hidden" data-testid="bulk-upload-input" />
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
             <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
@@ -743,7 +895,36 @@ export default function StockMasterPage() {
         />
       )}
 
-      <ImageViewerDialog open={!!viewer} images={viewer?.images || []} startIndex={viewer?.idx || 0} onClose={() => setViewer(null)} />
+     <ImageViewerDialog open={!!viewer} images={viewer?.images || []} startIndex={viewer?.idx || 0} onClose={() => setViewer(null)} />
+
+      {exporting && (
+        <Dialog open={true}>
+          <DialogContent className="max-w-sm rounded-sm">
+            <DialogHeader>
+              <DialogTitle className="text-lg font-black">Preparing Export…</DialogTitle>
+            </DialogHeader>
+            <div className="py-4 space-y-3">
+              <div className="flex items-center gap-3 text-slate-600 text-sm">
+                <ArrowsClockwise size={18} weight="bold" className="animate-spin text-blue-600 shrink-0" />
+                {exportProgress.label}
+              </div>
+              {exportProgress.total > 0 && (
+                <>
+                  <div className="font-mono text-xs text-slate-700">
+                    {exportProgress.loaded.toLocaleString()} / {exportProgress.total.toLocaleString()} item(s)
+                  </div>
+                  <div className="w-full h-2 bg-slate-100 rounded-sm overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 transition-all"
+                      style={{ width: `${Math.min(100, (exportProgress.loaded / Math.max(1, exportProgress.total)) * 100)}%` }}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
