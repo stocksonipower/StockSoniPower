@@ -1166,19 +1166,20 @@ async def serve_file(
     return Response(content=data, media_type=record.get("content_type", content_type))
 
 
-@api_router.post("/stock-master/bulk-upload")
-async def bulk_upload(file: UploadFile = File(...), user=Depends(get_current_user)):
+@api_router.post("/stock-master/bulk-preview")
+async def bulk_preview(file: UploadFile = File(...), user=Depends(get_current_user)):
     content = await file.read()
+    file_name = file.filename or "unknown"
+
     try:
-        if file.filename.endswith(".csv"):
+        if file_name.endswith(".csv"):
             df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
         else:
             df = pd.read_excel(io.BytesIO(content), dtype=str, keep_default_na=False)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"File parse error: {e}")
 
-    # Map incoming columns to internal fields
-    col_map = {}  # original column name -> internal field
+    col_map = {}
     for col in df.columns:
         key = _normalize_col(col)
         if key in COLUMN_ALIASES and COLUMN_ALIASES[key]:
@@ -1191,34 +1192,127 @@ async def bulk_upload(file: UploadFile = File(...), user=Depends(get_current_use
             detail="File must contain PART NO and MAKE columns. Download the template for the correct format.",
         )
 
-    inserted, skipped, errors = 0, 0, []
+    pairs_in_file = []
+    skipped_rows = 0
+    for _, row in df.iterrows():
+        part_no = ""
+        make = ""
+        for orig_col, field in col_map.items():
+            val = str(row.get(orig_col, "") or "").strip()
+            if field == "part_no":
+                part_no = val
+            elif field == "make":
+                make = val
+        if not part_no or not make:
+            skipped_rows += 1
+            continue
+        pairs_in_file.append((part_no, make))
+
+    total_items = len(pairs_in_file)
+
+    if total_items == 0:
+        return {
+            "file_name": file_name,
+            "total_items": 0,
+            "new_items": 0,
+            "duplicate_items": 0,
+            "skipped_rows": skipped_rows,
+        }
+
+    or_query = [{"part_no": pn, "make": mk} for pn, mk in pairs_in_file]
+    existing_set = set()
+    async for doc in db.stock_master.find(
+        {"$or": or_query},
+        {"_id": 0, "part_no": 1, "make": 1},
+    ):
+        existing_set.add((doc["part_no"], doc["make"]))
+
+    duplicate_count = sum(1 for p in pairs_in_file if p in existing_set)
+    new_count = total_items - duplicate_count
+
+    return {
+        "file_name": file_name,
+        "total_items": total_items,
+        "new_items": new_count,
+        "duplicate_items": duplicate_count,
+        "skipped_rows": skipped_rows,
+    }
+
+@api_router.post("/stock-master/bulk-upload")
+async def bulk_upload(
+    file: UploadFile = File(...),
+    mode: str = Query("skip", regex="^(skip|overwrite)$"),
+    user=Depends(get_current_user),
+):
+    content = await file.read()
+    try:
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_excel(io.BytesIO(content), dtype=str, keep_default_na=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"File parse error: {e}")
+
+    col_map = {}
+    for col in df.columns:
+        key = _normalize_col(col)
+        if key in COLUMN_ALIASES and COLUMN_ALIASES[key]:
+            col_map[col] = COLUMN_ALIASES[key]
+
+    mapped_fields = set(col_map.values())
+    if "part_no" not in mapped_fields or "make" not in mapped_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="File must contain PART NO and MAKE columns. Download the template for the correct format.",
+        )
+
+    inserted, skipped, overwritten = 0, 0, 0
     for idx, row in df.iterrows():
-        data = {"model": "", "part_no": "", "old_part_no": "", "make_part_no": "",
-                "description_1": "", "description_2": "",
-                "remarks_oem": "", "remarks_others": "",
-                "make": "", "item_category": "", "reorder_level": 0, "image": ""}
+        data = {
+            "model": "", "part_no": "", "old_part_no": "", "make_part_no": "",
+            "description_1": "", "description_2": "",
+            "remarks_oem": "", "remarks_others": "",
+            "make": "", "item_category": "", "reorder_level": 0, "image": "",
+        }
         for orig_col, field in col_map.items():
             val = row.get(orig_col, "")
             data[field] = str(val).strip() if val is not None else ""
-        # Coerce reorder_level to int
         try:
             data["reorder_level"] = int(float(str(data.get("reorder_level") or 0)))
         except Exception:
             data["reorder_level"] = 0
+
         part_no = data["part_no"]
         make = data["make"]
         if not part_no or not make:
             skipped += 1
             continue
-        if await db.stock_master.find_one({"part_no": part_no, "make": make}):
-            skipped += 1
+
+        existing = await db.stock_master.find_one({"part_no": part_no, "make": make})
+
+        if existing:
+            if mode == "overwrite":
+                update_data = {k: v for k, v in data.items() if k not in ("id", "created_at")}
+                await db.stock_master.update_one(
+                    {"part_no": part_no, "make": make},
+                    {"$set": update_data},
+                )
+                overwritten += 1
+            else:
+                skipped += 1
             continue
+
         doc = {"id": str(uuid.uuid4()), **data, "created_at": now_iso()}
         await db.stock_master.insert_one(doc)
         inserted += 1
 
-    return {"inserted": inserted, "skipped": skipped, "total_rows": len(df)}
-
+    return {
+        "inserted": inserted,
+        "skipped": skipped,
+        "overwritten": overwritten,
+        "total_rows": len(df),
+        "mode": mode,
+    }
 
 # -------------------- GODOWN / RACK / BOX --------------------
 def _csv_response(rows: list, header: list, filename: str) -> StreamingResponse:

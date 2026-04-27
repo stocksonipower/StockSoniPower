@@ -5,10 +5,15 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Trash, Pencil, UploadSimple, MagnifyingGlass, Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise, FunnelSimple, X, CaretLeft, CaretRight } from "@phosphor-icons/react";
+import {
+  Plus, Trash, Pencil, UploadSimple, MagnifyingGlass,
+  Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise,
+  FunnelSimple, X, CaretLeft, CaretRight,
+  FileText, CheckCircle, Warning, ArrowsLeftRight,
+} from "@phosphor-icons/react";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
 import StockMasterImageUploader from "../components/StockMasterImageUploader";
 import AuthImage from "../components/AuthImage";
@@ -37,6 +42,198 @@ const emptyForm = {
   image: "", images: [],
 };
 
+// ─── Import Preview Dialog ────────────────────────────────────────────────────
+function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importing }) {
+  // "skip" = skip duplicates, "overwrite" = overwrite duplicates
+  const [mode, setMode] = useState("skip");
+
+  // Reset mode whenever dialog opens with fresh data
+  useEffect(() => { if (open) setMode("skip"); }, [open]);
+
+  if (!preview) return null;
+
+  const { file_name, total_items, new_items, duplicate_items, skipped_rows } = preview;
+
+  const stats = [
+    {
+      label: "File Name",
+      value: file_name,
+      icon: <FileText size={18} weight="bold" className="text-slate-500" />,
+      mono: true,
+      wide: true,
+    },
+    {
+      label: "Total Items",
+      value: total_items,
+      icon: <ArrowsLeftRight size={18} weight="bold" className="text-blue-600" />,
+      color: "text-blue-700",
+    },
+    {
+      label: "New Items",
+      value: new_items,
+      icon: <CheckCircle size={18} weight="bold" className="text-emerald-600" />,
+      color: "text-emerald-700",
+    },
+    {
+      label: "Duplicate Items",
+      value: duplicate_items,
+      icon: <Warning size={18} weight="bold" className="text-amber-500" />,
+      color: "text-amber-700",
+    },
+  ];
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v && !importing) onClose(); }}>
+      <DialogContent className="max-w-lg rounded-sm" data-testid="import-preview-dialog">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-black tracking-tight text-slate-900">
+            Review Import
+          </DialogTitle>
+          <p className="text-xs text-slate-500 mt-1">
+            Check the details below before confirming the import.
+          </p>
+        </DialogHeader>
+
+        {/* Stats grid */}
+        <div className="grid grid-cols-2 gap-3 mt-1">
+          {stats.map((s) => (
+            <div
+              key={s.label}
+              className={`flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-sm p-3 ${s.wide ? "col-span-2" : ""}`}
+            >
+              <div className="mt-0.5 shrink-0">{s.icon}</div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-0.5">
+                  {s.label}
+                </div>
+                <div
+                  className={`font-mono font-bold text-sm truncate ${s.color || "text-slate-800"}`}
+                  title={String(s.value)}
+                  data-testid={`preview-${s.label.toLowerCase().replace(/\s+/g, "-")}`}
+                >
+                  {s.value}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Skipped rows note */}
+        {skipped_rows > 0 && (
+          <p className="text-[11px] text-slate-500 -mt-1">
+            <span className="font-semibold text-slate-700">{skipped_rows}</span> row(s) in the file are missing Part No or Make and will always be skipped.
+          </p>
+        )}
+
+        {/* Mode selector — only meaningful when duplicates exist */}
+        <div className="mt-1">
+          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-2">
+            How to handle duplicate items
+          </div>
+          <div className="flex gap-3">
+            {/* Skip */}
+            <button
+              type="button"
+              onClick={() => setMode("skip")}
+              disabled={importing}
+              data-testid="mode-skip"
+              className={`
+                flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
+                ${mode === "skip"
+                  ? "border-blue-600 bg-blue-50"
+                  : "border-slate-200 bg-white hover:border-slate-300"}
+                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+              `}
+            >
+              {/* Custom checkbox visual */}
+              <span className={`
+                shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
+                ${mode === "skip" ? "border-blue-600 bg-blue-600" : "border-slate-300 bg-white"}
+              `}>
+                {mode === "skip" && (
+                  <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
+                    <path d="M1 3.5L3.5 6L8 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
+              <div>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">
+                  Skip existing items
+                </div>
+                <div className="text-[11px] text-slate-500 leading-snug">
+                  Only import new items. Duplicates are left unchanged.
+                </div>
+              </div>
+            </button>
+
+            {/* Overwrite */}
+            <button
+              type="button"
+              onClick={() => setMode("overwrite")}
+              disabled={importing}
+              data-testid="mode-overwrite"
+              className={`
+                flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
+                ${mode === "overwrite"
+                  ? "border-amber-500 bg-amber-50"
+                  : "border-slate-200 bg-white hover:border-slate-300"}
+                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+              `}
+            >
+              <span className={`
+                shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
+                ${mode === "overwrite" ? "border-amber-500 bg-amber-500" : "border-slate-300 bg-white"}
+              `}>
+                {mode === "overwrite" && (
+                  <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
+                    <path d="M1 3.5L3.5 6L8 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
+              <div>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">
+                  Overwrite existing items
+                </div>
+                <div className="text-[11px] text-slate-500 leading-snug">
+                  Update duplicates with data from the file.
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <DialogFooter className="mt-2 gap-2">
+          <Button
+            variant="outline"
+            onClick={onClose}
+            disabled={importing}
+            className="rounded-sm"
+            data-testid="import-preview-cancel"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={() => onConfirm(mode)}
+            disabled={importing || total_items === 0}
+            className="rounded-sm bg-blue-700 hover:bg-blue-800 min-w-[160px]"
+            data-testid="import-preview-confirm"
+          >
+            {importing ? (
+              <span className="flex items-center gap-2">
+                <ArrowsClockwise size={14} weight="bold" className="animate-spin" />
+                Importing…
+              </span>
+            ) : (
+              `Confirm Import`
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
 export default function StockMasterPage() {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState("");
@@ -44,14 +241,19 @@ export default function StockMasterPage() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(false);
-  // Excel-style state: per-column filter (Set of allowed values) and global sort
   const [colFilters, setColFilters] = useState({});
   const [sort, setSort] = useState({ key: null, dir: null });
-  // Pagination (page size fixed at 5000)
   const PAGE_SIZE = 5000;
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const excelInput = useRef(null);
+
+  // ── Import preview state ──
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [preview, setPreview] = useState(null);       // response from /bulk-preview
+  const [pendingFile, setPendingFile] = useState(null); // the File object held while dialog is open
+  const [previewing, setPreviewing] = useState(false);  // loading the preview
+  const [importing, setImporting] = useState(false);    // doing the actual import
 
   const load = async () => {
     setLoading(true);
@@ -65,13 +267,11 @@ export default function StockMasterPage() {
     } finally { setLoading(false); }
   };
 
-  // Reset to page 1 when search changes
   useEffect(() => { setPage(1); }, [search]);
   useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search, page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  // Build unique values per column from current items
   const uniqueValues = React.useMemo(() => {
     const map = {};
     COLUMNS.forEach((c) => {
@@ -95,7 +295,6 @@ export default function StockMasterPage() {
 
   const itemHasImage = (row) => Array.isArray(row.images) && row.images.length > 0;
 
-  // Apply per-column filters + global sort
   const visibleItems = React.useMemo(() => {
     const activeKeys = Object.keys(colFilters);
     let out = items;
@@ -138,8 +337,7 @@ export default function StockMasterPage() {
   const openNew = () => { setEditing(null); setForm(emptyForm); setOpen(true); };
   const openEdit = (i) => { setEditing(i); setForm({ ...emptyForm, ...i, images: Array.isArray(i.images) ? i.images : [] }); setOpen(true); };
 
-  // Row-level image viewer
-  const [viewer, setViewer] = useState(null); // { images: string[], idx: number }
+  const [viewer, setViewer] = useState(null);
   const openViewer = (item, idx) => {
     const list = Array.isArray(item.images) && item.images.length > 0 ? item.images : (item.image ? [item.image] : []);
     if (list.length === 0) return;
@@ -151,7 +349,6 @@ export default function StockMasterPage() {
       toast.error("Part No. and Make are required");
       return;
     }
-    // Coerce reorder_level to a non-negative int for save
     const payload = { ...form, reorder_level: Math.max(0, parseInt(form.reorder_level, 10) || 0) };
     try {
       if (editing) await api.put(`/stock-master/${editing.id}`, payload);
@@ -173,22 +370,66 @@ export default function StockMasterPage() {
     }
   };
 
-  const bulkUpload = async (e) => {
+  // ── Bulk import: step 1 — show preview ───────────────────────────────────
+  const handleFileSelected = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
+    // Clear input so the same file can be re-selected after cancelling
+    if (excelInput.current) excelInput.current.value = "";
+
+    setPendingFile(file);
+    setPreviewing(true);
+    setPreview(null);
+    setPreviewOpen(true);
+
     try {
-      const { data } = await api.post("/stock-master/bulk-upload", fd, {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data } = await api.post("/stock-master/bulk-preview", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      toast.success(`Inserted ${data.inserted}, skipped ${data.skipped} of ${data.total_rows} rows`);
+      setPreview(data);
+    } catch (err) {
+      setPreviewOpen(false);
+      setPendingFile(null);
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not read the file");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  // ── Bulk import: step 2 — actually import with chosen mode ───────────────
+  const handleConfirmImport = async (mode) => {
+    if (!pendingFile) return;
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", pendingFile);
+      const { data } = await api.post(`/stock-master/bulk-upload?mode=${mode}`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      const parts = [`Inserted ${data.inserted} new item(s)`];
+      if (mode === "overwrite" && data.overwritten > 0) parts.push(`updated ${data.overwritten} existing item(s)`);
+      if (data.skipped > 0) parts.push(`skipped ${data.skipped}`);
+      toast.success(parts.join(", ") + `  ·  ${data.total_rows} rows in file`);
+
+      setPreviewOpen(false);
+      setPendingFile(null);
+      setPreview(null);
       load();
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail));
+      toast.error(formatApiError(err.response?.data?.detail) || "Import failed");
     } finally {
-      if (excelInput.current) excelInput.current.value = "";
+      setImporting(false);
     }
+  };
+
+  const handleClosePreview = () => {
+    if (importing) return;
+    setPreviewOpen(false);
+    setPendingFile(null);
+    setPreview(null);
   };
 
   const downloadTemplate = async () => {
@@ -196,16 +437,11 @@ export default function StockMasterPage() {
       const res = await api.get("/stock-master/download/template", { responseType: "blob" });
       const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
       const a = document.createElement("a");
-      a.href = url;
-      a.download = "stock_master_template.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      a.href = url; a.download = "stock_master_template.csv";
+      document.body.appendChild(a); a.click(); a.remove();
       window.URL.revokeObjectURL(url);
       toast.success("Template downloaded");
-    } catch (err) {
-      toast.error("Could not download template");
-    }
+    } catch { toast.error("Could not download template"); }
   };
 
   const handleExport = async () => {
@@ -213,16 +449,11 @@ export default function StockMasterPage() {
       const res = await api.get("/stock-master/download/export", { responseType: "blob" });
       const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
       const a = document.createElement("a");
-      a.href = url;
-      a.download = `stock_master_export_${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      a.href = url; a.download = `stock_master_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
       window.URL.revokeObjectURL(url);
-      toast.success(`Exported ${items.length} items`);
-    } catch (err) {
-      toast.error("Could not export");
-    }
+      toast.success(`Export downloaded`);
+    } catch { toast.error("Could not export"); }
   };
 
   return (
@@ -242,8 +473,21 @@ export default function StockMasterPage() {
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="export-button">
             <FileArrowDown size={16} weight="bold" className="mr-2" /> Export
           </Button>
-          <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={bulkUpload} className="hidden" data-testid="bulk-upload-input" />
-          <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
+          {/* Hidden file input — triggers preview flow */}
+          <input
+            ref={excelInput}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={handleFileSelected}
+            className="hidden"
+            data-testid="bulk-upload-input"
+          />
+          <Button
+            onClick={() => excelInput.current?.click()}
+            variant="outline"
+            className="rounded-sm border-slate-300"
+            data-testid="bulk-upload-button"
+          >
             <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
           </Button>
           <Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
@@ -385,6 +629,7 @@ export default function StockMasterPage() {
         </div>
       </div>
 
+      {/* Add / Edit dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl rounded-sm">
           <DialogHeader>
@@ -412,13 +657,10 @@ export default function StockMasterPage() {
             <div>
               <Label className="label-sm">Reorder Level</Label>
               <Input
-                type="number"
-                min="0"
-                inputMode="numeric"
+                type="number" min="0" inputMode="numeric"
                 value={form.reorder_level ?? ""}
                 onChange={(e) => {
                   const v = e.target.value;
-                  // Allow empty string while typing; coerce on save
                   setForm({ ...form, reorder_level: v === "" ? "" : Math.max(0, parseInt(v, 10) || 0) });
                 }}
                 onBlur={(e) => {
@@ -429,7 +671,7 @@ export default function StockMasterPage() {
                 className="mt-2 rounded-sm font-mono"
                 data-testid="form-reorder-level"
               />
-              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable. Type a number or use the arrows.</div>
+              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable.</div>
             </div>
             <div className="col-span-2">
               <Label className="label-sm">Images</Label>
@@ -450,6 +692,33 @@ export default function StockMasterPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Import preview dialog */}
+      {previewing && previewOpen && !preview && (
+        // Show a loading overlay inside the dialog while the preview is being fetched
+        <Dialog open={true}>
+          <DialogContent className="max-w-lg rounded-sm">
+            <DialogHeader>
+              <DialogTitle className="text-xl font-black">Analysing File…</DialogTitle>
+            </DialogHeader>
+            <div className="flex items-center gap-3 py-6 text-slate-500 text-sm">
+              <ArrowsClockwise size={20} weight="bold" className="animate-spin text-blue-600 shrink-0" />
+              Checking items against existing stock master records…
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {preview && (
+        <ImportPreviewDialog
+          open={previewOpen}
+          onClose={handleClosePreview}
+          preview={preview}
+          file={pendingFile}
+          onConfirm={handleConfirmImport}
+          importing={importing}
+        />
+      )}
 
       <ImageViewerDialog
         open={!!viewer}
