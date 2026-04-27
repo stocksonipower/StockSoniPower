@@ -11,7 +11,7 @@ import { toast } from "sonner";
 import {
   Plus, Trash, Pencil, UploadSimple, MagnifyingGlass,
   Image as ImgIcon, DownloadSimple, FileArrowDown, ArrowsClockwise,
-  FunnelSimple, X, CaretLeft, CaretRight,
+  FunnelSimple, X, CaretLeft, CaretRight, CaretUp, CaretDown,
   FileText, CheckCircle, Warning, ArrowsLeftRight,
 } from "@phosphor-icons/react";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
@@ -44,73 +44,34 @@ const emptyForm = {
 
 // ─── Import Preview Dialog ────────────────────────────────────────────────────
 function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importing }) {
-  // "skip" = skip duplicates, "overwrite" = overwrite duplicates
   const [mode, setMode] = useState("skip");
-
-  // Reset mode whenever dialog opens with fresh data
   useEffect(() => { if (open) setMode("skip"); }, [open]);
 
   if (!preview) return null;
-
   const { file_name, total_items, new_items, duplicate_items, skipped_rows } = preview;
 
   const stats = [
-    {
-      label: "File Name",
-      value: file_name,
-      icon: <FileText size={18} weight="bold" className="text-slate-500" />,
-      mono: true,
-      wide: true,
-    },
-    {
-      label: "Total Items",
-      value: total_items,
-      icon: <ArrowsLeftRight size={18} weight="bold" className="text-blue-600" />,
-      color: "text-blue-700",
-    },
-    {
-      label: "New Items",
-      value: new_items,
-      icon: <CheckCircle size={18} weight="bold" className="text-emerald-600" />,
-      color: "text-emerald-700",
-    },
-    {
-      label: "Duplicate Items",
-      value: duplicate_items,
-      icon: <Warning size={18} weight="bold" className="text-amber-500" />,
-      color: "text-amber-700",
-    },
+    { label: "File Name", value: file_name, icon: <FileText size={18} weight="bold" className="text-slate-500" />, wide: true },
+    { label: "Total Items", value: total_items, icon: <ArrowsLeftRight size={18} weight="bold" className="text-blue-600" />, color: "text-blue-700" },
+    { label: "New Items", value: new_items, icon: <CheckCircle size={18} weight="bold" className="text-emerald-600" />, color: "text-emerald-700" },
+    { label: "Duplicate Items", value: duplicate_items, icon: <Warning size={18} weight="bold" className="text-amber-500" />, color: "text-amber-700" },
   ];
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v && !importing) onClose(); }}>
       <DialogContent className="max-w-lg rounded-sm" data-testid="import-preview-dialog">
         <DialogHeader>
-          <DialogTitle className="text-xl font-black tracking-tight text-slate-900">
-            Review Import
-          </DialogTitle>
-          <p className="text-xs text-slate-500 mt-1">
-            Check the details below before confirming the import.
-          </p>
+          <DialogTitle className="text-xl font-black tracking-tight text-slate-900">Review Import</DialogTitle>
+          <p className="text-xs text-slate-500 mt-1">Check the details below before confirming the import.</p>
         </DialogHeader>
 
-        {/* Stats grid */}
         <div className="grid grid-cols-2 gap-3 mt-1">
           {stats.map((s) => (
-            <div
-              key={s.label}
-              className={`flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-sm p-3 ${s.wide ? "col-span-2" : ""}`}
-            >
+            <div key={s.label} className={`flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-sm p-3 ${s.wide ? "col-span-2" : ""}`}>
               <div className="mt-0.5 shrink-0">{s.icon}</div>
               <div className="min-w-0">
-                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-0.5">
-                  {s.label}
-                </div>
-                <div
-                  className={`font-mono font-bold text-sm truncate ${s.color || "text-slate-800"}`}
-                  title={String(s.value)}
-                  data-testid={`preview-${s.label.toLowerCase().replace(/\s+/g, "-")}`}
-                >
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-0.5">{s.label}</div>
+                <div className={`font-mono font-bold text-sm truncate ${s.color || "text-slate-800"}`} title={String(s.value)} data-testid={`preview-${s.label.toLowerCase().replace(/\s+/g, "-")}`}>
                   {s.value}
                 </div>
               </div>
@@ -118,38 +79,21 @@ function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importin
           ))}
         </div>
 
-        {/* Skipped rows note */}
         {skipped_rows > 0 && (
           <p className="text-[11px] text-slate-500 -mt-1">
             <span className="font-semibold text-slate-700">{skipped_rows}</span> row(s) in the file are missing Part No or Make and will always be skipped.
           </p>
         )}
 
-        {/* Mode selector — only meaningful when duplicates exist */}
         <div className="mt-1">
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-2">
-            How to handle duplicate items
-          </div>
+          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-2">How to handle duplicate items</div>
           <div className="flex gap-3">
-            {/* Skip */}
-            <button
-              type="button"
-              onClick={() => setMode("skip")}
-              disabled={importing}
-              data-testid="mode-skip"
-              className={`
-                flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
-                ${mode === "skip"
-                  ? "border-blue-600 bg-blue-50"
-                  : "border-slate-200 bg-white hover:border-slate-300"}
-                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
-              `}
-            >
-              {/* Custom checkbox visual */}
-              <span className={`
-                shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
-                ${mode === "skip" ? "border-blue-600 bg-blue-600" : "border-slate-300 bg-white"}
-              `}>
+            <button type="button" onClick={() => setMode("skip")} disabled={importing} data-testid="mode-skip"
+              className={`flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
+                ${mode === "skip" ? "border-blue-600 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300"}
+                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+              <span className={`shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
+                ${mode === "skip" ? "border-blue-600 bg-blue-600" : "border-slate-300 bg-white"}`}>
                 {mode === "skip" && (
                   <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
                     <path d="M1 3.5L3.5 6L8 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -157,33 +101,17 @@ function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importin
                 )}
               </span>
               <div>
-                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">
-                  Skip existing items
-                </div>
-                <div className="text-[11px] text-slate-500 leading-snug">
-                  Only import new items. Duplicates are left unchanged.
-                </div>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">Skip existing items</div>
+                <div className="text-[11px] text-slate-500 leading-snug">Only import new items. Duplicates are left unchanged.</div>
               </div>
             </button>
 
-            {/* Overwrite */}
-            <button
-              type="button"
-              onClick={() => setMode("overwrite")}
-              disabled={importing}
-              data-testid="mode-overwrite"
-              className={`
-                flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
-                ${mode === "overwrite"
-                  ? "border-amber-500 bg-amber-50"
-                  : "border-slate-200 bg-white hover:border-slate-300"}
-                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
-              `}
-            >
-              <span className={`
-                shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
-                ${mode === "overwrite" ? "border-amber-500 bg-amber-500" : "border-slate-300 bg-white"}
-              `}>
+            <button type="button" onClick={() => setMode("overwrite")} disabled={importing} data-testid="mode-overwrite"
+              className={`flex-1 flex items-center gap-3 rounded-sm border-2 px-4 py-3 text-left transition-all
+                ${mode === "overwrite" ? "border-amber-500 bg-amber-50" : "border-slate-200 bg-white hover:border-slate-300"}
+                ${importing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+              <span className={`shrink-0 h-4 w-4 rounded-sm border-2 flex items-center justify-center transition-colors
+                ${mode === "overwrite" ? "border-amber-500 bg-amber-500" : "border-slate-300 bg-white"}`}>
                 {mode === "overwrite" && (
                   <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
                     <path d="M1 3.5L3.5 6L8 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -191,41 +119,19 @@ function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importin
                 )}
               </span>
               <div>
-                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">
-                  Overwrite existing items
-                </div>
-                <div className="text-[11px] text-slate-500 leading-snug">
-                  Update duplicates with data from the file.
-                </div>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">Overwrite existing items</div>
+                <div className="text-[11px] text-slate-500 leading-snug">Update duplicates with data from the file.</div>
               </div>
             </button>
           </div>
         </div>
 
         <DialogFooter className="mt-2 gap-2">
-          <Button
-            variant="outline"
-            onClick={onClose}
-            disabled={importing}
-            className="rounded-sm"
-            data-testid="import-preview-cancel"
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={() => onConfirm(mode)}
-            disabled={importing || total_items === 0}
-            className="rounded-sm bg-blue-700 hover:bg-blue-800 min-w-[160px]"
-            data-testid="import-preview-confirm"
-          >
+          <Button variant="outline" onClick={onClose} disabled={importing} className="rounded-sm" data-testid="import-preview-cancel">Cancel</Button>
+          <Button onClick={() => onConfirm(mode)} disabled={importing || total_items === 0} className="rounded-sm bg-blue-700 hover:bg-blue-800 min-w-[160px]" data-testid="import-preview-confirm">
             {importing ? (
-              <span className="flex items-center gap-2">
-                <ArrowsClockwise size={14} weight="bold" className="animate-spin" />
-                Importing…
-              </span>
-            ) : (
-              `Confirm Import`
-            )}
+              <span className="flex items-center gap-2"><ArrowsClockwise size={14} weight="bold" className="animate-spin" />Importing…</span>
+            ) : (`Confirm Import`)}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -243,32 +149,42 @@ export default function StockMasterPage() {
   const [loading, setLoading] = useState(false);
   const [colFilters, setColFilters] = useState({});
   const [sort, setSort] = useState({ key: null, dir: null });
-  const PAGE_SIZE = 5000;
+  const PAGE_SIZE = 1000;
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const excelInput = useRef(null);
 
-  // ── Import preview state ──
+  // Import preview state
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [preview, setPreview] = useState(null);       // response from /bulk-preview
-  const [pendingFile, setPendingFile] = useState(null); // the File object held while dialog is open
-  const [previewing, setPreviewing] = useState(false);  // loading the preview
-  const [importing, setImporting] = useState(false);    // doing the actual import
+  const [preview, setPreview] = useState(null);
+  const [pendingFile, setPendingFile] = useState(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  // Search-match navigation state
+  const [matchIdx, setMatchIdx] = useState(0);
+  const currentCellRef = useRef(null);
+  const searchInputRef = useRef(null);
+  // Tracks which search term the currently-displayed `items` correspond to.
+  // Used to suppress stale highlights while the API is catching up.
+  const [loadedSearch, setLoadedSearch] = useState("");
 
   const load = async () => {
     setLoading(true);
+    const requestSearch = search; // capture the search term this request is for
     try {
       const params = { page, page_size: PAGE_SIZE };
-      if (search) params.search = search;
+      if (requestSearch) params.search = requestSearch;
       const res = await api.get("/stock-master", { params });
       setItems(res.data);
+      setLoadedSearch(requestSearch);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
   };
 
   useEffect(() => { setPage(1); }, [search]);
-  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search, page]);
+  useEffect(() => { const t = setTimeout(load, 150); return () => clearTimeout(t); /* eslint-disable-next-line */ }, [search, page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -325,6 +241,89 @@ export default function StockMasterPage() {
     return out;
   }, [items, colFilters, sort]);
 
+  // ── Search matches inside the currently visible rows ─────────────────────
+ const matches = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    // Don't highlight against stale data — wait until the filtered list arrives
+    if (search !== loadedSearch) return [];
+    const out = [];
+    visibleItems.forEach((row, rowIdx) => {
+      COLUMNS.forEach((col) => {
+        if (col.isImage) return;
+        const val = row[col.key];
+        if (val === null || val === undefined || val === "") return;
+        if (String(val).toLowerCase().includes(q)) {
+          out.push({ rowIdx, colKey: col.key });
+        }
+      });
+    });
+    return out;
+  }, [visibleItems, search, loadedSearch]);
+
+  const currentMatch = matches[matchIdx] || null;
+
+  useEffect(() => { setMatchIdx(0); }, [search]);
+  useEffect(() => {
+    if (matches.length > 0 && matchIdx >= matches.length) setMatchIdx(0);
+  }, [matches.length, matchIdx]);
+
+  // Auto-scroll the current match cell into view (within the table scroll container)
+  // Ctrl+F / Cmd+F focuses the search box (overrides browser Find)
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+          searchInputRef.current.select();
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  const goNextMatch = () => {
+    if (!matches.length) return;
+    setMatchIdx((i) => (i + 1) % matches.length);
+  };
+  const goPrevMatch = () => {
+    if (!matches.length) return;
+    setMatchIdx((i) => (i - 1 + matches.length) % matches.length);
+  };
+
+  // Cell highlight class — colKey null = SL NO / ACTIONS columns (row-only highlight)
+  const cellClass = (rowIdx, colKey) => {
+    if (!search.trim() || !currentMatch) return "";
+    const q = search.trim().toLowerCase();
+
+    let isMatch = false;
+    if (colKey && colKey !== "images") {
+      const row = visibleItems[rowIdx];
+      const val = row?.[colKey];
+      if (val !== null && val !== undefined && val !== "") {
+        isMatch = String(val).toLowerCase().includes(q);
+      }
+    }
+
+    if (colKey && rowIdx === currentMatch.rowIdx && colKey === currentMatch.colKey) {
+      return "bg-green-300";  // strongest — current match
+    }
+    if (isMatch) {
+      return "bg-green-100";  // other matches
+    }
+    if (rowIdx === currentMatch.rowIdx || (colKey && colKey === currentMatch.colKey)) {
+      return "bg-green-50";   // row + column cross
+    }
+    return "";
+  };
+
+  const tdCls = (rowIdx, colKey, base = "") => {
+    const hl = cellClass(rowIdx, colKey);
+    return [base, hl].filter(Boolean).join(" ");
+  };
+
   const setColFilter = (key, set) => setColFilters((f) => {
     const next = { ...f };
     if (!set || set.size === 0) delete next[key];
@@ -370,11 +369,9 @@ export default function StockMasterPage() {
     }
   };
 
-  // ── Bulk import: step 1 — show preview ───────────────────────────────────
   const handleFileSelected = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    // Clear input so the same file can be re-selected after cancelling
     if (excelInput.current) excelInput.current.value = "";
 
     setPendingFile(file);
@@ -398,7 +395,6 @@ export default function StockMasterPage() {
     }
   };
 
-  // ── Bulk import: step 2 — actually import with chosen mode ───────────────
   const handleConfirmImport = async (mode) => {
     if (!pendingFile) return;
     setImporting(true);
@@ -408,15 +404,11 @@ export default function StockMasterPage() {
       const { data } = await api.post(`/stock-master/bulk-upload?mode=${mode}`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-
       const parts = [`Inserted ${data.inserted} new item(s)`];
       if (mode === "overwrite" && data.overwritten > 0) parts.push(`updated ${data.overwritten} existing item(s)`);
       if (data.skipped > 0) parts.push(`skipped ${data.skipped}`);
       toast.success(parts.join(", ") + `  ·  ${data.total_rows} rows in file`);
-
-      setPreviewOpen(false);
-      setPendingFile(null);
-      setPreview(null);
+      setPreviewOpen(false); setPendingFile(null); setPreview(null);
       load();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Import failed");
@@ -427,9 +419,7 @@ export default function StockMasterPage() {
 
   const handleClosePreview = () => {
     if (importing) return;
-    setPreviewOpen(false);
-    setPendingFile(null);
-    setPreview(null);
+    setPreviewOpen(false); setPendingFile(null); setPreview(null);
   };
 
   const downloadTemplate = async () => {
@@ -456,6 +446,9 @@ export default function StockMasterPage() {
     } catch { toast.error("Could not export"); }
   };
 
+  // Sticky header cell base style
+  const stickyTh = "sticky top-0 z-20 bg-slate-50";
+
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-master-page">
       <div className="flex items-center justify-between mb-6">
@@ -473,21 +466,8 @@ export default function StockMasterPage() {
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="export-button">
             <FileArrowDown size={16} weight="bold" className="mr-2" /> Export
           </Button>
-          {/* Hidden file input — triggers preview flow */}
-          <input
-            ref={excelInput}
-            type="file"
-            accept=".xlsx,.xls,.csv"
-            onChange={handleFileSelected}
-            className="hidden"
-            data-testid="bulk-upload-input"
-          />
-          <Button
-            onClick={() => excelInput.current?.click()}
-            variant="outline"
-            className="rounded-sm border-slate-300"
-            data-testid="bulk-upload-button"
-          >
+          <input ref={excelInput} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileSelected} className="hidden" data-testid="bulk-upload-input" />
+          <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
             <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
           </Button>
           <Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
@@ -500,13 +480,60 @@ export default function StockMasterPage() {
         <div className="relative max-w-md flex-1">
           <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
-            placeholder="Search part no, old/make part no, descriptions, remarks, make, category…"
+            ref={searchInputRef}
+            placeholder="Search part no, descriptions, remarks, make, category… (Ctrl+F)"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-10 rounded-sm"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (e.shiftKey) goPrevMatch(); else goNextMatch();
+              }
+            }}
+            className="pl-10 pr-9 rounded-sm"
             data-testid="search-input"
           />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-sm text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              title="Clear search"
+              data-testid="search-clear"
+            >
+              <X size={12} weight="bold" />
+            </button>
+          )}
         </div>
+
+        {/* Match counter + Up/Down navigation (visible while searching) */}
+        {search.trim() && (
+          <div className="flex items-center gap-1 text-xs" data-testid="match-nav">
+            <span className="font-mono font-semibold text-slate-700 px-2 py-1 bg-slate-100 rounded-sm">
+              {search !== loadedSearch
+                ? "Searching…"
+                : matches.length > 0 ? `${matchIdx + 1} of ${matches.length}` : "No matches"}
+            </span>
+            <button
+              onClick={goPrevMatch}
+              disabled={!matches.length}
+              title="Previous match (Shift+Enter)"
+              className="p-1.5 rounded-sm hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+              data-testid="match-prev"
+            >
+              <CaretUp size={14} weight="bold" />
+            </button>
+            <button
+              onClick={goNextMatch}
+              disabled={!matches.length}
+              title="Next match (Enter)"
+              className="p-1.5 rounded-sm hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+              data-testid="match-next"
+            >
+              <CaretDown size={14} weight="bold" />
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <FunnelSimple size={14} weight="bold" />
           <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Click any column to filter or sort"}</span>
@@ -518,13 +545,18 @@ export default function StockMasterPage() {
         )}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+      {/* Scroll container — both axes scroll, sticky header inside */}
+      <div
+        className="bg-white border border-slate-200 rounded-sm overflow-auto"
+        style={{ maxHeight: "calc(100vh - 320px)", minHeight: "400px" }}
+        data-testid="stock-master-scroller"
+      >
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className={`${stickyTh} w-14`}>SL NO</th>
               {COLUMNS.map((c) => (
-                <th key={c.key}>
+                <th key={c.key} className={stickyTh}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -536,68 +568,65 @@ export default function StockMasterPage() {
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className={`${stickyTh} text-right`}>ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {visibleItems.map((i, idx) => (
-              <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
-                <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td className="font-mono text-slate-600">{i.model || "—"}</td>
-                <td className="font-mono font-semibold">{i.part_no}</td>
-                <td className="font-mono text-slate-600">{i.old_part_no || "—"}</td>
-                <td className="font-mono text-slate-600">{i.make_part_no || "—"}</td>
-                <td className="text-slate-700 max-w-[200px] truncate">{i.description_1 || "—"}</td>
-                <td className="text-slate-700 max-w-[200px] truncate">{i.description_2 || "—"}</td>
-                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks_oem || "—"}</td>
-                <td className="text-slate-600 max-w-[180px] truncate">{i.remarks_others || "—"}</td>
-                <td>{i.make}</td>
-                <td>{i.item_category || "—"}</td>
-                <td className="font-mono text-slate-700">{i.reorder_level || 0}</td>
-                <td>
-                  {(() => {
-                    const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
-                    if (list.length === 0) {
+            {visibleItems.map((i, idx) => {
+              const isCurrentRow = !!(currentMatch && currentMatch.rowIdx === idx);
+              const cellRef = (colKey) =>
+                isCurrentRow && currentMatch.colKey === colKey ? currentCellRef : null;
+              return (
+                <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
+                  <td className={tdCls(idx, null, "font-mono text-slate-500")}>{idx + 1}</td>
+
+                  <td ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")}>{i.model || "—"}</td>
+                  <td ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")}>{i.part_no}</td>
+                  <td ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")}>{i.old_part_no || "—"}</td>
+                  <td ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")}>{i.make_part_no || "—"}</td>
+                  <td ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")}>{i.description_1 || "—"}</td>
+                  <td ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700 max-w-[200px] truncate")}>{i.description_2 || "—"}</td>
+                  <td ref={cellRef("remarks_oem")} className={tdCls(idx, "remarks_oem", "text-slate-600 max-w-[180px] truncate")}>{i.remarks_oem || "—"}</td>
+                  <td ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600 max-w-[180px] truncate")}>{i.remarks_others || "—"}</td>
+                  <td ref={cellRef("make")} className={tdCls(idx, "make")}>{i.make}</td>
+                  <td ref={cellRef("item_category")} className={tdCls(idx, "item_category")}>{i.item_category || "—"}</td>
+                  <td ref={cellRef("reorder_level")} className={tdCls(idx, "reorder_level", "font-mono text-slate-700")}>{i.reorder_level || 0}</td>
+
+                  <td className={tdCls(idx, "images")}>
+                    {(() => {
+                      const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
+                      if (list.length === 0) {
+                        return (
+                          <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400" data-testid={`image-empty-${i.id}`}>
+                            <ImgIcon size={16} />
+                          </div>
+                        );
+                      }
                       return (
-                        <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400" data-testid={`image-empty-${i.id}`}>
-                          <ImgIcon size={16} />
+                        <div className="relative inline-flex items-center" data-testid={`image-cell-${i.id}`}>
+                          <AuthImage path={list[0]} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80" onClick={() => openViewer(i, 0)} testid={`image-thumb-${i.id}`} />
+                          {list.length > 1 && (
+                            <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm" data-testid={`image-count-${i.id}`}>+{list.length - 1}</span>
+                          )}
                         </div>
                       );
-                    }
-                    return (
-                      <div className="relative inline-flex items-center" data-testid={`image-cell-${i.id}`}>
-                        <AuthImage
-                          path={list[0]}
-                          alt=""
-                          className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80"
-                          onClick={() => openViewer(i, 0)}
-                          testid={`image-thumb-${i.id}`}
-                        />
-                        {list.length > 1 && (
-                          <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm" data-testid={`image-count-${i.id}`}>
-                            +{list.length - 1}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </td>
-                <td className="text-right whitespace-nowrap">
-                  <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
-                    <Pencil size={14} />
-                  </button>
-                  <button
-                    onClick={() => del(i.id)}
-                    disabled={!!i.in_use}
-                    title={i.in_use ? "Cannot delete — transactions are recorded against this item" : "Delete"}
-                    className={`p-1.5 rounded-sm ${i.in_use ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                    data-testid={`delete-${i.id}`}
-                  >
-                    <Trash size={14} />
-                  </button>
-                </td>
-              </tr>
-            ))}
+                    })()}
+                  </td>
+
+                  <td className={tdCls(idx, null, "text-right whitespace-nowrap")}>
+                    <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
+                      <Pencil size={14} />
+                    </button>
+                    <button onClick={() => del(i.id)} disabled={!!i.in_use}
+                      title={i.in_use ? "Cannot delete — transactions are recorded against this item" : "Delete"}
+                      className={`p-1.5 rounded-sm ${i.in_use ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      data-testid={`delete-${i.id}`}>
+                      <Trash size={14} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {visibleItems.length === 0 && (
               <tr><td colSpan={14} className="text-center py-12 text-slate-500">{loading ? "Loading…" : "No items found."}</td></tr>
             )}
@@ -676,11 +705,7 @@ export default function StockMasterPage() {
             <div className="col-span-2">
               <Label className="label-sm">Images</Label>
               <div className="mt-2">
-                <StockMasterImageUploader
-                  value={form.images}
-                  onChange={(images) => setForm((f) => ({ ...f, images }))}
-                  testid="form-images"
-                />
+                <StockMasterImageUploader value={form.images} onChange={(images) => setForm((f) => ({ ...f, images }))} testid="form-images" />
               </div>
             </div>
           </div>
@@ -693,9 +718,7 @@ export default function StockMasterPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Import preview dialog */}
       {previewing && previewOpen && !preview && (
-        // Show a loading overlay inside the dialog while the preview is being fetched
         <Dialog open={true}>
           <DialogContent className="max-w-lg rounded-sm">
             <DialogHeader>
@@ -720,12 +743,7 @@ export default function StockMasterPage() {
         />
       )}
 
-      <ImageViewerDialog
-        open={!!viewer}
-        images={viewer?.images || []}
-        startIndex={viewer?.idx || 0}
-        onClose={() => setViewer(null)}
-      />
+      <ImageViewerDialog open={!!viewer} images={viewer?.images || []} startIndex={viewer?.idx || 0} onClose={() => setViewer(null)} />
     </div>
   );
 }
