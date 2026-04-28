@@ -480,9 +480,9 @@ export default function StockMasterPage() {
   const downloadTemplate = async () => {
     try {
       const res = await api.get("/stock-master/download/template", { responseType: "blob" });
-      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
       const a = document.createElement("a");
-      a.href = url; a.download = "stock_master_template.csv";
+      a.href = url; a.download = "stock_master_template.xlsx";
       document.body.appendChild(a); a.click(); a.remove();
       window.URL.revokeObjectURL(url);
       toast.success("Template downloaded");
@@ -717,8 +717,7 @@ export default function StockMasterPage() {
         )}
 
         <div className="flex items-center gap-2 text-xs text-slate-500">
-          <FunnelSimple size={14} weight="bold" />
-          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : "Click any column to filter or sort"}</span>
+          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : ""}</span>
         </div>
         {(activeFilterCount > 0 || sort.key) && (
           <Button onClick={() => { setColFilters({}); setSort({ key: null, dir: null }); }} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">

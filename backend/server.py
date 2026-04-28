@@ -1105,6 +1105,7 @@ async def list_stock_master(
         query["$or"] = [
             {"part_no": {"$regex": s, "$options": "i"}},
             {"old_part_no": {"$regex": s, "$options": "i"}},
+            {"new_part_no": {"$regex": s, "$options": "i"}},
             {"make_part_no": {"$regex": s, "$options": "i"}},
             {"description_1": {"$regex": s, "$options": "i"}},
             {"description_2": {"$regex": s, "$options": "i"}},
@@ -1256,6 +1257,7 @@ async def get_item_by_part_make(part_no: str, make: str, user=Depends(get_curren
 
 @api_router.get("/stock-master/download/template")
 async def download_template_route():
+    import io as _io
     sample_rows = [
         ["1", "Model-X100", "3922900", "OPN-1001", "NPN-2001", "CUM-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
@@ -1264,7 +1266,17 @@ async def download_template_route():
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Qty per box 1",
          "Tata", "Engine Parts", "PCS", "10"],
     ]
-    return _csv_response(sample_rows, TEMPLATE_COLUMNS, "stock_master_template.csv")
+    data = [dict(zip(TEMPLATE_COLUMNS, row)) for row in sample_rows]
+    df = pd.DataFrame(data)
+    output = _io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Stock Master')
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=stock_master_template.xlsx"},
+    )
 
 
 @api_router.get("/stock-master/download/export")
