@@ -2263,6 +2263,7 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "rn_date": today.date().isoformat(),
             "fy": fy,
             "serial": serial,
+            "stock_in_type": payload.stock_in_type,
             "invoice_no": (payload.invoice_no or "").strip(),
             "invoice_date": (payload.invoice_date or "").strip(),
             "goods_received_date": (payload.goods_received_date or "").strip(),
@@ -2390,7 +2391,8 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
             "quantity": qty_legacy,
         })
 
-    update = {
+        update = {
+        "stock_in_type": payload.stock_in_type,
         "invoice_no": (payload.invoice_no or "").strip(),
         "invoice_date": (payload.invoice_date or "").strip(),
         "goods_received_date": (payload.goods_received_date or "").strip(),
