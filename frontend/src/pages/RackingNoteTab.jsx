@@ -706,7 +706,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 const key = `${it.part_no}||${it.make}`;
                 const allocated = allocatedByKey[key] || 0;
                 const pending = it.pending_qty;
-                const received = it.received_qty;
+                const received = it.rackable_qty ?? it.received_qty;
                 const overAllocated = pending !== undefined && allocated > pending + 1e-6;
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>

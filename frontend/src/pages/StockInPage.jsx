@@ -272,9 +272,10 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
             {filteredRows.map((r, idx) => {
               const totalQty = totalQtyOf(r);
               const isDraft = r.status === "DRAFT";
-              const isFully = r.status === "FULLY_RACKED";
-              const isPartial = r.status === "PARTIALLY_RACKED";
-              const hasRacking = isFully || isPartial; // any RKN exists -> edit/delete blocked unless DRAFT
+              // New policy: lock edit/delete ONLY when a Racking Note exists against this RN.
+              // Falls back to the status-based heuristic for older API responses that lack the flag.
+              const hasRacking = r.has_racking_note === true
+                || (r.has_racking_note === undefined && (r.status === "FULLY_RACKED" || r.status === "PARTIALLY_RACKED"));
               // DRAFT bypasses assignee restriction (anyone with stock_in access can edit drafts).
               const isAssignedToOther = !isDraft && !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lockEdit = hasRacking || isAssignedToOther;
@@ -787,10 +788,13 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     return true;
   };
 
-  const allReceivedFilled = useMemo(
+  // Received Qty may be 0 (treated as "nothing received yet"). We only require
+  // it to be a non-negative number (null/empty is treated as 0 server-side).
+  const allReceivedValid = useMemo(
     () => items.length > 0 && items.every((it) => {
+      if (it.received_qty === "" || it.received_qty === null || it.received_qty === undefined) return true;
       const r = toNum(it.received_qty);
-      return r != null && r > 0;
+      return r !== null && r >= 0;
     }),
     [items]
   );
@@ -800,17 +804,17 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     [items]
   );
 
-  // Final Save is enabled when: every row has part_no/make/received_qty>0 (and invoice_qty>0 if INVOICE mode)
-  // No date is mandatory anymore (invoice_no/invoice_date/goods_received_date all optional).
+  // Final Save is enabled when: every row has part_no/make and received_qty is a non-negative number
+  // (or empty, treated as 0). Dates + invoice_no are all optional.
   const canFinalize = useMemo(() => {
-    if (!allMakesFilled || !allReceivedFilled) return false;
+    if (!allMakesFilled || !allReceivedValid) return false;
     if (!isGeneral) {
       if (!items.every((it) => (toNum(it.invoice_qty) || 0) > 0)) return false;
     }
     if (invoiceDate && invoiceDate > todayISO()) return false;
     if (goodsReceivedDate && goodsReceivedDate > todayISO()) return false;
     return true;
-  }, [items, allMakesFilled, allReceivedFilled, invoiceDate, goodsReceivedDate, isGeneral]);
+  }, [items, allMakesFilled, allReceivedValid, invoiceDate, goodsReceivedDate, isGeneral]);
 
   const buildPayload = () => ({
     stock_in_type: stockInType,
@@ -846,7 +850,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const saveFinal = async () => {
     if (!validateBaseRows()) return;
     if (!validateDates()) return;
-    if (!allReceivedFilled) { toast.error("Every row must have a Received Qty greater than 0"); return; }
+    // Received Qty may be 0 (treated as "nothing received yet"). No explicit > 0 check.
     setSavingFinal(true);
     try {
       const payload = buildPayload();
@@ -910,7 +914,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
             className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
             data-testid="rn-save-final-button"
-            title={!canFinalize && !isFinalEdit ? "Fill all rows with Part No, Make and Received Qty (>0) to enable Final Save" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
+            title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
           >
             <CheckCircle size={14} weight="bold" className="mr-2" />
             {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}

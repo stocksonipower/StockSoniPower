@@ -375,6 +375,9 @@ class ReceiptNote(BaseModel):
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
+    # Derived on read: True iff at least one Racking Note (DRAFT or RECORDED) references this RN.
+    # Frontend uses this to lock edit/delete, overriding the status-based heuristic.
+    has_racking_note: Optional[bool] = False
 
 # ===================== SHORT RECEIVED NOTES (Phase 1: auto-created stubs) =====================
 
@@ -2313,6 +2316,12 @@ async def list_receipt_notes(
     skip = (page - 1) * page_size
     rows = await db.receipt_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
+    # Annotate `has_racking_note`: any RKN (DRAFT or RECORDED) referencing the RN blocks edit/delete.
+    if rows:
+        ids_with_rkn = await db.racking_notes.distinct("receipt_note_id", {"receipt_note_id": {"$in": [r["id"] for r in rows]}})
+        id_set = set(ids_with_rkn or [])
+        for r in rows:
+            r["has_racking_note"] = r["id"] in id_set
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -2326,15 +2335,18 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Receipt note not found")
     await _enrich_note_items([doc])
+    doc["has_racking_note"] = bool(await db.racking_notes.find_one({"receipt_note_id": rn_id}, {"_id": 1}))
     return doc
 
 
 @api_router.put("/receipt-notes/{rn_id}", response_model=ReceiptNote)
 async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(get_current_user)):
     """Edit a Receipt Note.
-       - DRAFT: editable by any user with stock_in access (assignee rules respected).
-       - FINAL (or beyond): editable only if no Racking Notes, no SRN, no ERN have been created.
-                            Re-finalization on save will re-trigger SRN/ERN auto-create."""
+       - Editable regardless of status AS LONG AS no Racking Note exists against it.
+       - Once ANY Racking Note (DRAFT or RECORDED) exists, edits are locked.
+       - Assignee enforcement still applies on non-DRAFT RNs so non-owners cannot
+         hijack someone else's finalized note.
+       - Re-finalization logic (SRN/ERN auto-create) remains unchanged on next finalize."""
     existing = await db.receipt_notes.find_one({"id": rn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
@@ -2345,14 +2357,9 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     if not is_draft:
         _enforce_assignee(existing, user, "edit this receipt note")
 
-    # If the RN has already produced child documents, lock further edits.
-    if not is_draft:
-        if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
-            raise HTTPException(status_code=409, detail="Cannot edit — racking notes exist for this receipt note. Delete those first.")
-        if await db.short_received_notes.find_one({"parent_rn_id": rn_id}):
-            raise HTTPException(status_code=409, detail="Cannot edit — a Short Received Note exists for this receipt note. Delete it first.")
-        if await db.extra_received_notes.find_one({"parent_rn_id": rn_id}):
-            raise HTTPException(status_code=409, detail="Cannot edit — an Extra Received Note exists for this receipt note. Delete it first.")
+    # Single gate: ANY racking note against this RN locks further edits.
+    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
+        raise HTTPException(status_code=409, detail="Cannot edit — racking notes exist for this receipt note. Delete those first.")
 
     if not payload.items or len(payload.items) == 0:
         raise HTTPException(status_code=400, detail="At least one item is required")
@@ -2410,8 +2417,10 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
 async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
     """Promote a DRAFT receipt note to FINAL.
 
-    Requires: every row has received_qty filled (>0), invoice_date and
-    goods_received_date are present and not in the future.
+    Requires: received_qty is a non-negative number for every row (0 is allowed
+    and means "nothing received against this row yet"). invoice_date and
+    goods_received_date are optional; only a future-date check is applied
+    when they are provided.
 
     Side effects: if any row has received_qty < invoice_qty, a Short Received Note
     is auto-created in DRAFT for the shortfall. If any row has received_qty >
@@ -2431,8 +2440,18 @@ async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
     stock_in_type = (rn.get("stock_in_type") or "INVOICE").upper()
 
     items = rn.get("items", [])
-    if not _rn_items_have_all_received(items):
-        raise HTTPException(status_code=400, detail="Every row must have a Received Qty greater than 0 before Final Save")
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    # Received Qty may be 0 (or null -> treated as 0). Only negative values are rejected.
+    for idx, it in enumerate(items, start=1):
+        rq = it.get("received_qty")
+        if rq is None or rq == "":
+            continue
+        try:
+            if float(rq) < 0:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Received Qty cannot be negative")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Received Qty must be a number")
 
     # Update status + sync legacy `quantity` field with received_qty for racking compat
     items_out = []
