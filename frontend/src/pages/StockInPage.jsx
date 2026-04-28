@@ -22,7 +22,7 @@ import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import PartNoLink from "../components/PartNoLink";
 import { useAuth } from "../lib/auth";
-import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
 import { exportToExcel } from "../lib/exportExcel";
 
 /* ==============================================================
@@ -234,19 +234,95 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const columns = useMemo(() => [
-    { key: "rn_date", label: "Receipt Note Date", value: (r) => fmtDate(r.rn_date) },
-    { key: "rn_no", label: "Receipt Note No", value: (r) => r.rn_no || "" },
-    { key: "stock_in_type", label: "Stock In Type", value: (r) => stockInTypeLabel(r.stock_in_type) },
-    { key: "invoice_date", label: "Invoice Date", value: (r) => fmtDate(r.invoice_date) },
-    { key: "invoice_no", label: "Invoice No", value: (r) => r.invoice_no || "" },
-    { key: "goods_received_date", label: "Goods Received Date", value: (r) => fmtDate(r.goods_received_date) },
-    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
-    { key: "total_qty", label: "Total Quantity", value: totalQtyOf },
-    { key: "status", label: "Status", value: (r) => statusMeta(r.status).label },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.rn_date) },
+    { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.rn_no || "" },
+    { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.stock_in_type) },
+    { key: "invoice_date", label: "INVOICE DATE", value: (r) => fmtDate(r.invoice_date) },
+    { key: "invoice_no", label: "INVOICE NO", value: (r) => r.invoice_no || "" },
+    { key: "goods_received_date", label: "GOODS RCVD DATE", value: (r) => fmtDate(r.goods_received_date) },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "total_qty", label: "TOTAL QUANTITY", value: totalQtyOf, isQty: true, isNumeric: true },
+    { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
   ], []);
 
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  // colFilters: { [colKey]: Set<string of allowed values> } | sort: { key, dir } | null
+  const [colFilters, setColFilters] = useState({});
+  const [sort, setSort] = useState(null);
+
+  // Unique values per column (computed from currently loaded rows)
+  const uniqueValues = useMemo(() => {
+    const map = {};
+    columns.forEach((c) => {
+      const seen = new Set();
+      rows.forEach((r) => {
+        const raw = c.value(r);
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        seen.add(v);
+      });
+      map[c.key] = [...seen].sort((a, b) => {
+        if (a === BLANK) return 1;
+        if (b === BLANK) return -1;
+        const na = Number(a), nb = Number(b);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b);
+      });
+    });
+    return map;
+  }, [rows, columns]);
+
+  const filteredRows = useMemo(() => {
+    const activeKeys = Object.keys(colFilters);
+    let out = rows;
+    if (activeKeys.length > 0) {
+      out = rows.filter((row) => activeKeys.every((k) => {
+        const allowed = colFilters[k];
+        if (!allowed || allowed.size === 0) return true;
+        const col = columns.find((c) => c.key === k);
+        if (!col) return true;
+        const raw = col.value(row);
+        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
+        return allowed.has(v);
+      }));
+    }
+    if (sort && sort.key) {
+      const col = columns.find((c) => c.key === sort.key);
+      if (col) {
+        const dir = sort.dir === "desc" ? -1 : 1;
+        out = [...out].sort((a, b) => {
+          const av = col.value(a);
+          const bv = col.value(b);
+          if (col.isNumeric) {
+            const an = parseFloat(av);
+            const bn = parseFloat(bv);
+            const aNa = isNaN(an), bNa = isNaN(bn);
+            if (aNa && bNa) return 0;
+            if (aNa) return 1;
+            if (bNa) return -1;
+            return (an - bn) * dir;
+          }
+          const as = av === null || av === undefined ? "" : String(av);
+          const bs = bv === null || bv === undefined ? "" : String(bv);
+          return as.localeCompare(bs, undefined, { numeric: true, sensitivity: "base" }) * dir;
+        });
+      }
+    }
+    return out;
+  }, [rows, columns, colFilters, sort]);
+
+  const setColFilter = (key, allowedSet) => {
+    setColFilters((f) => {
+      const next = { ...f };
+      if (!allowedSet || allowedSet.size === 0) delete next[key];
+      else next[key] = allowedSet;
+      return next;
+    });
+  };
+
+  const setColumnSort = (key, dir) => {
+    if (!dir) setSort((s) => (s && s.key === key ? null : s));
+    else setSort({ key, dir });
+  };
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -289,16 +365,20 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
           <thead className="sticky top-0 z-10 bg-slate-50">
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rn-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("rn_no")} label="RECEIPT NOTE NO" testid="rn-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("stock_in_type")} label="STOCK IN TYPE" testid="rn-col-stock-in-type" />
-              <ColumnHeader {...getColumnHeaderProps("invoice_date")} label="INVOICE DATE" testid="rn-col-inv-date" />
-              <ColumnHeader {...getColumnHeaderProps("invoice_no")} label="INVOICE NO" testid="rn-col-inv-no" />
-              <ColumnHeader {...getColumnHeaderProps("goods_received_date")} label="GOODS RCVD DATE" testid="rn-col-grd" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="rn-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("total_qty")} align="right" label="TOTAL QUANTITY" testid="rn-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="rn-col-status" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rn-col-assigned" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
