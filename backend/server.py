@@ -3993,6 +3993,9 @@ async def update_short_received_note(srn_id: str, payload: ShortReceivedNoteUpda
     update["status"] = new_status
     await db.short_received_notes.update_one({"id": srn_id}, {"$set": update})
     await _recompute_srn_racking_status(srn_id)
+    # Bubble up to the ultimate RN: its FULLY_RACKED check considers SRN fulfilled qty.
+    if existing.get("parent_rn_id"):
+        await _recompute_rn_status(existing["parent_rn_id"])
     doc = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
     return doc
 
@@ -4042,6 +4045,9 @@ async def finalize_short_received_note(srn_id: str, user=Depends(_module_dep("st
         update["fulfillment_date"] = datetime.now(timezone.utc).date().isoformat()
     await db.short_received_notes.update_one({"id": srn_id}, {"$set": update})
     await _recompute_srn_racking_status(srn_id)
+    # Bubble up to the ultimate RN: its FULLY_RACKED check considers SRN fulfilled qty.
+    if srn.get("parent_rn_id"):
+        await _recompute_rn_status(srn["parent_rn_id"])
 
     # Create child SRN for the residual.
     child_srn_no = None
@@ -4185,6 +4191,8 @@ async def update_extra_received_note(ern_id: str, payload: ExtraReceivedNoteUpda
     }
     await db.extra_received_notes.update_one({"id": ern_id}, {"$set": update})
     await _recompute_ern_racking_status(ern_id)
+    if existing.get("parent_rn_id"):
+        await _recompute_rn_status(existing["parent_rn_id"])
     doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
     return doc
 
@@ -4235,6 +4243,8 @@ async def finalize_extra_received_note(ern_id: str, user=Depends(_module_dep("st
         "finalized_at": now,
     }})
     await _recompute_ern_racking_status(ern_id)
+    if ern.get("parent_rn_id"):
+        await _recompute_rn_status(ern["parent_rn_id"])
 
     child_ern_no = None
     if residual_rows:
