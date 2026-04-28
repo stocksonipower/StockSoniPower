@@ -15,7 +15,8 @@ import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, Stack,
-  DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning,
+  DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning, Eye,
+  Receipt, Package as PackageIcon,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
@@ -70,6 +71,20 @@ function statusMeta(status) {
       return { label: "Partially Racked", cls: "bg-blue-50 text-blue-800" };
     case "FULLY_RACKED":
       return { label: "Fully Racked", cls: "bg-green-100 text-green-800" };
+    // SRN Phase 2 statuses
+    case "PENDING":
+      return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
+    case "PARTIALLY_RECEIVED":
+      return { label: "Partially Received", cls: "bg-blue-50 text-blue-800" };
+    case "FULLY_RECEIVED":
+      return { label: "Fully Received", cls: "bg-green-100 text-green-800" };
+    // ERN Phase 2 statuses
+    case "PARTIALLY_ACCEPTED":
+      return { label: "Partially Accepted", cls: "bg-blue-50 text-blue-800" };
+    case "PARTIALLY_REJECTED":
+      return { label: "Partially Rejected", cls: "bg-purple-50 text-purple-800" };
+    case "COMPLETE":
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
     default:
       return { label: status || "—", cls: "bg-slate-100 text-slate-700" };
   }
@@ -107,10 +122,10 @@ export default function StockInPage() {
           <RackingNoteTab />
         </TabsContent>
         <TabsContent value="short-received-note">
-          <ChildNoteListTab kind="srn" />
+          <ShortReceivedNoteTab />
         </TabsContent>
         <TabsContent value="extra-received-note">
-          <ChildNoteListTab kind="ern" />
+          <ExtraReceivedNoteTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -518,6 +533,7 @@ const emptyItem = () => ({
   make: "",
   invoice_qty: "",
   received_qty: "",
+  description_1: "",
   makes: [],
   partLooked: false,
 });
@@ -529,26 +545,29 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
 
   const [rnNo, setRnNo] = useState("");
   const [rnDate, setRnDate] = useState("");
+  const [stockInType, setStockInType] = useState("INVOICE"); // "INVOICE" | "GENERAL"
   const [invoiceNo, setInvoiceNo] = useState("");
   const [invoiceDate, setInvoiceDate] = useState("");
   const [goodsReceivedDate, setGoodsReceivedDate] = useState("");
   const [items, setItems] = useState([emptyItem()]);
-  const [addCount, setAddCount] = useState(""); // bulk-add quantity
+  const [addCount, setAddCount] = useState("");
   const [savingDraft, setSavingDraft] = useState(false);
   const [savingFinal, setSavingFinal] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
 
-  // Inline "Create New Master" dialog
-  const [masterDialog, setMasterDialog] = useState(null); // { rowIdx, part_no }
+  const [masterDialog, setMasterDialog] = useState(null);
   const fileInputRef = useRef(null);
   const draftBtnRef = useRef(null);
   const finalBtnRef = useRef(null);
 
-  // On mount: either populate from `editing` (edit mode) or fetch next preview (create mode)
+  const isGeneral = stockInType === "GENERAL";
+
+  // On mount: populate from editing or fetch next preview
   useEffect(() => {
     if (isEdit) {
       setRnNo(editing.rn_no || "");
       setRnDate(editing.rn_date || "");
+      setStockInType((editing.stock_in_type || "INVOICE").toUpperCase());
       setInvoiceNo(editing.invoice_no || "");
       setInvoiceDate(editing.invoice_date || "");
       setGoodsReceivedDate(editing.goods_received_date || "");
@@ -556,14 +575,14 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "",
         make: it.make || "",
-        // Backwards-compat: pre-Phase-1 rows had only `quantity`. Treat that as both invoice and received.
         invoice_qty: (it.invoice_qty ?? it.quantity ?? ""),
         received_qty: (it.received_qty ?? (isFinalEdit ? (it.quantity ?? "") : "")),
+        description_1: it.description_1 || "",
         makes: it.make ? [it.make] : [],
         partLooked: !!it.part_no,
       }));
       setItems(initial.length ? initial : [emptyItem()]);
-      // Refresh real makes list from stock_master so the dropdown shows all options
+      // Refresh make lists
       initial.forEach((row, idx) => {
         if (!row.part_no) return;
         api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
@@ -571,7 +590,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             const list = data.makes || [];
             const merged = row.make && !list.includes(row.make) ? [...list, row.make] : list;
             setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: merged } : r));
-          }).catch(() => { /* ignore */ });
+          }).catch(() => {});
       });
     } else {
       api.get("/receipt-notes/next-no").then((r) => {
@@ -582,6 +601,16 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, isEdit]);
 
+  // When switching to GENERAL, clear invoice fields and any saved invoice qty values
+  useEffect(() => {
+    if (isGeneral) {
+      setInvoiceNo("");
+      setInvoiceDate("");
+    }
+    // Don't auto-clear on switch to INVOICE — user may want to re-enter
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stockInType]);
+
   const addItem = () => {
     const n = Math.max(1, Math.min(500, parseInt(addCount, 10) || 1));
     setItems((p) => [...p, ...Array.from({ length: n }, emptyItem)]);
@@ -590,20 +619,39 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
-  // Lookup makes from stock_master when Part No is entered
+  // Lookup makes when Part No is entered
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
     if (!v) {
-      updateItem(i, { makes: [], make: "", partLooked: false });
+      updateItem(i, { makes: [], make: "", partLooked: false, description_1: "" });
       return;
     }
     try {
       const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no: v } });
       const list = data.makes || [];
-      updateItem(i, { makes: list, partLooked: true, make: list.length === 1 ? list[0] : "" });
+      // If exactly one make is auto-selected, also fetch description_1 for that pair
+      const autoMake = list.length === 1 ? list[0] : "";
+      updateItem(i, { makes: list, partLooked: true, make: autoMake });
+      if (autoMake) {
+        try {
+          const { data: m } = await api.get("/stock-master/lookup/item", { params: { part_no: v, make: autoMake } });
+          updateItem(i, { description_1: m.description_1 || "" });
+        } catch { /* ignore */ }
+      } else {
+        updateItem(i, { description_1: "" });
+      }
     } catch {
-      updateItem(i, { makes: [], partLooked: true, make: "" });
+      updateItem(i, { makes: [], partLooked: true, make: "", description_1: "" });
     }
+  };
+
+  // Fetch description_1 when make is picked
+  const fetchDescription = async (i, partNo, make) => {
+    if (!partNo || !make) return;
+    try {
+      const { data } = await api.get("/stock-master/lookup/item", { params: { part_no: partNo, make } });
+      updateItem(i, { description_1: data.description_1 || "" });
+    } catch { /* ignore */ }
   };
 
   const handleMakeChange = (i, value) => {
@@ -616,6 +664,8 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       setMasterDialog({ rowIdx: i, part_no: row.part_no.trim() });
     } else {
       updateItem(i, { make: value });
+      const row = items[i];
+      fetchDescription(i, row.part_no.trim(), value);
     }
   };
 
@@ -623,13 +673,13 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     if (masterDialog == null) return;
     const i = masterDialog.rowIdx;
     setItems((prev) => prev.map((r, idx) => idx === i
-      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true }
+      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "" }
       : r));
     setMasterDialog(null);
     toast.success(`Master created: ${newItem.part_no} / ${newItem.make}`);
   };
 
-  /* ---- Excel import: client-side via xlsx ---- */
+  /* ---- Excel import ---- */
   const handleExcelImport = async (file) => {
     if (!file) return;
     try {
@@ -638,7 +688,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
       if (!rows.length) { toast.error("Excel file has no rows"); return; }
-      // Tolerate a variety of column header spellings.
       const norm = (s) => String(s || "").toLowerCase().replace(/[\s_-]+/g, "");
       const pickCol = (row, names) => {
         const map = {};
@@ -655,28 +704,31 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
         const invQ = pickCol(row, ["invoice qty", "invoice_qty", "inv qty", "invqty", "invoice quantity"]);
         const make = String(pickCol(row, ["make"]) || "").trim();
         const recQ = pickCol(row, ["received qty", "received_qty", "rec qty", "recqty", "received quantity"]);
-        if (!part_no && (invQ === "" || invQ == null)) continue;
+        if (!part_no && (invQ === "" || invQ == null) && (recQ === "" || recQ == null)) continue;
         if (!part_no) { toast.error("Skipped row — Part No missing"); continue; }
-        const inv = parseFloat(invQ);
-        if (isNaN(inv) || inv <= 0) { toast.error(`Row for ${part_no} skipped — Invoice Qty must be > 0`); continue; }
+        // In GENERAL mode, invoice_qty is ignored (will be forced to received_qty server-side).
+        let inv = parseFloat(invQ);
+        if (isGeneral) {
+          inv = ""; // not used
+        } else {
+          if (isNaN(inv) || inv <= 0) { toast.error(`Row for ${part_no} skipped — Invoice Qty must be > 0`); continue; }
+        }
         const rec = recQ === "" || recQ == null ? "" : (isNaN(parseFloat(recQ)) ? "" : parseFloat(recQ));
         newRows.push({
           part_no, make,
           invoice_qty: inv,
           received_qty: rec,
+          description_1: "",
           makes: make ? [make] : [],
-          partLooked: false, // will trigger lookup below
+          partLooked: false,
         });
       }
       if (!newRows.length) { toast.error("No valid rows found in file"); return; }
-      // Replace the empty first row if user hasn't typed anything yet, else append
       setItems((prev) => {
-        const onlyEmpty = prev.length === 1 && !prev[0].part_no && !prev[0].invoice_qty;
+        const onlyEmpty = prev.length === 1 && !prev[0].part_no && !prev[0].invoice_qty && !prev[0].received_qty;
         return onlyEmpty ? newRows : [...prev, ...newRows];
       });
-      // Run lookup for each part_no to populate make dropdowns
-      newRows.forEach((row, offset) => {
-        // Resolve at the right index lazily in the next tick to avoid stale-state issues
+      newRows.forEach((row) => {
         setTimeout(() => {
           api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
             .then(({ data }) => {
@@ -684,8 +736,23 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               setItems((prev) => prev.map((r) => {
                 if (r.part_no !== row.part_no) return r;
                 const merged = r.make && !list.includes(r.make) ? [...list, r.make] : list;
-                return { ...r, makes: merged, partLooked: true, make: r.make || (list.length === 1 ? list[0] : "") };
+                const auto = r.make || (list.length === 1 ? list[0] : "");
+                return { ...r, makes: merged, partLooked: true, make: auto };
               }));
+              // Fetch description for any auto-resolved make
+              setTimeout(() => {
+                setItems((cur) => {
+                  cur.forEach((r, idx) => {
+                    if (r.part_no === row.part_no && r.make && !r.description_1) {
+                      api.get("/stock-master/lookup/item", { params: { part_no: r.part_no, make: r.make } })
+                        .then(({ data: m }) => {
+                          setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "" } : rr));
+                        }).catch(() => {});
+                    }
+                  });
+                  return cur;
+                });
+              }, 0);
             }).catch(() => {});
         }, 0);
       });
@@ -697,22 +764,24 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     }
   };
 
-  /* ---- Validation: shared by save handlers ---- */
+  /* ---- Validation ---- */
   const validateBaseRows = () => {
     if (items.length === 0) { toast.error("Add at least one item"); return false; }
     for (let idx = 0; idx < items.length; idx++) {
       const it = items[idx];
       if (!it.part_no.trim()) { toast.error(`Row ${idx + 1}: Part No is required`); return false; }
       if (!it.make.trim()) { toast.error(`Row ${idx + 1}: Make is required`); return false; }
-      const inv = toNum(it.invoice_qty);
-      if (inv == null || inv <= 0) { toast.error(`Row ${idx + 1}: Invoice Qty must be > 0`); return false; }
+      if (!isGeneral) {
+        const inv = toNum(it.invoice_qty);
+        if (inv == null || inv <= 0) { toast.error(`Row ${idx + 1}: Invoice Qty must be > 0`); return false; }
+      }
       const rec = toNum(it.received_qty);
       if (rec != null && rec < 0) { toast.error(`Row ${idx + 1}: Received Qty cannot be negative`); return false; }
     }
     return true;
   };
 
-  const validateDates = (_requireGRD) => {
+  const validateDates = () => {
     if (invoiceDate && invoiceDate > todayISO()) { toast.error("Invoice Date cannot be in the future"); return false; }
     if (goodsReceivedDate && goodsReceivedDate > todayISO()) { toast.error("Goods Received Date cannot be in the future"); return false; }
     return true;
@@ -726,33 +795,41 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     [items]
   );
 
-  const canFinalize = useMemo(() => (
-    items.length > 0
-    && items.every((it) => it.part_no.trim() && it.make.trim() && (toNum(it.invoice_qty) || 0) > 0)
-    && allReceivedFilled
-    && !!invoiceDate
-    && !!goodsReceivedDate
-    && (!invoiceDate || invoiceDate <= todayISO())
-    && (!goodsReceivedDate || goodsReceivedDate <= todayISO())
-  ), [items, allReceivedFilled, invoiceDate, goodsReceivedDate]);
+  const allMakesFilled = useMemo(
+    () => items.length > 0 && items.every((it) => it.part_no.trim() && it.make.trim()),
+    [items]
+  );
+
+  // Final Save is enabled when: every row has part_no/make/received_qty>0 (and invoice_qty>0 if INVOICE mode)
+  // No date is mandatory anymore (invoice_no/invoice_date/goods_received_date all optional).
+  const canFinalize = useMemo(() => {
+    if (!allMakesFilled || !allReceivedFilled) return false;
+    if (!isGeneral) {
+      if (!items.every((it) => (toNum(it.invoice_qty) || 0) > 0)) return false;
+    }
+    if (invoiceDate && invoiceDate > todayISO()) return false;
+    if (goodsReceivedDate && goodsReceivedDate > todayISO()) return false;
+    return true;
+  }, [items, allMakesFilled, allReceivedFilled, invoiceDate, goodsReceivedDate, isGeneral]);
 
   const buildPayload = () => ({
-    invoice_no: invoiceNo.trim(),
-    invoice_date: invoiceDate || "",
+    stock_in_type: stockInType,
+    invoice_no: isGeneral ? "" : invoiceNo.trim(),
+    invoice_date: isGeneral ? "" : (invoiceDate || ""),
     goods_received_date: goodsReceivedDate || "",
     assigned_to_user_id: assignedToUserId || null,
     items: items.map((it) => ({
       part_no: it.part_no.trim(),
       make: it.make.trim(),
-      invoice_qty: toNum(it.invoice_qty),
+      // In GENERAL mode the server forces invoice_qty = received_qty. Send 0 here; the server overrides.
+      invoice_qty: isGeneral ? (toNum(it.received_qty) || 0) : toNum(it.invoice_qty),
       received_qty: toNum(it.received_qty),
     })),
   });
 
-  /* ---- Save Draft ---- */
   const saveDraft = async () => {
     if (!validateBaseRows()) return;
-    if (!validateDates(false)) return;
+    if (!validateDates()) return;
     setSavingDraft(true);
     try {
       const payload = buildPayload();
@@ -766,18 +843,14 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     } finally { setSavingDraft(false); }
   };
 
-  /* ---- Save Final: PUT (or POST), then POST /finalize ---- */
   const saveFinal = async () => {
     if (!validateBaseRows()) return;
-    if (!validateDates(true)) return;
+    if (!validateDates()) return;
     if (!allReceivedFilled) { toast.error("Every row must have a Received Qty greater than 0"); return; }
     setSavingFinal(true);
     try {
       const payload = buildPayload();
-      // Step 1: persist the row data (DRAFT update or new DRAFT). For FINAL edits with no children,
-      // server allows updates; finalize stays a no-op since status is already FINAL.
-      let rnId;
-      let rnNoDisplay;
+      let rnId, rnNoDisplay;
       if (isEdit) {
         const { data } = await api.put(`/receipt-notes/${editing.id}`, payload);
         rnId = data.id; rnNoDisplay = data.rn_no;
@@ -785,8 +858,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
         const { data } = await api.post("/receipt-notes", payload);
         rnId = data.id; rnNoDisplay = data.rn_no;
       }
-      // Step 2: only call finalize if the doc is currently DRAFT.
-      // (For FINAL edits, the server returns FINAL already and finalize would 409.)
       const fresh = await api.get(`/receipt-notes/${rnId}`);
       if (fresh.data.status === "DRAFT") {
         await api.post(`/receipt-notes/${rnId}/finalize`);
@@ -798,7 +869,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     } finally { setSavingFinal(false); }
   };
 
-  // Last-row keyboard handler: Tab from the last visible field jumps to the appropriate save button.
+  // Last-row Tab → focus first save button. Save Final takes priority if available.
   const handleLastRowKey = (e, isLastRow) => {
     if (!isLastRow) return;
     if (e.key === "Tab" && !e.shiftKey) {
@@ -820,7 +891,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               <Printer size={14} weight="bold" className="mr-2" /> Print
             </Button>
           )}
-          {/* Hide Draft when editing a FINAL+ note (you can't go back to draft) */}
           {!isFinalEdit && (
             <Button
               ref={draftBtnRef}
@@ -840,7 +910,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
             className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
             data-testid="rn-save-final-button"
-            title={!canFinalize && !isFinalEdit ? "Fill all rows including Received Qty, plus both dates, to enable Final Save" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
+            title={!canFinalize && !isFinalEdit ? "Fill all rows with Part No, Make and Received Qty (>0) to enable Final Save" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
           >
             <CheckCircle size={14} weight="bold" className="mr-2" />
             {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}
@@ -849,58 +919,101 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       </div>
 
       {/* HEADER */}
-      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div>
-          <Label className="label-sm">Receipt Note Date</Label>
-          <Input value={fmtDate(rnDate)} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="rn-date-input" />
-          <div className="text-[11px] text-slate-500 mt-1">Auto · today's date</div>
+      <div className="bg-white border border-slate-200 rounded-sm p-6 space-y-4">
+        {/* Stock-in type radio */}
+        <div className="flex items-center gap-6 flex-wrap">
+          <Label className="label-sm">Stock In Type</Label>
+          <label className="flex items-center gap-2 cursor-pointer" data-testid="rn-stock-in-type-invoice">
+            <input
+              type="radio"
+              name="stock-in-type"
+              value="INVOICE"
+              checked={stockInType === "INVOICE"}
+              onChange={() => setStockInType("INVOICE")}
+              disabled={isFinalEdit}
+              className="accent-blue-700"
+            />
+            <span className="text-sm font-semibold text-slate-700">
+              <Receipt size={14} weight="bold" className="inline mr-1" /> Invoice Stock In
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer" data-testid="rn-stock-in-type-general">
+            <input
+              type="radio"
+              name="stock-in-type"
+              value="GENERAL"
+              checked={stockInType === "GENERAL"}
+              onChange={() => setStockInType("GENERAL")}
+              disabled={isFinalEdit}
+              className="accent-blue-700"
+            />
+            <span className="text-sm font-semibold text-slate-700">
+              <PackageIcon size={14} weight="bold" className="inline mr-1" /> General Stock In
+            </span>
+          </label>
+          {isGeneral && (
+            <span className="text-xs text-slate-500 italic">
+              Invoice fields blocked · Invoice Qty auto-equals Received Qty · No SRN/ERN auto-creation
+            </span>
+          )}
         </div>
-        <div>
-          <Label className="label-sm">Receipt Note No</Label>
-          <Input value={rnNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rn-no-input" />
-          <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
-        </div>
-        <div>
-          <Label className="label-sm">Invoice Date</Label>
-          <Input
-            type="date"
-            value={invoiceDate}
-            max={todayISO()}
-            onChange={(e) => setInvoiceDate(e.target.value)}
-            className="mt-2 rounded-sm font-mono"
-            data-testid="rn-invoice-date-input"
-          />
-          <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
-        </div>
-        <div>
-          <Label className="label-sm">Invoice No</Label>
-          <Input
-            value={invoiceNo}
-            onChange={(e) => setInvoiceNo(e.target.value)}
-            placeholder="e.g. INV-1024 (optional)"
-            className="mt-2 rounded-sm font-mono"
-            data-testid="rn-invoice-no-input"
-          />
-        </div>
-        <div>
-          <Label className="label-sm">Goods Received Date</Label>
-          <Input
-            type="date"
-            value={goodsReceivedDate}
-            max={todayISO()}
-            onChange={(e) => setGoodsReceivedDate(e.target.value)}
-            className="mt-2 rounded-sm font-mono"
-            data-testid="rn-grd-input"
-          />
-          <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
-        </div>
-        <div className="col-span-2 lg:col-span-3">
-          <AssigneeSelect
-            value={assignedToUserId}
-            onChange={setAssignedToUserId}
-            module="stock_in"
-            testid="rn-assignee"
-          />
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div>
+            <Label className="label-sm">Receipt Note Date</Label>
+            <Input value={fmtDate(rnDate)} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="rn-date-input" />
+            <div className="text-[11px] text-slate-500 mt-1">Auto · today's date</div>
+          </div>
+          <div>
+            <Label className="label-sm">Receipt Note No</Label>
+            <Input value={rnNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rn-no-input" />
+            <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
+          </div>
+          <div>
+            <Label className="label-sm">Material Received Date</Label>
+            <Input
+              type="date"
+              value={goodsReceivedDate}
+              max={todayISO()}
+              onChange={(e) => setGoodsReceivedDate(e.target.value)}
+              className="mt-2 rounded-sm font-mono"
+              data-testid="rn-grd-input"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
+          </div>
+          <div>
+            <Label className="label-sm">Invoice Date</Label>
+            <Input
+              type="date"
+              value={invoiceDate}
+              max={todayISO()}
+              disabled={isGeneral}
+              onChange={(e) => setInvoiceDate(e.target.value)}
+              className={`mt-2 rounded-sm font-mono ${isGeneral ? "bg-slate-100 text-slate-400" : ""}`}
+              data-testid="rn-invoice-date-input"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">{isGeneral ? "Blocked · General mode" : "Optional · no future date"}</div>
+          </div>
+          <div>
+            <Label className="label-sm">Invoice No</Label>
+            <Input
+              value={invoiceNo}
+              disabled={isGeneral}
+              onChange={(e) => setInvoiceNo(e.target.value)}
+              placeholder={isGeneral ? "—" : "e.g. INV-1024"}
+              className={`mt-2 rounded-sm font-mono ${isGeneral ? "bg-slate-100 text-slate-400" : ""}`}
+              data-testid="rn-invoice-no-input"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">{isGeneral ? "Blocked · General mode" : "Optional"}</div>
+          </div>
+          <div className="col-span-2 lg:col-span-3">
+            <AssigneeSelect
+              value={assignedToUserId}
+              onChange={setAssignedToUserId}
+              module="stock_in"
+              testid="rn-assignee"
+            />
+          </div>
         </div>
       </div>
 
@@ -925,7 +1038,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               variant="outline"
               className="rounded-sm"
               data-testid="rn-excel-import-button"
-              title="Columns: Part No, Invoice Qty, Make (optional), Received Qty (optional)"
+              title={isGeneral ? "Columns: Part No, Make, Received Qty" : "Columns: Part No, Invoice Qty, Make, Received Qty"}
             >
               <UploadSimple size={14} weight="bold" className="mr-1" /> Import Excel
             </Button>
@@ -947,97 +1060,115 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
           </div>
         </div>
 
-        <table className="data-table w-full">
-          <thead>
-            <tr>
-              <th className="w-14">SL NO</th>
-              <th>PART NO</th>
-              <th className="w-32 text-right">INVOICE QTY</th>
-              <th className="w-32 text-right">RECEIVED QTY</th>
-              <th className="w-24 text-right">QTY DIFF</th>
-              <th>MAKE</th>
-              <th className="w-14"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((it, idx) => {
-              const diff = qtyDiff(it);
-              const recFilled = toNum(it.received_qty) != null;
-              const diffNonZero = recFilled && diff !== 0;
-              const recCls = `rounded-sm font-mono h-8 text-right ${diffNonZero ? "border-red-500 ring-1 ring-red-200" : ""}`;
-              const diffCls = !recFilled
-                ? "text-slate-400"
-                : (diff < 0 ? "text-red-700 font-bold" : (diff > 0 ? "text-amber-700 font-bold" : "text-slate-500"));
-              const isLastRow = idx === items.length - 1;
-              return (
-                <tr key={idx} data-testid={`rn-item-row-${idx}`}>
-                  <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td>
-                    <Input
-                      value={it.part_no}
-                      onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "" })}
-                      onBlur={(e) => lookupMakes(idx, e.target.value)}
-                      placeholder="Enter part no"
-                      className="rounded-sm font-mono h-8"
-                      data-testid={`rn-part-no-${idx}`}
-                    />
-                  </td>
-                  <td className="w-32">
-                    <Input
-                      type="number"
-                      min="0.001"
-                      step="any"
-                      value={it.invoice_qty}
-                      onChange={(e) => updateItem(idx, { invoice_qty: e.target.value })}
-                      placeholder="0"
-                      className="rounded-sm font-mono h-8 text-right"
-                      data-testid={`rn-invoice-qty-${idx}`}
-                    />
-                  </td>
-                  <td className="w-32">
-                    <Input
-                      type="number"
-                      min="0"
-                      step="any"
-                      value={it.received_qty}
-                      onChange={(e) => updateItem(idx, { received_qty: e.target.value })}
-                      placeholder="optional for draft"
-                      className={recCls}
-                      data-testid={`rn-received-qty-${idx}`}
-                      title={diffNonZero ? (diff < 0 ? `Short by ${Math.abs(diff)} — SRN will be auto-created on Final Save` : `Extra of ${diff} — ERN will be auto-created on Final Save`) : undefined}
-                    />
-                  </td>
-                  <td className={`w-24 text-right font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
-                    {!recFilled ? "—" : (diff > 0 ? `+${diff}` : diff)}
-                  </td>
-                  <td className="w-64">
-                    <MakeDropdown
-                      value={it.make}
-                      makes={it.makes}
-                      partLooked={it.partLooked}
-                      onChange={(v) => handleMakeChange(idx, v)}
-                      onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
-                      testid={`rn-make-${idx}`}
-                    />
-                  </td>
-                  <td>
-                    <button
-                      onClick={() => removeItem(idx)}
-                      disabled={items.length === 1}
-                      className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                      data-testid={`rn-remove-row-${idx}`}
-                    >
-                      <Trash size={14} />
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="overflow-x-auto">
+          <table className="data-table w-full">
+            <thead>
+              <tr>
+                <th className="w-14">SL NO</th>
+                <th className="w-44">PART NO</th>
+                <th>DESCRIPTION 1</th>
+                <th className="w-28 text-right">{isGeneral ? "INV QTY" : "INVOICE QTY"}</th>
+                <th className="w-28 text-right">RECEIVED QTY</th>
+                <th className="w-24 text-right">QTY DIFF</th>
+                <th className="w-56">MAKE</th>
+                <th className="w-14"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, idx) => {
+                // In GENERAL mode, qty diff is always 0 (invoice forced equal to received).
+                const diff = isGeneral ? 0 : qtyDiff(it);
+                const recFilled = toNum(it.received_qty) != null;
+                const diffNonZero = !isGeneral && recFilled && diff !== 0;
+                const recCls = `rounded-sm font-mono h-8 text-right ${diffNonZero ? "border-red-500 ring-1 ring-red-200" : ""}`;
+                const diffCls = !recFilled
+                  ? "text-slate-400"
+                  : (diff < 0 ? "text-red-700 font-bold" : (diff > 0 ? "text-amber-700 font-bold" : "text-slate-500"));
+                const isLastRow = idx === items.length - 1;
 
-        {/* Hint banner: visible whenever any row has a non-zero diff. */}
-        {items.some((it) => qtyDiff(it) !== 0 && toNum(it.received_qty) != null) && (
+                // In GENERAL mode the displayed invoice qty mirrors received_qty (read-only).
+                const displayedInvoice = isGeneral ? (it.received_qty || "") : it.invoice_qty;
+
+                return (
+                  <tr key={idx} data-testid={`rn-item-row-${idx}`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td>
+                      <Input
+                        value={it.part_no}
+                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "" })}
+                        onBlur={(e) => lookupMakes(idx, e.target.value)}
+                        placeholder="Enter part no"
+                        className="rounded-sm font-mono h-8"
+                        data-testid={`rn-part-no-${idx}`}
+                      />
+                    </td>
+                    <td>
+                      <div
+                        className="text-xs text-slate-700 px-2 py-1 bg-slate-50 rounded-sm border border-slate-200 truncate"
+                        title={it.description_1 || "—"}
+                        data-testid={`rn-desc1-${idx}`}
+                      >
+                        {it.description_1 || <span className="text-slate-400 italic">(auto from master)</span>}
+                      </div>
+                    </td>
+                    <td className="w-28">
+                      <Input
+                        type="number"
+                        min="0.001"
+                        step="any"
+                        value={displayedInvoice}
+                        disabled={isGeneral}
+                        onChange={(e) => updateItem(idx, { invoice_qty: e.target.value })}
+                        placeholder="0"
+                        className={`rounded-sm font-mono h-8 text-right ${isGeneral ? "bg-slate-100 text-slate-400" : ""}`}
+                        data-testid={`rn-invoice-qty-${idx}`}
+                        title={isGeneral ? "Auto-mirrors Received Qty in General mode" : undefined}
+                      />
+                    </td>
+                    <td className="w-28">
+                      <Input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={it.received_qty}
+                        onChange={(e) => updateItem(idx, { received_qty: e.target.value })}
+                        placeholder="0"
+                        className={recCls}
+                        data-testid={`rn-received-qty-${idx}`}
+                        title={diffNonZero ? (diff < 0 ? `Short by ${Math.abs(diff)} — SRN will be auto-created on Final Save` : `Extra of ${diff} — ERN will be auto-created on Final Save`) : undefined}
+                      />
+                    </td>
+                    <td className={`w-24 text-right font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
+                      {!recFilled ? "—" : (diff > 0 ? `+${diff}` : diff)}
+                    </td>
+                    <td className="w-56">
+                      <MakeDropdown
+                        value={it.make}
+                        makes={it.makes}
+                        partLooked={it.partLooked}
+                        onChange={(v) => handleMakeChange(idx, v)}
+                        onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
+                        testid={`rn-make-${idx}`}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => removeItem(idx)}
+                        disabled={items.length === 1}
+                        className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                        data-testid={`rn-remove-row-${idx}`}
+                      >
+                        <Trash size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {!isGeneral && items.some((it) => qtyDiff(it) !== 0 && toNum(it.received_qty) != null) && (
           <div className="px-4 py-3 border-t border-slate-200 bg-amber-50 text-amber-900 text-sm flex items-start gap-2" data-testid="rn-diff-banner">
             <Warning size={16} weight="bold" className="mt-0.5 flex-shrink-0" />
             <div>
@@ -1060,6 +1191,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     </div>
   );
 }
+
 
 /* --------------------------------------------------------------
    Make dropdown with the 3 conditional behaviours
@@ -1176,18 +1308,77 @@ function Field({ label, v, on, testid }) {
     </div>
   );
 }
-
 /* ==============================================================
-   PHASE 1 STUB · Short / Extra Received Note tabs
-   List-only views. Phase 2/3 will add the finalize forms.
+   PHASE 2 · Short Received Notes & Extra Received Notes
+   Full list views with detail/edit/finalize/delete dialogs.
    ============================================================== */
-function ChildNoteListTab({ kind }) {
+
+/** SRN list and forms */
+function ShortReceivedNoteTab() {
+  const [view, setView] = useState("list");           // "list" | "edit"
+  const [editing, setEditing] = useState(null);
+  const [openDetail, setOpenDetail] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const goEdit = (srn) => { setEditing(srn); setView("edit"); };
+  const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  return (
+    <>
+      {view === "list" && (
+        <ChildList
+          kind="srn"
+          reloadKey={reloadKey}
+          onOpen={(r) => setOpenDetail(r)}
+          onEdit={goEdit}
+          onChanged={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+      {view === "edit" && (
+        <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} />
+      )}
+      <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} />
+    </>
+  );
+}
+
+function ExtraReceivedNoteTab() {
+  const [view, setView] = useState("list");
+  const [editing, setEditing] = useState(null);
+  const [openDetail, setOpenDetail] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const goEdit = (ern) => { setEditing(ern); setView("edit"); };
+  const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  return (
+    <>
+      {view === "list" && (
+        <ChildList
+          kind="ern"
+          reloadKey={reloadKey}
+          onOpen={(r) => setOpenDetail(r)}
+          onEdit={goEdit}
+          onChanged={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+      {view === "edit" && (
+        <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} />
+      )}
+      <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} />
+    </>
+  );
+}
+
+/** Shared list view for SRN + ERN. */
+function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
   const isSrn = kind === "srn";
   const path = isSrn ? "/short-received-notes" : "/extra-received-notes";
   const idField = isSrn ? "srn_no" : "ern_no";
   const dateField = isSrn ? "srn_date" : "ern_date";
   const labelTitle = isSrn ? "Short Received Notes" : "Extra Received Notes";
   const noun = isSrn ? "SRN" : "ERN";
+
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
@@ -1200,8 +1391,26 @@ function ChildNoteListTab({ kind }) {
       toast.error(formatApiError(err.response?.data?.detail) || `Could not load ${noun}s`);
     } finally { setLoading(false); }
   }, [path, noun]);
+  useEffect(() => { load(); }, [load, reloadKey]);
 
-  useEffect(() => { load(); }, [load]);
+  const handleDelete = async (r) => {
+    if (!window.confirm(`Delete ${r[idField]}? This cannot be undone.`)) return;
+    try {
+      await api.delete(`${path}/${r.id}`);
+      toast.success(`${r[idField]} deleted`);
+      onChanged();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
+    }
+  };
+
+  // Item-aggregation helpers for the list display
+  const sumQty = (r) => {
+    if (isSrn) {
+      return (r.items || []).reduce((acc, it) => acc + (parseFloat(it.short_qty) || 0), 0);
+    }
+    return (r.items || []).reduce((acc, it) => acc + (parseFloat(it.extra_qty) || 0), 0);
+  };
 
   return (
     <div className="mt-4" data-testid={`${kind}-list-view`}>
@@ -1210,9 +1419,8 @@ function ChildNoteListTab({ kind }) {
           <div className="label-sm">{labelTitle}</div>
           <div className="text-xs text-slate-500 mt-0.5">
             {isSrn
-              ? "Auto-created when a Receipt Note is finalized with a shortfall. Finalize each SRN once the missing qty arrives."
-              : "Auto-created when a Receipt Note is finalized with an overage. Finalize each ERN by entering accepted/rejected qty."}
-            {" "}<em>(finalize action coming in next phase — list view only for now)</em>
+              ? "Auto-created from a Receipt Note's shortfall. Enter Fulfilled Qty when material arrives, then Save Final. Partial fulfilment auto-creates a child SRN for the residual."
+              : "Auto-created from a Receipt Note's overage. Enter Accepted Qty (and optionally Rejected Qty) per row, then Save Final. Residual extra creates a child ERN."}
           </div>
         </div>
         <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
@@ -1226,35 +1434,567 @@ function ChildNoteListTab({ kind }) {
               <th className="w-14">SL NO</th>
               <th>{noun} DATE</th>
               <th>{noun} NO</th>
-              <th>PARENT RN</th>
-              <th>INVOICE NO</th>
+              <th>RN DATE</th>
+              <th>RN NO</th>
               <th className="text-right">ITEMS</th>
+              <th className="text-right">{isSrn ? "TOTAL SHORT QTY" : "TOTAL EXTRA QTY"}</th>
+              {isSrn && <th>FULFILMENT DATE</th>}
+              <th>ASSIGNED TO</th>
               <th>STATUS</th>
-              <th>CREATED BY</th>
+              <th className="w-28">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => (
-              <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
-                <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
-                <td className="font-mono font-semibold text-blue-700">{r[idField]}</td>
-                <td className="font-mono text-slate-700">{r.parent_rn_no || "—"}</td>
-                <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
-                <td className="text-right font-mono">{(r.items || []).length}</td>
-                <td>
-                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(r.status).cls}`}>
-                    {statusMeta(r.status).label}
-                  </span>
-                </td>
-                <td className="text-slate-600">{r.created_by || "—"}</td>
-              </tr>
-            ))}
+            {rows.map((r, idx) => {
+              const meta = statusMeta(r.status);
+              const canEdit = isSrn ? r.status !== "FULLY_RECEIVED" : r.status !== "COMPLETE";
+              return (
+                <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`${kind}-open-${r[idField]}`}
+                    >
+                      {r[idField]}
+                    </button>
+                  </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
+                  <td className="font-mono text-slate-700">{r.parent_rn_no || "—"}</td>
+                  <td className="text-right font-mono">{(r.items || []).length}</td>
+                  <td className="text-right font-mono font-semibold">{sumQty(r).toFixed(2)}</td>
+                  {isSrn && <td className="font-mono text-slate-700">{r.fulfillment_date ? fmtDate(r.fulfillment_date) : "—"}</td>}
+                  <td className="text-slate-700">
+                    {r.assigned_to_name ? <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} /> : <span className="text-slate-400">—</span>}
+                  </td>
+                  <td>
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>
+                      {meta.label}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => onEdit(r)}
+                        disabled={!canEdit}
+                        className={`p-1.5 rounded-sm ${canEdit ? "hover:bg-blue-50 text-blue-700" : "text-slate-300 cursor-not-allowed"}`}
+                        title={canEdit ? "Edit / Finalize" : (isSrn ? "Already fully received" : "Already complete")}
+                        data-testid={`${kind}-edit-${r[idField]}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(r)}
+                        className="p-1.5 rounded-sm hover:bg-red-50 text-red-700"
+                        title="Delete"
+                        data-testid={`${kind}-delete-${r[idField]}`}
+                      >
+                        <Trash size={14} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.`}</td></tr>
+              <tr><td colSpan={isSrn ? 11 : 10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.`}</td></tr>
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+/** Read-only detail dialog for SRN/ERN — shows all rows with quantities. */
+function ChildDetailDialog({ kind, doc, onClose }) {
+  if (!doc) return null;
+  const isSrn = kind === "srn";
+  const idField = isSrn ? "srn_no" : "ern_no";
+  const dateField = isSrn ? "srn_date" : "ern_date";
+  const meta = statusMeta(doc.status);
+
+  return (
+    <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-5xl rounded-sm" data-testid={`${kind}-detail-dialog`}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-3">
+            <span className="font-mono">{doc[idField]}</span>
+            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>
+          </DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+          <Detail k={`${isSrn ? "SRN" : "ERN"} Date`} v={fmtDate(doc[dateField])} />
+          <Detail k="Parent RN" v={`${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date) || "—"})`} />
+          <Detail k="Invoice No" v={doc.invoice_no || "—"} />
+          <Detail k="Invoice Date" v={fmtDate(doc.invoice_date)} />
+          {isSrn && <Detail k="Fulfilment Date" v={fmtDate(doc.fulfillment_date)} />}
+          <Detail k="Assigned To" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
+          <Detail k="Created By" v={doc.created_by || "—"} />
+          {doc.parent_srn_no && <Detail k="Parent SRN" v={doc.parent_srn_no} />}
+          {doc.parent_ern_no && <Detail k="Parent ERN" v={doc.parent_ern_no} />}
+        </div>
+        {doc.chain_remarks && (
+          <div className="text-xs text-slate-600 italic mt-2">{doc.chain_remarks}</div>
+        )}
+        <div className="overflow-x-auto mt-4">
+          <table className="data-table w-full text-xs">
+            <thead>
+              <tr>
+                <th className="w-10">#</th>
+                <th>PART NO</th>
+                <th>DESCRIPTION 1</th>
+                <th>MAKE</th>
+                <th className="text-right">INV QTY</th>
+                <th className="text-right">RCVD QTY</th>
+                {isSrn ? (
+                  <>
+                    <th className="text-right">SHORT QTY</th>
+                    <th className="text-right">FULFILLED QTY</th>
+                    <th className="text-right">PENDING QTY</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="text-right">EXTRA QTY</th>
+                    <th className="text-right">ACCEPTED QTY</th>
+                    <th className="text-right">REJECTED QTY</th>
+                    <th className="text-right">UNDECIDED</th>
+                  </>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {(doc.items || []).map((it, idx) => {
+                if (isSrn) {
+                  const shortQ = parseFloat(it.short_qty) || 0;
+                  const ful = it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0);
+                  const pending = ful == null ? shortQ : (shortQ - ful);
+                  return (
+                    <tr key={idx}>
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono">{it.part_no}</td>
+                      <td className="text-slate-700">{it.description_1 || "—"}</td>
+                      <td>{it.make}</td>
+                      <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
+                      <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
+                      <td className="text-right font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
+                      <td className="text-right font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
+                      <td className={`text-right font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                    </tr>
+                  );
+                }
+                const extraQ = parseFloat(it.extra_qty) || 0;
+                const acc = it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0);
+                const rej = it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0);
+                const undecided = extraQ - (acc || 0) - (rej || 0);
+                return (
+                  <tr key={idx}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td className="font-mono">{it.part_no}</td>
+                    <td className="text-slate-700">{it.description_1 || "—"}</td>
+                    <td>{it.make}</td>
+                    <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
+                    <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
+                    <td className="text-right font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
+                    <td className="text-right font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
+                    <td className="text-right font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
+                    <td className={`text-right font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** SRN finalize/edit form — user enters fulfilled_qty per row + fulfillment_date. */
+function SrnFinalizeForm({ srn, onCancel, onSaved }) {
+  const [items, setItems] = useState(() => (srn.items || []).map((it) => ({
+    part_no: it.part_no,
+    make: it.make,
+    description_1: it.description_1 || "",
+    invoice_qty: parseFloat(it.invoice_qty) || 0,
+    received_qty: parseFloat(it.received_qty) || 0,
+    short_qty: parseFloat(it.short_qty) || 0,
+    fulfilled_qty: it.fulfilled_qty == null ? "" : it.fulfilled_qty,
+  })));
+  const [fulfillmentDate, setFulfillmentDate] = useState(srn.fulfillment_date || todayISO());
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savingFinal, setSavingFinal] = useState(false);
+  const finalBtnRef = useRef(null);
+
+  const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+
+  const buildPayload = () => ({
+    fulfillment_date: fulfillmentDate || "",
+    items: items.map((it) => ({
+      part_no: it.part_no,
+      make: it.make,
+      fulfilled_qty: it.fulfilled_qty === "" ? null : (parseFloat(it.fulfilled_qty) || 0),
+    })),
+  });
+
+  const validate = () => {
+    if (fulfillmentDate && fulfillmentDate > todayISO()) {
+      toast.error("Fulfilment Date cannot be in the future"); return false;
+    }
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const f = it.fulfilled_qty === "" ? null : parseFloat(it.fulfilled_qty);
+      if (f != null) {
+        if (isNaN(f) || f < 0) { toast.error(`Row ${i + 1}: Fulfilled Qty must be ≥ 0`); return false; }
+        if (f > it.short_qty + 1e-6) { toast.error(`Row ${i + 1}: Fulfilled Qty (${f}) cannot exceed Short Qty (${it.short_qty})`); return false; }
+      }
+    }
+    return true;
+  };
+
+  const saveDraft = async () => {
+    if (!validate()) return;
+    setSavingDraft(true);
+    try {
+      await api.put(`/short-received-notes/${srn.id}`, buildPayload());
+      toast.success(`${srn.srn_no} saved`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
+    } finally { setSavingDraft(false); }
+  };
+
+  const saveFinal = async () => {
+    if (!validate()) return;
+    // Require every row to have fulfilled_qty filled (>= 0; 0 is allowed → child SRN takes over)
+    for (let i = 0; i < items.length; i++) {
+      const f = items[i].fulfilled_qty;
+      if (f === "" || f == null) {
+        toast.error(`Row ${i + 1}: Fulfilled Qty is required for Final Save (use 0 if nothing arrived for this row)`);
+        return;
+      }
+    }
+    setSavingFinal(true);
+    try {
+      // Save the qty + date first
+      await api.put(`/short-received-notes/${srn.id}`, buildPayload());
+      // Then finalize (auto-creates child SRN if any row's fulfilled < short)
+      const { data } = await api.post(`/short-received-notes/${srn.id}/finalize`);
+      toast.success(`${srn.srn_no} finalized · ${statusMeta(data.status).label}`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize");
+    } finally { setSavingFinal(false); }
+  };
+
+  const handleLastRowKey = (e, isLastRow) => {
+    if (!isLastRow) return;
+    if (e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      finalBtnRef.current?.focus();
+    }
+  };
+
+  return (
+    <div className="mt-4 space-y-6" data-testid="srn-finalize-view">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="srn-back">
+          <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
+        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={saveDraft}
+            disabled={savingDraft || savingFinal}
+            variant="outline"
+            className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+            data-testid="srn-save-draft"
+          >
+            <FloppyDisk size={14} weight="bold" className="mr-2" />
+            {savingDraft ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            ref={finalBtnRef}
+            onClick={saveFinal}
+            disabled={savingDraft || savingFinal}
+            className="rounded-sm bg-blue-700 hover:bg-blue-800"
+            data-testid="srn-save-final"
+            title="Final Save · creates child SRN for any residual shortfall"
+          >
+            <CheckCircle size={14} weight="bold" className="mr-2" />
+            {savingFinal ? "Saving…" : "Save Final"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Detail k="SRN Date" v={fmtDate(srn.srn_date)} />
+        <Detail k="SRN No" v={srn.srn_no} />
+        <Detail k="Parent RN" v={`${srn.parent_rn_no || "—"} (${fmtDate(srn.parent_rn_date) || "—"})`} />
+        <Detail k="Invoice No" v={srn.invoice_no || "—"} />
+        <div>
+          <Label className="label-sm">Fulfilment Date</Label>
+          <Input
+            type="date"
+            value={fulfillmentDate}
+            max={todayISO()}
+            onChange={(e) => setFulfillmentDate(e.target.value)}
+            className="mt-2 rounded-sm font-mono"
+            data-testid="srn-fulfillment-date"
+          />
+          <div className="text-[11px] text-slate-500 mt-1">Date material arrived · no future date</div>
+        </div>
+        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(srn.status).cls}`}>{statusMeta(srn.status).label}</span>} />
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+        <div className="px-4 py-3 border-b border-slate-200 label-sm">SHORT ITEMS — Enter Fulfilled Qty</div>
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th className="w-10">#</th>
+              <th className="w-44">PART NO</th>
+              <th>DESCRIPTION 1</th>
+              <th className="w-28 text-right">INV QTY</th>
+              <th className="w-28 text-right">RCVD QTY</th>
+              <th className="w-28 text-right">SHORT QTY</th>
+              <th className="w-32 text-right">FULFILLED QTY</th>
+              <th className="w-28 text-right">PENDING QTY</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, idx) => {
+              const f = it.fulfilled_qty === "" ? null : parseFloat(it.fulfilled_qty);
+              const pending = f == null ? it.short_qty : (it.short_qty - f);
+              const pendingCls = pending > 0 ? "text-amber-700 font-bold" : (pending < 0 ? "text-red-700 font-bold" : "text-green-700 font-bold");
+              const isLastRow = idx === items.length - 1;
+              return (
+                <tr key={idx} data-testid={`srn-item-${idx}`}>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono">{it.part_no}</td>
+                  <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                  <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
+                  <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>
+                  <td className="text-right font-mono font-bold text-red-700">{it.short_qty.toFixed(2)}</td>
+                  <td>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={it.fulfilled_qty}
+                      onChange={(e) => updateItem(idx, { fulfilled_qty: e.target.value })}
+                      onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
+                      placeholder="0"
+                      className="rounded-sm font-mono h-8 text-right"
+                      data-testid={`srn-fulfilled-${idx}`}
+                    />
+                  </td>
+                  <td className={`text-right font-mono ${pendingCls}`}>
+                    {pending.toFixed(2)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
+          <strong>Note:</strong> Saving Final with any row where Fulfilled Qty &lt; Short Qty will auto-create a child SRN
+          for the residual shortfall, linked to the original Receipt Note. The Fulfilled Qty entered here is immediately
+          available to Racking — you don't need a fully-received SRN before racking.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** ERN finalize/edit form — user enters accepted_qty + rejected_qty per row. */
+function ErnFinalizeForm({ ern, onCancel, onSaved }) {
+  const [items, setItems] = useState(() => (ern.items || []).map((it) => ({
+    part_no: it.part_no,
+    make: it.make,
+    description_1: it.description_1 || "",
+    invoice_qty: parseFloat(it.invoice_qty) || 0,
+    received_qty: parseFloat(it.received_qty) || 0,
+    extra_qty: parseFloat(it.extra_qty) || 0,
+    accepted_qty: it.accepted_qty == null ? "" : it.accepted_qty,
+    rejected_qty: it.rejected_qty == null ? "" : it.rejected_qty,
+  })));
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savingFinal, setSavingFinal] = useState(false);
+  const finalBtnRef = useRef(null);
+
+  const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+
+  const buildPayload = () => ({
+    items: items.map((it) => ({
+      part_no: it.part_no,
+      make: it.make,
+      accepted_qty: it.accepted_qty === "" ? null : (parseFloat(it.accepted_qty) || 0),
+      rejected_qty: it.rejected_qty === "" ? null : (parseFloat(it.rejected_qty) || 0),
+    })),
+  });
+
+  const validate = () => {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const a = it.accepted_qty === "" ? null : parseFloat(it.accepted_qty);
+      const r = it.rejected_qty === "" ? null : parseFloat(it.rejected_qty);
+      if (a != null && (isNaN(a) || a < 0)) { toast.error(`Row ${i + 1}: Accepted Qty must be ≥ 0`); return false; }
+      if (r != null && (isNaN(r) || r < 0)) { toast.error(`Row ${i + 1}: Rejected Qty must be ≥ 0`); return false; }
+      if ((a || 0) + (r || 0) > it.extra_qty + 1e-6) {
+        toast.error(`Row ${i + 1}: Accepted (${a || 0}) + Rejected (${r || 0}) cannot exceed Extra (${it.extra_qty})`);
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const saveDraft = async () => {
+    if (!validate()) return;
+    setSavingDraft(true);
+    try {
+      await api.put(`/extra-received-notes/${ern.id}`, buildPayload());
+      toast.success(`${ern.ern_no} saved`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
+    } finally { setSavingDraft(false); }
+  };
+
+  const saveFinal = async () => {
+    if (!validate()) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].accepted_qty === "" || items[i].accepted_qty == null) {
+        toast.error(`Row ${i + 1}: Accepted Qty is required for Final Save (use 0 if nothing accepted for this row)`);
+        return;
+      }
+    }
+    setSavingFinal(true);
+    try {
+      await api.put(`/extra-received-notes/${ern.id}`, buildPayload());
+      const { data } = await api.post(`/extra-received-notes/${ern.id}/finalize`);
+      toast.success(`${ern.ern_no} finalized · ${statusMeta(data.status).label}`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize");
+    } finally { setSavingFinal(false); }
+  };
+
+  const handleLastRowKey = (e, isLastRow) => {
+    if (!isLastRow) return;
+    if (e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      finalBtnRef.current?.focus();
+    }
+  };
+
+  return (
+    <div className="mt-4 space-y-6" data-testid="ern-finalize-view">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="ern-back">
+          <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
+        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={saveDraft}
+            disabled={savingDraft || savingFinal}
+            variant="outline"
+            className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+            data-testid="ern-save-draft"
+          >
+            <FloppyDisk size={14} weight="bold" className="mr-2" />
+            {savingDraft ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            ref={finalBtnRef}
+            onClick={saveFinal}
+            disabled={savingDraft || savingFinal}
+            className="rounded-sm bg-blue-700 hover:bg-blue-800"
+            data-testid="ern-save-final"
+            title="Final Save · creates child ERN for any residual undecided extra"
+          >
+            <CheckCircle size={14} weight="bold" className="mr-2" />
+            {savingFinal ? "Saving…" : "Save Final"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Detail k="ERN Date" v={fmtDate(ern.ern_date)} />
+        <Detail k="ERN No" v={ern.ern_no} />
+        <Detail k="Parent RN" v={`${ern.parent_rn_no || "—"} (${fmtDate(ern.parent_rn_date) || "—"})`} />
+        <Detail k="Invoice No" v={ern.invoice_no || "—"} />
+        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(ern.status).cls}`}>{statusMeta(ern.status).label}</span>} />
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+        <div className="px-4 py-3 border-b border-slate-200 label-sm">EXTRA ITEMS — Enter Accepted / Rejected Qty</div>
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th className="w-10">#</th>
+              <th className="w-44">PART NO</th>
+              <th>DESCRIPTION 1</th>
+              <th className="w-24 text-right">INV QTY</th>
+              <th className="w-24 text-right">RCVD QTY</th>
+              <th className="w-24 text-right">EXTRA QTY</th>
+              <th className="w-32 text-right">ACCEPTED QTY</th>
+              <th className="w-32 text-right">REJECTED QTY</th>
+              <th className="w-28 text-right">UNDECIDED</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, idx) => {
+              const a = it.accepted_qty === "" ? 0 : (parseFloat(it.accepted_qty) || 0);
+              const r = it.rejected_qty === "" ? 0 : (parseFloat(it.rejected_qty) || 0);
+              const undecided = it.extra_qty - a - r;
+              const undecidedCls = undecided > 0.0001 ? "text-amber-700 font-bold" : (undecided < -0.0001 ? "text-red-700 font-bold" : "text-green-700 font-bold");
+              const isLastRow = idx === items.length - 1;
+              return (
+                <tr key={idx} data-testid={`ern-item-${idx}`}>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono">{it.part_no}</td>
+                  <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                  <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
+                  <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>
+                  <td className="text-right font-mono font-bold text-amber-700">{it.extra_qty.toFixed(2)}</td>
+                  <td>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={it.accepted_qty}
+                      onChange={(e) => updateItem(idx, { accepted_qty: e.target.value })}
+                      placeholder="0"
+                      className="rounded-sm font-mono h-8 text-right"
+                      data-testid={`ern-accepted-${idx}`}
+                    />
+                  </td>
+                  <td>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={it.rejected_qty}
+                      onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
+                      onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
+                      placeholder="0"
+                      className="rounded-sm font-mono h-8 text-right"
+                      data-testid={`ern-rejected-${idx}`}
+                    />
+                  </td>
+                  <td className={`text-right font-mono ${undecidedCls}`}>{undecided.toFixed(2)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
+          <strong>Note:</strong> Accepted Qty becomes available to Racking immediately. Rejected Qty is recorded but
+          not racked (returned to supplier). If Accepted + Rejected &lt; Extra Qty for any row, a child ERN is auto-created
+          for the residual undecided quantity.
+        </div>
       </div>
     </div>
   );
