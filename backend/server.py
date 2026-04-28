@@ -254,13 +254,15 @@ class StockMasterBase(BaseModel):
     model: Optional[str] = ""
     part_no: str
     old_part_no: Optional[str] = ""
+    new_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
     description_1: Optional[str] = ""
     description_2: Optional[str] = ""
-    remarks_oem: Optional[str] = ""
-    remarks_others: Optional[str] = ""
+    remarks_oem: Optional[str] = ""    # UI label: "OEM"
+    remarks_others: Optional[str] = "" # UI label: "Remarks"
     make: str
     item_category: Optional[str] = ""
+    unit: Optional[str] = ""           # e.g. PCS, KG, LTR, M, BOX
     reorder_level: int = 0
     image: Optional[str] = ""  # legacy single-image (kept for backwards compatibility) — first of `images`
     images: List[str] = Field(default_factory=list)  # storage paths, max 5
@@ -392,12 +394,14 @@ class ShortReceivedNoteItem(BaseModel):
     # Master snapshot — denormalized for display
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
+    new_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
     description_1: Optional[str] = ""
     description_2: Optional[str] = ""
     remarks_oem: Optional[str] = ""
     remarks_others: Optional[str] = ""
     item_category: Optional[str] = ""
+    unit: Optional[str] = ""
     # Legacy alias - mirrors fulfilled_qty so racking flow can read it like any other note.
     quantity: Optional[float] = None
 
@@ -1063,10 +1067,10 @@ async def create_stock_master(payload: StockMasterCreate, user=Depends(get_curre
 
 # Whitelist of fields that may be filtered/sorted via query params (security)
 _FILTERABLE_FIELDS = {
-    "model", "part_no", "old_part_no", "make_part_no",
+    "model", "part_no", "old_part_no", "new_part_no", "make_part_no",
     "description_1", "description_2",
     "remarks_oem", "remarks_others",
-    "make", "item_category", "reorder_level",
+    "make", "item_category", "unit", "reorder_level",
 }
 # Sentinel used by frontend to represent "blank/empty" cells in column filters
 _BLANK_TOKEN = "(Blanks)"
@@ -1253,12 +1257,12 @@ async def get_item_by_part_make(part_no: str, make: str, user=Depends(get_curren
 @api_router.get("/stock-master/download/template")
 async def download_template_route():
     sample_rows = [
-        ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900",
+        ["1", "Model-X100", "3922900", "OPN-1001", "NPN-2001", "CUM-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
-         "Cummins", "Engine Parts", "5"],
-        ["2", "Model-X100", "3922900", "OPN-1001", "TATA-3922900",
+         "Cummins", "Engine Parts", "PCS", "5"],
+        ["2", "Model-X100", "3922900", "OPN-1001", "NPN-2001", "TATA-3922900",
          "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Qty per box 1",
-         "Tata", "Engine Parts", "10"],
+         "Tata", "Engine Parts", "PCS", "10"],
     ]
     return _csv_response(sample_rows, TEMPLATE_COLUMNS, "stock_master_template.csv")
 
@@ -1273,6 +1277,7 @@ async def export_stock_master(user=Depends(get_current_user)):
             it.get("model", ""),
             it.get("part_no", ""),
             it.get("old_part_no", ""),
+            it.get("new_part_no", ""),
             it.get("make_part_no", ""),
             it.get("description_1", ""),
             it.get("description_2", ""),
@@ -1280,6 +1285,7 @@ async def export_stock_master(user=Depends(get_current_user)):
             it.get("remarks_others", ""),
             it.get("make", ""),
             it.get("item_category", ""),
+            it.get("unit", ""),
             it.get("reorder_level", 0) or 0,
         ])
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -1340,20 +1346,23 @@ COLUMN_ALIASES = {
     "model": "model",
     "part no": "part_no", "part_no": "part_no", "partno": "part_no", "part number": "part_no",
     "old no": "old_part_no", "old part no": "old_part_no", "old_part_no": "old_part_no",
+    "new no": "new_part_no", "new part no": "new_part_no", "new_part_no": "new_part_no", "newpartno": "new_part_no",
     "make part no": "make_part_no", "make_part_no": "make_part_no", "makepartno": "make_part_no",
     "description 1": "description_1", "description_1": "description_1", "description1": "description_1", "desc 1": "description_1",
     "description 2": "description_2", "description_2": "description_2", "description2": "description_2", "desc 2": "description_2",
-    "remarks oem": "remarks_oem", "remarks_oem": "remarks_oem", "oem": "remarks_oem", "oem no": "remarks_oem",
-    "remarks others": "remarks_others", "remarks_others": "remarks_others", "remarks": "remarks_others", "remark": "remarks_others",
+    # NOTE: UI labels were renamed (OEM, Remarks). DB keys remain remarks_oem/remarks_others for back-compat.
+    "oem": "remarks_oem", "remarks oem": "remarks_oem", "remarks_oem": "remarks_oem", "oem no": "remarks_oem",
+    "remarks": "remarks_others", "remark": "remarks_others", "remarks others": "remarks_others", "remarks_others": "remarks_others",
     "make": "make",
     "item category": "item_category", "item_category": "item_category", "category": "item_category",
+    "unit": "unit", "uom": "unit", "u o m": "unit",
     "reorder level": "reorder_level", "reorder_level": "reorder_level", "reorder": "reorder_level", "min stock": "reorder_level",
 }
 
 TEMPLATE_COLUMNS = [
-    "SL NO", "MODEL", "PART NO", "OLD PART NO", "MAKE PART NO",
-    "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS OEM", "REMARKS OTHERS",
-    "MAKE", "ITEM CATEGORY", "REORDER LEVEL"
+    "SL NO", "MODEL", "PART NO", "OLD PART NO", "NEW PART NO", "MAKE PART NO",
+    "DESCRIPTION 1", "DESCRIPTION 2", "OEM", "REMARKS",
+    "MAKE", "ITEM CATEGORY", "UNIT", "REORDER LEVEL"
 ]
 
 
@@ -1542,10 +1551,10 @@ async def bulk_upload(
     inserted, skipped, overwritten = 0, 0, 0
     for idx, row in df.iterrows():
         data = {
-            "model": "", "part_no": "", "old_part_no": "", "make_part_no": "",
+            "model": "", "part_no": "", "old_part_no": "", "new_part_no": "", "make_part_no": "",
             "description_1": "", "description_2": "",
             "remarks_oem": "", "remarks_others": "",
-            "make": "", "item_category": "", "reorder_level": 0, "image": "",
+            "make": "", "item_category": "", "unit": "", "reorder_level": 0, "image": "",
         }
         for orig_col, field in col_map.items():
             val = row.get(orig_col, "")
@@ -2624,10 +2633,10 @@ def _key(p, m):
 
 # ----------- Live-join helper for consistent master / location data -----------
 _MASTER_FIELDS = (
-    "model", "old_part_no", "make_part_no",
+    "model", "old_part_no", "new_part_no", "make_part_no",
     "description_1", "description_2",
     "remarks_oem", "remarks_others",
-    "item_category", "image", "reorder_level",
+    "item_category", "unit", "image", "reorder_level",
 )
 
 

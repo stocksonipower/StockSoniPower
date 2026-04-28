@@ -213,12 +213,13 @@ function ItemDetailsContent({ details, selected }) {
               <Field k="Model" v={m.model} />
               <Field k="Category" v={m.item_category} />
               <Field k="Old Part No" v={m.old_part_no} />
+              <Field k="New Part No" v={m.new_part_no} />
               <Field k="Make Part No" v={m.make_part_no} />
-              <Field k="Remarks (OEM)" v={m.remarks_oem} />
-              <Field k="Remarks (Others)" v={m.remarks_others} />
+              <Field k="OEM" v={m.remarks_oem} />
+              <Field k="Remarks" v={m.remarks_others} />
               <Field k="Min Stock Qty" v={m.min_stock_qty} />
               <Field k="Max Stock Qty" v={m.max_stock_qty} />
-              <Field k="Re-order Qty" v={m.reorder_qty} />
+              <Field k="Re-order Qty" v={m.reorder_qty || m.reorder_level} />
               <Field k="Unit" v={m.unit} />
             </div>
           ) : (

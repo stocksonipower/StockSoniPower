@@ -25,22 +25,24 @@ const COLUMNS = [
   { key: "model", label: "MODEL" },
   { key: "part_no", label: "PART NO" },
   { key: "old_part_no", label: "OLD PART NO" },
+  { key: "new_part_no", label: "NEW PART NO" },
   { key: "make_part_no", label: "MAKE PART NO" },
   { key: "description_1", label: "DESCRIPTION 1" },
   { key: "description_2", label: "DESCRIPTION 2" },
-  { key: "remarks_oem", label: "REMARKS OEM" },
-  { key: "remarks_others", label: "REMARKS OTHERS" },
+  { key: "remarks_oem", label: "OEM" },
+  { key: "remarks_others", label: "REMARKS" },
   { key: "make", label: "MAKE" },
   { key: "item_category", label: "ITEM CATEGORY" },
+  { key: "unit", label: "UNIT" },
   { key: "reorder_level", label: "REORDER LEVEL", isNumeric: true },
   { key: "images", label: "IMAGES", isImage: true },
 ];
 
 const emptyForm = {
-  model: "", part_no: "", old_part_no: "", make_part_no: "",
+  model: "", part_no: "", old_part_no: "", new_part_no: "", make_part_no: "",
   description_1: "", description_2: "",
   remarks_oem: "", remarks_others: "",
-  make: "", item_category: "", reorder_level: 0,
+  make: "", item_category: "", unit: "", reorder_level: 0,
   images: [],
 };
 
@@ -536,20 +538,22 @@ export default function StockMasterPage() {
       "MODEL": r.model || "",
       "PART NO": r.part_no || "",
       "OLD PART NO": r.old_part_no || "",
+      "NEW PART NO": r.new_part_no || "",
       "MAKE PART NO": r.make_part_no || "",
       "DESCRIPTION 1": r.description_1 || "",
       "DESCRIPTION 2": r.description_2 || "",
-      "REMARKS OEM": r.remarks_oem || "",
-      "REMARKS OTHERS": r.remarks_others || "",
+      "OEM": r.remarks_oem || "",
+      "REMARKS": r.remarks_others || "",
       "MAKE": r.make || "",
       "ITEM CATEGORY": r.item_category || "",
+      "UNIT": r.unit || "",
       "REORDER LEVEL": r.reorder_level || 0,
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     ws["!cols"] = [
-      { wch: 6 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
+      { wch: 6 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
       { wch: 30 }, { wch: 30 }, { wch: 22 }, { wch: 22 }, { wch: 14 },
-      { wch: 18 }, { wch: 14 },
+      { wch: 18 }, { wch: 10 }, { wch: 14 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Stock Master");
@@ -761,6 +765,7 @@ export default function StockMasterPage() {
                   <td ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")}>{i.model || "—"}</td>
                   <td ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")}><PartNoLink partNo={i.part_no} make={i.make} /></td>
                   <td ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")}>{i.old_part_no || "—"}</td>
+                  <td ref={cellRef("new_part_no")} className={tdCls(idx, "new_part_no", "font-mono text-slate-600")}>{i.new_part_no || "—"}</td>
                   <td ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")}>{i.make_part_no || "—"}</td>
                   <td ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")}>{i.description_1 || "—"}</td>
                   <td ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700 max-w-[200px] truncate")}>{i.description_2 || "—"}</td>
@@ -768,6 +773,7 @@ export default function StockMasterPage() {
                   <td ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600 max-w-[180px] truncate")}>{i.remarks_others || "—"}</td>
                   <td ref={cellRef("make")} className={tdCls(idx, "make")}>{i.make}</td>
                   <td ref={cellRef("item_category")} className={tdCls(idx, "item_category")}>{i.item_category || "—"}</td>
+                  <td ref={cellRef("unit")} className={tdCls(idx, "unit", "font-mono text-slate-700")}>{i.unit || "—"}</td>
                   <td ref={cellRef("reorder_level")} className={tdCls(idx, "reorder_level", "font-mono text-slate-700")}>{i.reorder_level || 0}</td>
 
                   <td className={tdCls(idx, "images")}>
@@ -845,21 +851,23 @@ export default function StockMasterPage() {
             <Field label="Model" val={form.model} on={(v) => setForm({ ...form, model: v })} testid="form-model" />
             <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
             <Field label="Old Part No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
+            <Field label="New Part No." val={form.new_part_no} on={(v) => setForm({ ...form, new_part_no: v })} testid="form-new-part-no" />
             <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
             <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
             <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
             <div className="col-span-2 grid grid-cols-2 gap-4">
               <div>
-                <Label className="label-sm">Remarks OEM</Label>
+                <Label className="label-sm">OEM</Label>
                 <Textarea value={form.remarks_oem} onChange={(e) => setForm({ ...form, remarks_oem: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-oem" />
               </div>
               <div>
-                <Label className="label-sm">Remarks Others</Label>
+                <Label className="label-sm">Remarks</Label>
                 <Textarea value={form.remarks_others} onChange={(e) => setForm({ ...form, remarks_others: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-others" />
               </div>
             </div>
             <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
             <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
+            <Field label="Unit" val={form.unit} on={(v) => setForm({ ...form, unit: v })} testid="form-unit" />
             <div>
               <Label className="label-sm">Reorder Level</Label>
               <Input
