@@ -60,6 +60,14 @@ function qtyDiff(it) {
 }
 
 /** Status pill metadata used in list view AND detail dialog. */
+function stockInTypeMeta(type) {
+  const t = (type || "INVOICE").toUpperCase();
+  if (t === "GENERAL") return { label: "General", cls: "bg-indigo-50 text-indigo-800 border border-indigo-200" };
+  return { label: "Invoice", cls: "bg-blue-50 text-blue-800 border border-blue-200" };
+}
+function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
+
+
 function statusMeta(status) {
   switch (status) {
     case "DRAFT":
@@ -212,6 +220,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const columns = useMemo(() => [
     { key: "rn_date", label: "Receipt Note Date", value: (r) => fmtDate(r.rn_date) },
     { key: "rn_no", label: "Receipt Note No", value: (r) => r.rn_no || "" },
+    { key: "stock_in_type", label: "Stock In Type", value: (r) => stockInTypeLabel(r.stock_in_type) },
     { key: "invoice_date", label: "Invoice Date", value: (r) => fmtDate(r.invoice_date) },
     { key: "invoice_no", label: "Invoice No", value: (r) => r.invoice_no || "" },
     { key: "goods_received_date", label: "Goods Received Date", value: (r) => fmtDate(r.goods_received_date) },
@@ -258,6 +267,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               <th className="w-14">SL NO</th>
               <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rn-col-date" />
               <ColumnHeader {...getColumnHeaderProps("rn_no")} label="RECEIPT NOTE NO" testid="rn-col-no" />
+              <ColumnHeader {...getColumnHeaderProps("stock_in_type")} label="STOCK IN TYPE" testid="rn-col-stock-in-type" />
               <ColumnHeader {...getColumnHeaderProps("invoice_date")} label="INVOICE DATE" testid="rn-col-inv-date" />
               <ColumnHeader {...getColumnHeaderProps("invoice_no")} label="INVOICE NO" testid="rn-col-inv-no" />
               <ColumnHeader {...getColumnHeaderProps("goods_received_date")} label="GOODS RCVD DATE" testid="rn-col-grd" />
@@ -299,6 +309,14 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                       {r.rn_no}
                     </button>
                   </td>
+                  <td>
+                    {(() => { const sit = stockInTypeMeta(r.stock_in_type); return (
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
+                        data-testid={`rn-stock-in-type-${r.rn_no}`}>
+                        {sit.label}
+                      </span>
+                    ); })()}
+                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
                   <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
@@ -337,7 +355,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={12} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -370,7 +388,15 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
           <>
             <DialogHeader>
               <div className="flex items-center justify-between">
-                <DialogTitle className="text-2xl font-black font-mono">{rn.rn_no}</DialogTitle>
+                <div className="flex items-center gap-3">
+                  <DialogTitle className="text-2xl font-black font-mono">{rn.rn_no}</DialogTitle>
+                  {(() => { const sit = stockInTypeMeta(rn.stock_in_type); return (
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-sm ${sit.cls}`}
+                      data-testid="rn-detail-stock-in-type">
+                      {sit.label} Stock In
+                    </span>
+                  ); })()}
+                </div>
                 <div className="flex items-center gap-2 mr-6">
                   <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-sm ${statusMeta(rn.status).cls}`}>
                     {statusMeta(rn.status).label}
@@ -403,6 +429,7 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
                     <th className="w-14">SL NO</th>
                     <th>PART NO</th>
                     <th>MAKE</th>
+                    <th>DESCRIPTION 1</th>
                     <th className="text-right">INVOICE QTY</th>
                     <th className="text-right">RECEIVED QTY</th>
                     <th className="text-right">QTY DIFF</th>
@@ -417,6 +444,7 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
                         <td className="font-mono text-slate-500">{idx + 1}</td>
                         <td className="font-mono font-semibold">{it.part_no}</td>
                         <td>{it.make}</td>
+                        <td className="text-slate-700">{it.description_1 || "—"}</td>
                         <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
                         <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
                         <td className={`text-right font-mono font-bold ${diffCls}`}>
@@ -450,6 +478,7 @@ function Detail({ k, v }) {
 function printReceiptNote(rn) {
   if (!rn) return;
   const sm = statusMeta(rn.status);
+  const sit = stockInTypeMeta(rn.stock_in_type);
   const items = (rn.items || []).map((it, idx) => {
     const inv = toNum(it.invoice_qty) ?? "—";
     const rec = toNum(it.received_qty);
@@ -459,6 +488,7 @@ function printReceiptNote(rn) {
       <td>${idx + 1}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
       <td>${escapeHtml(it.make || "")}</td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
       <td style="text-align:right">${inv}</td>
       <td style="text-align:right">${rec ?? "—"}</td>
       <td style="text-align:right">${diffStr}</td>
@@ -486,13 +516,14 @@ function printReceiptNote(rn) {
 <body>
   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
     <div>
-      <div class="muted">Receipt Note</div>
+      <div class="muted">Receipt Note · <span style="color:#334155;font-weight:700;">${escapeHtml(sit.label)} Stock In</span></div>
       <h1>${escapeHtml(rn.rn_no)}</h1>
     </div>
     <span class="pill">${escapeHtml(sm.label)}</span>
   </div>
   <div class="grid">
     <div><div class="field-label">Receipt Note Date</div><div class="field-value">${escapeHtml(fmtDate(rn.rn_date))}</div></div>
+    <div><div class="field-label">Stock In Type</div><div class="field-value">${escapeHtml(sit.label)}</div></div>
     <div><div class="field-label">Financial Year</div><div class="field-value">FY ${escapeHtml(rn.fy || "—")}</div></div>
     <div><div class="field-label">Invoice Date</div><div class="field-value">${escapeHtml(fmtDate(rn.invoice_date))}</div></div>
     <div><div class="field-label">Invoice No</div><div class="field-value">${escapeHtml(rn.invoice_no || "—")}</div></div>
@@ -504,7 +535,7 @@ function printReceiptNote(rn) {
   <div class="muted" style="margin-top:24px;">Items (${(rn.items || []).length})</div>
   <table>
     <thead><tr>
-      <th>Sl No</th><th>Part No</th><th>Make</th>
+      <th>Sl No</th><th>Part No</th><th>Make</th><th>Description 1</th>
       <th style="text-align:right">Invoice Qty</th>
       <th style="text-align:right">Received Qty</th>
       <th style="text-align:right">Qty Diff</th>
