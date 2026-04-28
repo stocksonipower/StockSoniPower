@@ -1470,6 +1470,17 @@ function ShortReceivedNoteTab() {
     }
   };
 
+  const handleOpenChild = async (childId, k) => {
+    if (!childId) return;
+    const path = k === "ern" ? "/extra-received-notes" : "/short-received-notes";
+    try {
+      const { data } = await api.get(`${path}/${childId}`);
+      setOpenDetail(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load child");
+    }
+  };
+
   return (
     <>
       {view === "list" && (
@@ -1485,7 +1496,7 @@ function ShortReceivedNoteTab() {
       {view === "edit" && (
         <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} />
       )}
-      <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} />
+      <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
@@ -1511,6 +1522,17 @@ function ExtraReceivedNoteTab() {
     }
   };
 
+  const handleOpenChild = async (childId, k) => {
+    if (!childId) return;
+    const path = k === "srn" ? "/short-received-notes" : "/extra-received-notes";
+    try {
+      const { data } = await api.get(`${path}/${childId}`);
+      setOpenDetail(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load child");
+    }
+  };
+
   return (
     <>
       {view === "list" && (
@@ -1526,7 +1548,7 @@ function ExtraReceivedNoteTab() {
       {view === "edit" && (
         <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} />
       )}
-      <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} />
+      <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
@@ -1712,12 +1734,38 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 }
 
 /** Read-only detail dialog for SRN/ERN — shows all rows with quantities. */
-function ChildDetailDialog({ kind, doc, onClose }) {
+function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
   if (!doc) return null;
   const isSrn = kind === "srn";
   const idField = isSrn ? "srn_no" : "ern_no";
   const dateField = isSrn ? "srn_date" : "ern_date";
   const meta = statusMeta(doc.status);
+
+  const renderChildren = (it) => {
+    const list = it.children || [];
+    if (!list.length) return <span className="text-slate-300">—</span>;
+    return (
+      <div className="flex flex-col gap-0.5 items-end">
+        {list.map((c, i) => {
+          const childNo = c.child_srn_no || c.child_ern_no;
+          const childId = c.child_srn_id || c.child_ern_id;
+          const qty = isSrn ? c.short_qty : c.extra_qty;
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => onOpen?.(childId, isSrn ? "srn" : "ern")}
+              className="font-mono text-blue-700 hover:underline text-[11px]"
+              title={`${childNo} · qty ${qty}`}
+              data-testid={`${kind}-child-${childNo}`}
+            >
+              {childNo}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
@@ -1757,6 +1805,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                     <th className="text-right">SHORT QTY</th>
                     <th className="text-right">FULFILLED QTY</th>
                     <th className="text-right">PENDING QTY</th>
+                    <th className="text-right">CHILD SRNs</th>
                   </>
                 ) : (
                   <>
@@ -1764,6 +1813,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                     <th className="text-right">ACCEPTED QTY</th>
                     <th className="text-right">REJECTED QTY</th>
                     <th className="text-right">UNDECIDED</th>
+                    <th className="text-right">CHILD ERNs</th>
                   </>
                 )}
               </tr>
@@ -1785,6 +1835,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                       <td className="text-right font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
                       <td className="text-right font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
                       <td className={`text-right font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                      <td className="text-right">{renderChildren(it)}</td>
                     </tr>
                   );
                 }
@@ -1804,6 +1855,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                     <td className="text-right font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
                     <td className="text-right font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
                     <td className={`text-right font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
+                    <td className="text-right">{renderChildren(it)}</td>
                   </tr>
                 );
               })}

@@ -3082,6 +3082,26 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
         }
         try:
             await db.short_received_notes.insert_one(doc)
+            # Track child SRN reference on each parent item that contributed residual.
+            if parent_srn:
+                child_keys = {(it["part_no"], it["make"]): float(it.get("short_qty") or 0) for it in items}
+                new_parent_items = []
+                for p_it in parent_srn.get("items", []):
+                    new_p = dict(p_it)
+                    k = (p_it.get("part_no"), p_it.get("make"))
+                    if k in child_keys:
+                        children = list(new_p.get("children") or [])
+                        children.append({
+                            "child_srn_id": doc["id"],
+                            "child_srn_no": srn_no,
+                            "short_qty": child_keys[k],
+                            "created_at": doc["created_at"],
+                        })
+                        new_p["children"] = children
+                    new_parent_items.append(new_p)
+                await db.short_received_notes.update_one(
+                    {"id": parent_srn["id"]}, {"$set": {"items": new_parent_items}}
+                )
             return srn_no
         except DuplicateKeyError:
             continue
@@ -3163,6 +3183,26 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
         }
         try:
             await db.extra_received_notes.insert_one(doc)
+            # Track child ERN reference on each parent item that contributed residual.
+            if parent_ern:
+                child_keys = {(it["part_no"], it["make"]): float(it.get("extra_qty") or 0) for it in items}
+                new_parent_items = []
+                for p_it in parent_ern.get("items", []):
+                    new_p = dict(p_it)
+                    k = (p_it.get("part_no"), p_it.get("make"))
+                    if k in child_keys:
+                        children = list(new_p.get("children") or [])
+                        children.append({
+                            "child_ern_id": doc["id"],
+                            "child_ern_no": ern_no,
+                            "extra_qty": child_keys[k],
+                            "created_at": doc["created_at"],
+                        })
+                        new_p["children"] = children
+                    new_parent_items.append(new_p)
+                await db.extra_received_notes.update_one(
+                    {"id": parent_ern["id"]}, {"$set": {"items": new_parent_items}}
+                )
             return ern_no
         except DuplicateKeyError:
             continue
