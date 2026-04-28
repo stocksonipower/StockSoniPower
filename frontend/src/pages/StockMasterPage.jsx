@@ -663,7 +663,7 @@ export default function StockMasterPage() {
           <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
             ref={searchInputRef}
-            placeholder="Search part no, descriptions, remarks, make, category… (Ctrl+F)"
+            placeholder="Search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
