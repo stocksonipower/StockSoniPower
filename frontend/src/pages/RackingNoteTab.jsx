@@ -19,6 +19,7 @@ import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
+import { ReceiptNoteDetailDialog } from "./StockInPage";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
@@ -53,11 +54,22 @@ export default function RackingNoteTab() {
   const [view, setView] = useState("list"); // list | create | edit | detail
   const [editing, setEditing] = useState(null);
   const [openRkn, setOpenRkn] = useState(null);
+  const [openRn, setOpenRn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   const goCreate = () => { setEditing(null); setView("create"); };
   const goEdit = (rkn) => { setEditing(rkn); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  const handleOpenRn = async (rnId) => {
+    if (!rnId) return;
+    try {
+      const { data } = await api.get(`/receipt-notes/${rnId}`);
+      setOpenRn(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load Receipt Note");
+    }
+  };
 
   return (
     <>
@@ -67,6 +79,7 @@ export default function RackingNoteTab() {
           onCreate={goCreate}
           onEdit={goEdit}
           onOpen={(r) => setOpenRkn(r)}
+          onOpenRn={handleOpenRn}
           onRecorded={() => setReloadKey((k) => k + 1)}
         />
       )}
@@ -74,12 +87,13 @@ export default function RackingNoteTab() {
         <RackingNoteForm editing={editing} onCancel={goList} onSaved={goList} />
       )}
       <RackingNoteDetailDialog rkn={openRkn} onClose={() => setOpenRkn(null)} />
+      <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
 }
 
 /* ---------- LIST VIEW ---------- */
-function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
+function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onRecorded }) {
   const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
@@ -132,7 +146,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     { key: "items_count", label: "ITEMS TOTAL", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
     { key: "qty_total", label: "QUANTITY TOTAL", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
     { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
-    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
   ], []);
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
@@ -217,7 +231,17 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                     </button>
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
-                  <td className="font-mono text-slate-700">{r.receipt_note_no || "—"}</td>
+                  <td>
+                    {r.receipt_note_no ? (
+                      <button
+                        onClick={() => onOpenRn?.(r.receipt_note_id)}
+                        className="font-mono font-semibold text-blue-700 hover:underline"
+                        data-testid={`rkn-open-rn-${r.receipt_note_no}`}
+                      >
+                        {r.receipt_note_no}
+                      </button>
+                    ) : <span className="font-mono text-slate-400">—</span>}
+                  </td>
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
@@ -226,7 +250,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
-                      {recorded ? "Recorded" : "Draft"}
+                      {recorded ? "Fully Racked" : "Draft"}
                     </span>
                   </td>
                   <td className="text-right whitespace-nowrap">
@@ -306,7 +330,7 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
                   <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
                 </div>
               </div>
-              <Detail k="Status" v={rkn.status} />
+              <Detail k="Status" v={rkn.status === "RECORDED" ? "Fully Racked" : (rkn.status || "Draft")} />
               <Detail k="Created By" v={rkn.created_by || "—"} />
               <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
               <div>
@@ -333,10 +357,9 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
                 <tbody>
                   {(rkn.items || []).map((it, idx) => (
                     <tr key={idx}>
-                      <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                      <td>{it.make}</td>
+                                            <td className="font-mono text-slate-500">{idx + 1}</td>
                       <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                       <td className="text-slate-600">{it.item_category || "—"}</td>
                       <td className="text-right font-mono font-bold">{it.quantity}</td>
@@ -687,24 +710,17 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
           <table className="data-table w-full text-xs">
-            <thead>
+                        <thead>
               <tr>
                 <th className="w-10">SL</th>
-                <th>PART NO</th>
-                <th>MAKE</th>
                 <th>MODEL</th>
-                <th>OLD PART</th>
-                <th>MAKE PART</th>
+                <th>PART NO</th>
                 <th>DESCRIPTION 1</th>
-                <th>DESCRIPTION 2</th>
-                <th>REMARKS OEM</th>
-                <th>REMARKS OTHERS</th>
-                <th>CATEGORY</th>
+                <th>ITEM CATEGORY</th>
                 <th className="text-right">QTY</th>
                 <th className="min-w-[140px]">GODOWN *</th>
                 <th className="min-w-[120px]">RACK *</th>
                 <th className="min-w-[120px]">BOX *</th>
-                <th>BOX CATEGORY</th>
                 <th>EXISTING LOCATIONS</th>
                 <th className="w-20"></th>
               </tr>
@@ -720,16 +736,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 const overAllocated = pending !== undefined && allocated > pending + 1e-6;
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
+                                        <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
-                    <td className="font-mono text-slate-600">{it.old_part_no || "—"}</td>
-                    <td className="font-mono text-slate-600">{it.make_part_no || "—"}</td>
-                    <td className="text-slate-700 max-w-[160px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
-                    <td className="text-slate-700 max-w-[160px] truncate" title={it.description_2}>{it.description_2 || "—"}</td>
-                    <td className="text-slate-600 max-w-[140px] truncate" title={it.remarks_oem}>{it.remarks_oem || "—"}</td>
-                    <td className="text-slate-600 max-w-[140px] truncate" title={it.remarks_others}>{it.remarks_others || "—"}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="text-right">
                       <Input type="number" min="0.001" step="any" value={it.quantity}

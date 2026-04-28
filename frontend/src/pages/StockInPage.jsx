@@ -77,6 +77,8 @@ function statusMeta(status) {
     case "FINAL":
     case "RACKING_PENDING":
       return { label: "Racking Pending", cls: "bg-amber-50 text-amber-700" };
+    case "RACKING_NOTE_DRAFT":
+      return { label: "Racking Note Draft", cls: "bg-orange-50 text-orange-800 border border-orange-200" };
     case "PARTIALLY_RACKED":
       return { label: "Partially Racked", cls: "bg-blue-50 text-blue-800" };
     case "FULLY_RACKED":
@@ -86,15 +88,14 @@ function statusMeta(status) {
       return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
     case "PARTIALLY_RECEIVED":
       return { label: "Partially Received", cls: "bg-blue-50 text-blue-800" };
-    case "FULLY_RECEIVED":
-      return { label: "Fully Received", cls: "bg-green-100 text-green-800" };
+    case "FULLY_RECEIVED":  // legacy — backend now emits COMPLETE
+    case "COMPLETE":
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
     // ERN Phase 2 statuses
     case "PARTIALLY_ACCEPTED":
       return { label: "Partially Accepted", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_REJECTED":
       return { label: "Partially Rejected", cls: "bg-purple-50 text-purple-800" };
-    case "COMPLETE":
-      return { label: "Complete", cls: "bg-green-100 text-green-800" };
     default:
       return { label: status || "—", cls: "bg-slate-100 text-slate-700" };
   }
@@ -235,12 +236,12 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const columns = useMemo(() => [
+    { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.stock_in_type) },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.rn_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.rn_no || "" },
-    { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.stock_in_type) },
+    { key: "goods_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "invoice_date", label: "INVOICE DATE", value: (r) => fmtDate(r.invoice_date) },
     { key: "invoice_no", label: "INVOICE NO", value: (r) => r.invoice_no || "" },
-    { key: "goods_received_date", label: "GOODS RCVD DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
     { key: "total_qty", label: "TOTAL QUANTITY", value: totalQtyOf, isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
@@ -331,27 +332,27 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               return (
                 <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.rn_date)}</td>
                   <td>
-                    <button
-                      onClick={() => onOpen(r)}
-                      className="font-mono font-semibold text-blue-700 hover:underline"
-                      data-testid={`rn-open-${r.rn_no}`}
-                    >
-                      {r.rn_no}
-                    </button>
-                  </td>
-                  <td>
-                    {(() => { const sit = stockInTypeMeta(r.stock_in_type); return (
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
-                        data-testid={`rn-stock-in-type-${r.rn_no}`}>
-                        {sit.label}
-                      </span>
-                    ); })()}
-                  </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
-                  <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
+  {(() => { const sit = stockInTypeMeta(r.stock_in_type); return (
+    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
+      data-testid={`rn-stock-in-type-${r.rn_no}`}>
+      {sit.label}
+    </span>
+  ); })()}
+</td>
+<td className="font-mono text-slate-700">{fmtDate(r.rn_date)}</td>
+<td>
+  <button
+    onClick={() => onOpen(r)}
+    className="font-mono font-semibold text-blue-700 hover:underline"
+    data-testid={`rn-open-${r.rn_no}`}
+  >
+    {r.rn_no}
+  </button>
+</td>
+<td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
+<td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
+<td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
@@ -411,7 +412,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
 /* --------------------------------------------------------------
    Detail dialog (read-only) — shows new schema and a Print button
    -------------------------------------------------------------- */
-function ReceiptNoteDetailDialog({ rn, onClose }) {
+export function ReceiptNoteDetailDialog({ rn, onClose }) {
   const handlePrint = () => printReceiptNote(rn);
   return (
     <Dialog open={!!rn} onOpenChange={(o) => !o && onClose()}>
@@ -1241,15 +1242,32 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                         testid={`rn-make-${idx}`}
                       />
                     </td>
-                    <td>
-                      <button
-                        onClick={() => removeItem(idx)}
-                        disabled={items.length === 1}
-                        className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                        data-testid={`rn-remove-row-${idx}`}
-                      >
-                        <Trash size={14} />
-                      </button>
+                                        <td>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            const newRow = emptyItem();
+                            setItems((prev) => {
+                              const next = [...prev];
+                              next.splice(idx + 1, 0, newRow);
+                              return next;
+                            });
+                          }}
+                          className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700"
+                          title="Add row below"
+                          data-testid={`rn-add-row-${idx}`}
+                        >
+                          <Plus size={14} />
+                        </button>
+                        <button
+                          onClick={() => removeItem(idx)}
+                          disabled={items.length === 1}
+                          className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                          data-testid={`rn-remove-row-${idx}`}
+                        >
+                          <Trash size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1436,10 +1454,21 @@ function ShortReceivedNoteTab() {
   const [view, setView] = useState("list");           // "list" | "edit"
   const [editing, setEditing] = useState(null);
   const [openDetail, setOpenDetail] = useState(null);
+  const [openRn, setOpenRn] = useState(null);          // parent RN detail dialog
   const [reloadKey, setReloadKey] = useState(0);
 
   const goEdit = (srn) => { setEditing(srn); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  const handleOpenRn = async (rnId) => {
+    if (!rnId) return;
+    try {
+      const { data } = await api.get(`/receipt-notes/${rnId}`);
+      setOpenRn(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load Receipt Note");
+    }
+  };
 
   return (
     <>
@@ -1448,6 +1477,7 @@ function ShortReceivedNoteTab() {
           kind="srn"
           reloadKey={reloadKey}
           onOpen={(r) => setOpenDetail(r)}
+          onOpenRn={handleOpenRn}
           onEdit={goEdit}
           onChanged={() => setReloadKey((k) => k + 1)}
         />
@@ -1456,6 +1486,7 @@ function ShortReceivedNoteTab() {
         <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} />
       )}
       <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} />
+      <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
 }
@@ -1464,10 +1495,21 @@ function ExtraReceivedNoteTab() {
   const [view, setView] = useState("list");
   const [editing, setEditing] = useState(null);
   const [openDetail, setOpenDetail] = useState(null);
+  const [openRn, setOpenRn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   const goEdit = (ern) => { setEditing(ern); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  const handleOpenRn = async (rnId) => {
+    if (!rnId) return;
+    try {
+      const { data } = await api.get(`/receipt-notes/${rnId}`);
+      setOpenRn(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load Receipt Note");
+    }
+  };
 
   return (
     <>
@@ -1476,6 +1518,7 @@ function ExtraReceivedNoteTab() {
           kind="ern"
           reloadKey={reloadKey}
           onOpen={(r) => setOpenDetail(r)}
+          onOpenRn={handleOpenRn}
           onEdit={goEdit}
           onChanged={() => setReloadKey((k) => k + 1)}
         />
@@ -1484,12 +1527,13 @@ function ExtraReceivedNoteTab() {
         <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} />
       )}
       <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} />
+      <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
 }
 
 /** Shared list view for SRN + ERN. */
-function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
+function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
   const isSrn = kind === "srn";
   const path = isSrn ? "/short-received-notes" : "/extra-received-notes";
   const idField = isSrn ? "srn_no" : "ern_no";
@@ -1594,7 +1638,9 @@ function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
           <tbody>
             {filteredRows.map((r, idx) => {
               const meta = statusMeta(r.status);
-              const canEdit = isSrn ? r.status !== "FULLY_RECEIVED" : r.status !== "COMPLETE";
+              const canEdit = isSrn
+                ? !["COMPLETE", "FULLY_RECEIVED"].includes(r.status)
+                : r.status !== "COMPLETE";
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -1609,7 +1655,17 @@ function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
                     </button>
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
-                  <td className="font-mono text-slate-700">{r.parent_rn_no || "—"}</td>
+                  <td>
+                    {r.parent_rn_no ? (
+                      <button
+                        onClick={() => onOpenRn?.(r.parent_rn_id)}
+                        className="font-mono font-semibold text-blue-700 hover:underline"
+                        data-testid={`${kind}-open-rn-${r.parent_rn_no}`}
+                      >
+                        {r.parent_rn_no}
+                      </button>
+                    ) : <span className="font-mono text-slate-400">—</span>}
+                  </td>
                   <td className="text-right font-mono">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-semibold">{sumQty(r).toFixed(2)}</td>
                   {isSrn && <td className="font-mono text-slate-700">{r.fulfillment_date ? fmtDate(r.fulfillment_date) : "—"}</td>}

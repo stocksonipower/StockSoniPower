@@ -2885,9 +2885,17 @@ async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[s
 
 
 async def _recompute_rn_status(rn_id: str):
-    """Recompute racking-progress status. DRAFT and FINAL receipts that have not
-    yet been racked stay at their current label; only when racking begins do we
-    move into PARTIALLY_RACKED / FULLY_RACKED."""
+    """Recompute racking-progress status. DRAFT receipts stay at DRAFT.
+
+    Status precedence (highest to lowest):
+      DRAFT                : manual; never auto-promoted
+      RACKING_NOTE_DRAFT   : at least one DRAFT racking note exists against the RN OR
+                             any of its SRN / ERN descendants
+      FULLY_RACKED         : all rackable qty (RN.received + SRN.fulfilled + ERN.accepted
+                             across descendants) is covered by RECORDED racking notes
+      PARTIALLY_RACKED     : some RECORDED racking exists but not yet fully covered
+      FINAL                : finalized RN with no racking activity yet
+    """
     rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not rn:
         return
@@ -2896,20 +2904,81 @@ async def _recompute_rn_status(rn_id: str):
     if cur == "DRAFT":
         return
 
-    received = {}
+    # Walk SRN + ERN descendant tree starting from this RN.
+    srn_ids: list = []
+    ern_ids: list = []
+    # Direct SRNs / ERNs under the RN
+    seed_srns = await db.short_received_notes.find({"parent_rn_id": rn_id}, {"_id": 0, "id": 1}).to_list(None)
+    seed_erns = await db.extra_received_notes.find({"parent_rn_id": rn_id}, {"_id": 0, "id": 1}).to_list(None)
+    pending_srn = [s["id"] for s in seed_srns]
+    pending_ern = [e["id"] for e in seed_erns]
+    while pending_srn:
+        sid = pending_srn.pop()
+        if sid in srn_ids:
+            continue
+        srn_ids.append(sid)
+        children = await db.short_received_notes.find({"parent_srn_id": sid}, {"_id": 0, "id": 1}).to_list(None)
+        for c in children:
+            if c["id"] not in srn_ids:
+                pending_srn.append(c["id"])
+    while pending_ern:
+        eid = pending_ern.pop()
+        if eid in ern_ids:
+            continue
+        ern_ids.append(eid)
+        children = await db.extra_received_notes.find({"parent_ern_id": eid}, {"_id": 0, "id": 1}).to_list(None)
+        for c in children:
+            if c["id"] not in ern_ids:
+                pending_ern.append(c["id"])
+
+    # Build the set of (source_type, source_id) pairs that count toward this RN's racking.
+    source_pairs = [("RN", rn_id)] + [("SRN", sid) for sid in srn_ids] + [("ERN", eid) for eid in ern_ids]
+
+    # Check for any DRAFT racking note against any of these sources -> RACKING_NOTE_DRAFT
+    or_clauses = [{"source_type": st, "source_id": sid} for (st, sid) in source_pairs]
+    has_draft_rkn = await db.racking_notes.find_one(
+        {"status": "DRAFT", "$or": or_clauses}, {"_id": 0, "id": 1}
+    )
+    if has_draft_rkn:
+        new_status = "RACKING_NOTE_DRAFT"
+        update: dict = {"status": new_status}
+        if rn.get("racked_at"):
+            await db.receipt_notes.update_one({"id": rn_id}, {"$unset": {"racked_at": ""}})
+        await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
+        return
+
+    # Total rackable qty = RN.received + each SRN.fulfilled + each ERN.accepted
+    rackable: dict = {}
     for it in rn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
-        # Use received_qty when present (post-migration / new flow); fall back to legacy quantity.
         q = it.get("received_qty")
         if q is None:
             q = it.get("quantity") or 0
-        received[k] = received.get(k, 0) + (q or 0)
-    racked = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id=None)
+        rackable[k] = rackable.get(k, 0) + (q or 0)
+    if srn_ids:
+        async for srn in db.short_received_notes.find({"id": {"$in": srn_ids}}, {"_id": 0, "items": 1}):
+            for it in srn.get("items") or []:
+                k = _key(it.get("part_no"), it.get("make"))
+                rackable[k] = rackable.get(k, 0) + float(it.get("fulfilled_qty") or 0)
+    if ern_ids:
+        async for ern in db.extra_received_notes.find({"id": {"$in": ern_ids}}, {"_id": 0, "items": 1}):
+            for it in ern.get("items") or []:
+                k = _key(it.get("part_no"), it.get("make"))
+                rackable[k] = rackable.get(k, 0) + float(it.get("accepted_qty") or 0)
 
-    if not received or sum(racked.values()) == 0:
+    # Total racked qty across RECORDED RKNs against any of these sources.
+    racked: dict = {}
+    async for rkn in db.racking_notes.find(
+        {"status": "RECORDED", "$or": or_clauses}, {"_id": 0, "items": 1}
+    ):
+        for it in rkn.get("items", []):
+            k = _key(it.get("part_no"), it.get("make"))
+            racked[k] = racked.get(k, 0) + (it.get("quantity") or 0)
+
+    if not rackable or sum(rackable.values()) == 0 or sum(racked.values()) == 0:
         new_status = "FINAL"
     else:
-        all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in received.items())
+        all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in rackable.items() if q > 0)
         new_status = "FULLY_RACKED" if all_full else "PARTIALLY_RACKED"
 
     update = {"status": new_status}
@@ -3181,15 +3250,19 @@ async def _validate_cumulative_qty_polymorphic(source_type: str, source_id: str,
 
 
 async def _recompute_source_status_after_rkn(source_type: str, source_id: str, ultimate_rn_id: Optional[str]):
-    """After a racking note is created/edited/deleted, recompute the source's racking status."""
+    """After a racking note is created/edited/deleted, recompute the source's racking status,
+    and always recompute the ultimate parent RN's status (it now considers SRN/ERN qty)."""
     if source_type == "RN":
         if source_id:
             await _recompute_rn_status(source_id)
     elif source_type == "SRN":
         await _recompute_srn_racking_status(source_id)
-        # Don't recompute RN status — SRN/ERN racking does not contribute to the parent RN's status.
     elif source_type == "ERN":
         await _recompute_ern_racking_status(source_id)
+    # The RN's FULLY_RACKED state depends on rackable qty across all SRN/ERN descendants,
+    # so always re-run RN status recompute when the ultimate RN is known.
+    if ultimate_rn_id and source_type != "RN":
+        await _recompute_rn_status(ultimate_rn_id)
 
 
 # Legacy /racking-notes/prepare/{rn_id} kept for back-compat — delegates to the polymorphic version.
@@ -3696,7 +3769,7 @@ def _compute_srn_status(srn: dict) -> str:
         sum(short_qty) == 0                                   -> PENDING (degenerate)
         sum(fulfilled_qty) == 0                               -> PENDING
         0 < sum(fulfilled_qty) < sum(short_qty)               -> PARTIALLY_RECEIVED
-        sum(fulfilled_qty) == sum(short_qty)                  -> FULLY_RECEIVED
+        sum(fulfilled_qty) == sum(short_qty)                  -> COMPLETE
     """
     items = srn.get("items") or []
     total_short = 0.0
@@ -3710,7 +3783,7 @@ def _compute_srn_status(srn: dict) -> str:
     if total_fulfilled <= 0:
         return "PENDING"
     if total_fulfilled + 1e-6 >= total_short:
-        return "FULLY_RECEIVED"
+        return "COMPLETE"
     return "PARTIALLY_RECEIVED"
 
 
@@ -3870,12 +3943,12 @@ async def get_short_received_note(srn_id: str, user=Depends(_module_dep("stock_i
 @api_router.put("/short-received-notes/{srn_id}", response_model=ShortReceivedNote)
 async def update_short_received_note(srn_id: str, payload: ShortReceivedNoteUpdate, user=Depends(_module_dep("stock_in"))):
     """Edit fulfilled_qty / fulfillment_date on an SRN that hasn't been fully received yet.
-    Also recompute status. Cannot edit if SRN is FULLY_RECEIVED already."""
+    Also recompute status. Cannot edit if SRN is COMPLETE already."""
     existing = await db.short_received_notes.find_one({"id": srn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Short Received Note not found")
     _enforce_assignee(existing, user, "edit this Short Received Note")
-    if existing.get("status") == "FULLY_RECEIVED":
+    if existing.get("status") in ("COMPLETE", "FULLY_RECEIVED"):
         raise HTTPException(status_code=409, detail="Cannot edit — this SRN is already fully received")
 
     _no_future_date(payload.fulfillment_date, "Fulfillment Date")
@@ -3932,7 +4005,7 @@ async def finalize_short_received_note(srn_id: str, user=Depends(_module_dep("st
     if not srn:
         raise HTTPException(status_code=404, detail="Short Received Note not found")
     _enforce_assignee(srn, user, "finalize this Short Received Note")
-    if srn.get("status") == "FULLY_RECEIVED":
+    if srn.get("status") in ("COMPLETE", "FULLY_RECEIVED"):
         raise HTTPException(status_code=409, detail="This SRN is already fully received")
 
     items = srn.get("items", [])
@@ -5737,6 +5810,9 @@ async def startup():
     await db.extra_received_notes.update_many({"status": "DRAFT"}, {"$set": {"status": "PENDING"}})
     await db.extra_received_notes.update_many({"status": "FINAL"}, {"$set": {"status": "PENDING"}})
     await db.extra_received_notes.update_many({"racking_status": {"$exists": False}}, {"$set": {"racking_status": "RACKING_PENDING"}})
+
+    # Phase 3 rename: SRN status FULLY_RECEIVED -> COMPLETE
+    await db.short_received_notes.update_many({"status": "FULLY_RECEIVED"}, {"$set": {"status": "COMPLETE"}})
 
     # Recompute SRN/ERN derived statuses on startup so any data loaded with old shapes is consistent.
     async for srn in db.short_received_notes.find({}, {"_id": 0}):
