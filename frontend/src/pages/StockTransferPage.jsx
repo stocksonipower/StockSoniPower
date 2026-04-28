@@ -19,6 +19,7 @@ import {
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
@@ -264,7 +265,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                 {(s.items || []).map((it, idx) => (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                     <td className="text-right font-mono font-bold">{it.quantity}</td>
@@ -806,7 +807,7 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 {(stn.items || []).map((it, idx) => (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="text-right font-mono font-bold">{it.quantity}</td>
                     <td className="font-mono">{it.src_godown_name || "—"}</td>
@@ -1052,7 +1053,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                     <tr key={idx} data-testid={`stn-item-row-${idx}`} className={overPending ? "bg-red-50 align-top" : "align-top"}>
                       <td className="font-mono text-slate-500 pt-3">{idx + 1}</td>
                       <td className="pt-3">
-                        <div className="font-mono font-semibold">{it.part_no}</div>
+                        <div><PartNoLink partNo={it.part_no} make={it.make} /></div>
                         <div className="text-slate-600">{it.make}</div>
                         <div className="text-[10px] text-slate-500 mt-0.5">{it.description_1 || ""}</div>
                       </td>

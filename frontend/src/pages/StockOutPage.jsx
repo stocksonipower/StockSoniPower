@@ -19,6 +19,7 @@ import {
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
@@ -261,7 +262,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                 {(inn.items || []).map((it, idx) => (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="text-slate-700">{it.description_1 || "—"}</td>
                     <td className="text-right font-mono font-bold">{it.quantity}</td>
@@ -725,7 +726,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                 {(pn.items || []).map((it, idx) => (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                     <td className="text-right font-mono font-bold">{it.quantity}</td>
@@ -997,7 +998,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 return (
                   <tr key={idx} data-testid={`pn-item-row-${idx}`} className={(overAllocated || overAtLoc) ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>

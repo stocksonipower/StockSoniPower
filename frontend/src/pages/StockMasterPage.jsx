@@ -18,6 +18,7 @@ import * as XLSX from "xlsx";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
 import StockMasterImageUploader from "../components/StockMasterImageUploader";
 import AuthImage from "../components/AuthImage";
+import PartNoLink from "../components/PartNoLink";
 import ImageViewerDialog from "../components/ImageViewerDialog";
 
 const COLUMNS = [
@@ -758,7 +759,7 @@ export default function StockMasterPage() {
                   <td className={tdCls(idx, null, "font-mono text-slate-500")}>{idx + 1}</td>
 
                   <td ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")}>{i.model || "—"}</td>
-                  <td ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")}>{i.part_no}</td>
+                  <td ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")}><PartNoLink partNo={i.part_no} make={i.make} /></td>
                   <td ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")}>{i.old_part_no || "—"}</td>
                   <td ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")}>{i.make_part_no || "—"}</td>
                   <td ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")}>{i.description_1 || "—"}</td>

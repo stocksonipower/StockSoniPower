@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Warning, ArrowsClockwise, DownloadSimple } from "@phosphor-icons/react";
 import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 import { toast } from "sonner";
 
@@ -98,7 +99,7 @@ export default function LowStockPage() {
               <tr key={`${r.part_no}|${r.make}`} data-testid={`low-stock-row-${r.part_no}`}>
                 <td className="font-mono text-slate-500">{i + 1}</td>
                 <td className="font-mono text-slate-600">{r.model || "—"}</td>
-                <td className="font-mono font-semibold">{r.part_no}</td>
+                <td><PartNoLink partNo={r.part_no} make={r.make} /></td>
                 <td className="text-slate-600">{r.description_1 || "—"}</td>
                 <td className="text-slate-600">{r.description_2 || "—"}</td>
                 <td>{r.make}</td>

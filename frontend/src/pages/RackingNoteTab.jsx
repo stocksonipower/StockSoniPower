@@ -6,6 +6,7 @@ import { Label } from "../components/ui/label";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectGroup, SelectLabel,
 } from "../components/ui/select";
+import PartNoLink from "../components/PartNoLink";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "../components/ui/dialog";
@@ -324,7 +325,7 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
                   {(rkn.items || []).map((it, idx) => (
                     <tr key={idx}>
                       <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td className="font-mono font-semibold">{it.part_no}</td>
+                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td>{it.make}</td>
                       <td className="font-mono text-slate-600">{it.model || "—"}</td>
                       <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
@@ -711,7 +712,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono font-semibold">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
                     <td className="font-mono text-slate-600">{it.old_part_no || "—"}</td>

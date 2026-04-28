@@ -8,6 +8,7 @@ import { ScrollArea } from "../components/ui/scroll-area";
 import { MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X, CaretDown, DownloadSimple } from "@phosphor-icons/react";
 import AuthImage from "../components/AuthImage";
 import ImageViewerDialog from "../components/ImageViewerDialog";
+import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 import { toast } from "sonner";
 
@@ -309,6 +310,13 @@ export default function StockBalancePage() {
                     return (
                       <td key={c.key} className={`text-right font-mono font-bold ${r.total_quantity <= 5 ? "text-red-700" : "text-slate-900"}`}>
                         {r.total_quantity}
+                      </td>
+                    );
+                  }
+                  if (c.key === "part_no") {
+                    return (
+                      <td key={c.key} className={c.className}>
+                        <PartNoLink partNo={r.part_no} make={r.make} />
                       </td>
                     );
                   }

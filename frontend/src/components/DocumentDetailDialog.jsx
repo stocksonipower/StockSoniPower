@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
+import PartNoLink from "./PartNoLink";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -86,7 +87,7 @@ function RackingBody({ d }) {
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td className="font-mono font-semibold">{it.part_no}</td>
+                <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                 <td>{it.make}</td>
                 <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                 <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
@@ -118,7 +119,7 @@ function PickingBody({ d }) {
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td className="font-mono font-semibold">{it.part_no}</td>
+                <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                 <td>{it.make}</td>
                 <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                 <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
@@ -155,7 +156,7 @@ function TransferBody({ d }) {
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td className="font-mono font-semibold">{it.part_no}</td>
+                <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                 <td>{it.make}</td>
                 <td className="text-right font-mono font-bold">{it.quantity}</td>
                 <td><LocCell g={it.src_godown_name} r={it.src_rack_no} b={it.src_box_no} /></td>

@@ -6,6 +6,7 @@ import { CaretLeft, CaretRight, DownloadSimple, ArrowsClockwise } from "@phospho
 import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
 import { exportToExcel } from "../lib/exportExcel";
 import DocumentDetailDialog from "../components/DocumentDetailDialog";
+import PartNoLink from "../components/PartNoLink";
 import { toast } from "sonner";
 
 const PAGE_SIZE = 500;
@@ -152,7 +153,7 @@ export default function TransactionsPage() {
                         </button>
                       ) : <span className="text-slate-400">—</span>}
                     </td>
-                    <td className="font-mono font-semibold">{t.part_no}</td>
+                    <td><PartNoLink partNo={t.part_no} make={t.make} /></td>
                     <td className="text-slate-700 max-w-[260px] truncate" title={t.description_1}>{t.description_1 || "—"}</td>
                     <td>{t.make}</td>
                     <td>{t.godown_name}</td>

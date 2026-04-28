@@ -20,6 +20,7 @@ import {
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import PartNoLink from "../components/PartNoLink";
 import { useAuth } from "../lib/auth";
 import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
 import { exportToExcel } from "../lib/exportExcel";
@@ -465,7 +466,7 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
                     return (
                       <tr key={idx}>
                         <td className="font-mono text-slate-500">{idx + 1}</td>
-                        <td className="font-mono font-semibold">{it.part_no}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                         <td className="text-slate-700">{it.description_1 || "—"}</td>
                         <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
                         <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
@@ -1683,7 +1684,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                   return (
                     <tr key={idx}>
                       <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td className="font-mono">{it.part_no}</td>
+                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
                       <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
@@ -1701,7 +1702,7 @@ function ChildDetailDialog({ kind, doc, onClose }) {
                 return (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="font-mono">{it.part_no}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td className="text-slate-700">{it.description_1 || "—"}</td>
                     <td>{it.make}</td>
                     <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
@@ -1881,7 +1882,7 @@ function SrnFinalizeForm({ srn, onCancel, onSaved }) {
               return (
                 <tr key={idx} data-testid={`srn-item-${idx}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono">{it.part_no}</td>
+                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
                   <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
                   <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>
@@ -2063,7 +2064,7 @@ function ErnFinalizeForm({ ern, onCancel, onSaved }) {
               return (
                 <tr key={idx} data-testid={`ern-item-${idx}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono">{it.part_no}</td>
+                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
                   <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
                   <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>

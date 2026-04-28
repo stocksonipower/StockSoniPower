@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, CardContent } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
@@ -44,6 +45,7 @@ function StatusPill({ s }) {
 
 /* ---------- main page ---------- */
 export default function ItemDetailsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [showResults, setShowResults] = useState(false);
@@ -52,6 +54,18 @@ export default function ItemDetailsPage() {
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef(null);
   const inputRef = useRef(null);
+
+  // Hydrate selection from URL params (deep-link from anywhere in the app).
+  useEffect(() => {
+    const pn = (searchParams.get("part_no") || "").trim();
+    const mk = (searchParams.get("make") || "").trim();
+    if (pn) {
+      setSelected({ part_no: pn, make: mk });
+      setQuery(`${pn}${mk ? ` / ${mk}` : ""}`);
+      setShowResults(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Debounced search
   useEffect(() => {
@@ -85,6 +99,8 @@ export default function ItemDetailsPage() {
     setSelected({ part_no: it.part_no, make: it.make });
     setQuery(`${it.part_no} / ${it.make}`);
     setShowResults(false);
+    // Reflect in URL so this can be shared / back-buttoned.
+    setSearchParams({ part_no: it.part_no, make: it.make }, { replace: true });
   };
 
   return (
@@ -139,7 +155,7 @@ export default function ItemDetailsPage() {
               <span className="text-slate-400">/</span>
               <span className="font-mono text-slate-700">{selected.make}</span>
               <button
-                onClick={() => { setSelected(null); setQuery(""); setDetails(null); inputRef.current?.focus(); }}
+                onClick={() => { setSelected(null); setQuery(""); setDetails(null); setSearchParams({}, { replace: true }); inputRef.current?.focus(); }}
                 className="ml-auto text-blue-700 hover:underline font-semibold"
                 data-testid="item-details-clear-button"
               >Clear</button>
