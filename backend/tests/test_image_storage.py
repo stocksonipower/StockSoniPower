@@ -6,7 +6,7 @@ import zlib
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://stock-control-mvp.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://inventory-ops-dash.preview.emergentagent.com").rstrip("/")
 ADMIN_EMAIL = "admin@stockmgmt.com"
 ADMIN_PASS = "admin123"
 
