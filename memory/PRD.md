@@ -14,45 +14,62 @@ email+password auth, object storage for images.
 - Auth: JWT, 5-strike 15-min lockout
 - Universal Emergent LLM key for future AI features
 
-## Implemented (as of 2026-04-27)
+## Implemented (as of 2026-04-28)
 ### Core
-- Stock Master (CRUD, bulk upload, 5 images via object storage)
+- Stock Master (CRUD, bulk upload, 5 images via object storage, column reordering)
+- Item Details 360° page with cross-app deep linking (`<PartNoLink>`)
 - Location Master (Godown / Rack / Box hierarchy)
 - Users & module access (admin CRUD, per-module ACL)
 - Stock Balance with Low-Stock alerts
 - Dashboard widgets (Godown stock aggregation, Stock In/Out/Transfer pending)
 
 ### Workflows
-- Stock In: Receipt Note (Draft/Final) → Racking Note → transaction
-- Stock Out: Issue Note (Draft/Final) → Picking Note → transaction
+- Stock In: Receipt Note → Racking Note → transaction (with SRN/ERN sub-flows)
+- Stock Out: Issue Note → Picking Note → transaction
 - Stock Transfer: Transfer Request → Transfer Note → transaction
+- Polymorphic Racking Notes consume from RN, SRN, or ERN sources
 - In-App Notifications on workflow transitions
+
+### UI / Tables
 - HTML5 Drag/Drop sidebar nav (persisted per user)
-- Excel-style sort/filter + .xlsx export on all major tabs
+- Excel-style sort/filter via shared `useExcelTableFilter` hook + `ExcelColumnFilter` component
+- Applied to: Receipt Note, SRN, ERN, Racking Note, Issue Note, Picking Note,
+  Transfer Request, Transfer Note, Stock Master, Stock Summary lists
+- `.xlsx` export on all major tabs
+
+### Stock-In Status Workflow (iter-22, 2026-04-28)
+- **Receipt Note**: DRAFT → FINAL (Racking Pending) → RACKING_NOTE_DRAFT → PARTIALLY_RACKED → FULLY_RACKED
+  - Any DRAFT racking note (against RN OR any SRN/ERN descendant) → RACKING_NOTE_DRAFT
+  - FULLY_RACKED only when RN.received + ALL descendant SRN.fulfilled + ALL descendant ERN.accepted is fully racked
+- **SRN**: PENDING → PARTIALLY_RECEIVED → COMPLETE (renamed from FULLY_RECEIVED, with startup migration)
+- **ERN**: PENDING → PARTIALLY_ACCEPTED / PARTIALLY_REJECTED → COMPLETE
+- **Racking Note**: DRAFT → RECORDED (display: "Fully Racked")
+- SRN/ERN PUT + finalize now propagate status changes up to parent RN
+- Clickable parent RN links in SRN, ERN, and Racking Note list views
 
 ### Stability (iter-19, 2026-04-27)
 - Atomic FY-scoped serial counters via `counters` collection
 - Startup self-heal: counter = max(existing_serial) per (series, fy)
-- Legacy `{series}_{fy}` counter docs auto-purged
-- `ReturnDocument.AFTER` imported explicitly for pymongo compatibility
 
 ## Active Backlog
 ### P0 — Refactor
-- Split `server.py` (4800+ lines) into `/app/backend/routes/` modules
+- Split `server.py` (~6100 lines) into `/app/backend/routes/` modules
 
-### P1 — StockMasterPage audit fixes (from earlier fork, pending user approval)
-1. Search "Enter" key auto-scroll to matches
-2. Bulk Import template has legacy `IMAGE` column (broken under object storage)
-3. Column filters only apply to current page
+### P1 — UX Polish
+- StockMasterPage audit fixes:
+  1. Search "Enter" key auto-scroll to matches
+  2. Ctrl+F intercepted inside Add/Edit dialog
+  3. Avoid double API call on Search+Pagination
 
 ### P2
-4. Ctrl+F hijacks focus inside Add/Edit dialog
-5. `.xls` accepted but `xlrd` dep missing
-6. Search + pagination race condition (double fetch)
+- `.xls` accepted but `xlrd` dep missing (template downloads .xlsx only)
+- Idempotent `/finalize` for already-COMPLETE SRN/ERN (currently 409s)
+- Notification when RN status flips backwards (FULLY_RACKED → PARTIALLY_RACKED)
 
-### P2/P3 Future
-- Barcode/QR-based Stock In/Out
-- Saved filter presets
+### P3 — Future
+- Barcode/QR Stock In/Out scanner support
+- Saved filter presets per user/page on data tables
+- Migrate Transactions/Users/LowStock pages to `useExcelTableFilter` hook
 
 ## Test Credentials
-See `/app/memory/test_credentials.md` — admin@stockmgmt.com / admin123
+admin@stockmgmt.com / admin123
