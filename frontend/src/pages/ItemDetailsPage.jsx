@@ -49,6 +49,15 @@ export default function ItemDetailsPage() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [showResults, setShowResults] = useState(false);
+  const [highlightIndex, setHighlightIndex] = useState(-1);
+  useEffect(() => {
+  if (highlightIndex >= 0 && showResults) {
+    const element = document.querySelector(`[data-testid="item-details-result-${results[highlightIndex]?.part_no}-${results[highlightIndex]?.make}"]`);
+    if (element) {
+      element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+}, [highlightIndex, showResults, results]);
   const [selected, setSelected] = useState(null); // {part_no, make}
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -85,6 +94,30 @@ export default function ItemDetailsPage() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+  const handleClickOutside = (e) => {
+    if (inputRef.current && !inputRef.current.contains(e.target)) {
+      setShowResults(false);
+    }
+  };
+  document.addEventListener("mousedown", handleClickOutside);
+  return () => document.removeEventListener("mousedown", handleClickOutside);
+}, []);
+
+useEffect(() => {
+  const handleCtrlF = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+      e.preventDefault();
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
+      }
+    }
+  };
+  window.addEventListener("keydown", handleCtrlF);
+  return () => window.removeEventListener("keydown", handleCtrlF);
+}, []);
+
   // Fetch full details when selection changes
   useEffect(() => {
     if (!selected) { setDetails(null); return; }
@@ -94,6 +127,24 @@ export default function ItemDetailsPage() {
       .catch((err) => toast.error(err?.response?.data?.detail || "Could not load item details"))
       .finally(() => setLoading(false));
   }, [selected]);
+
+const handleKeyDown = (e) => {
+  if (!showResults || results.length === 0) return;
+  
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    setHighlightIndex((prev) => (prev < results.length - 1 ? prev + 1 : 0));
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    setHighlightIndex((prev) => (prev > 0 ? prev - 1 : results.length - 1));
+  } else if (e.key === "Enter" && highlightIndex >= 0) {
+    e.preventDefault();
+    pickItem(results[highlightIndex]);
+  } else if (e.key === "Escape") {
+    setShowResults(false);
+    setHighlightIndex(-1);
+  }
+};
 
   const pickItem = (it) => {
     setSelected({ part_no: it.part_no, make: it.make });
@@ -114,28 +165,29 @@ export default function ItemDetailsPage() {
           <div className="relative">
             <MagnifyingGlass size={16} weight="bold" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <Input
-              ref={inputRef}
-              value={query}
-              onChange={(e) => { setQuery(e.target.value); setShowResults(true); }}
-              onFocus={() => setShowResults(true)}
-              placeholder="Search by Part No or Make…"
-              className="pl-10 rounded-sm h-11 font-mono"
-              data-testid="item-details-search-input"
-            />
+  ref={inputRef}
+  value={query}
+  onChange={(e) => { setQuery(e.target.value); setShowResults(true); setHighlightIndex(-1); }}
+  onFocus={() => setShowResults(true)}
+  onKeyDown={handleKeyDown}
+  placeholder="Search"
+  className="pl-10 rounded-sm h-11 font-mono"
+  data-testid="item-details-search-input"
+/>
             {showResults && results.length > 0 && (
               <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-sm shadow-lg max-h-96 overflow-y-auto z-50" data-testid="item-details-search-results">
-                {results.map((r) => (
+                {results.map((r, idx) => (
                   <button
                     key={r.id}
                     onClick={() => pickItem(r)}
-                    className="w-full text-left px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 flex items-center gap-3"
+                    className={`w-full text-left px-3 py-2 border-b border-slate-100 last:border-b-0 flex items-center gap-3 ${idx === highlightIndex ? "bg-blue-50" : "hover:bg-slate-50"}`}
                     data-testid={`item-details-result-${r.part_no}-${r.make}`}
                   >
                     <Package size={14} weight="bold" className="text-blue-700" />
                     <div className="flex-1 min-w-0">
                       <div className="font-mono text-sm font-bold text-slate-900">{r.part_no}</div>
                       <div className="text-xs text-slate-500 truncate">
-                        {r.make} · {r.description_1 || "—"}{r.model ? ` · ${r.model}` : ""}
+                        {r.model || "—"} · {r.description_1 || "—"} · {r.make}
                       </div>
                     </div>
                     {r.item_category && (

@@ -5827,15 +5827,24 @@ async def shutdown():
 async def item_details_search(q: str = Query("", min_length=0, max_length=64),
                               limit: int = Query(20, ge=1, le=50),
                               user=Depends(get_current_user)):
-    """Autocomplete: top `limit` (part_no, make) combos that start with q (case-insensitive).
-    Cheap query — uses the `(part_no,1)` index. Returns master fields only."""
+    """Autocomplete: top `limit` (part_no, make) combos that match q (case-insensitive).
+    Searches across part_no, old_part_no, new_part_no, make_part_no,
+    description_1, description_2, remarks_oem, remarks_others, make, item_category."""
     qs = (q or "").strip()
     flt = {}
     if qs:
-        # Anchor at the start to use the index efficiently; fall back to substring on small DBs.
+        escaped = __import__('re').escape(qs)
         flt = {"$or": [
-            {"part_no": {"$regex": f"^{__import__('re').escape(qs)}", "$options": "i"}},
-            {"make":    {"$regex": f"^{__import__('re').escape(qs)}", "$options": "i"}},
+            {"part_no": {"$regex": escaped, "$options": "i"}},
+            {"old_part_no": {"$regex": escaped, "$options": "i"}},
+            {"new_part_no": {"$regex": escaped, "$options": "i"}},
+            {"make_part_no": {"$regex": escaped, "$options": "i"}},
+            {"description_1": {"$regex": escaped, "$options": "i"}},
+            {"description_2": {"$regex": escaped, "$options": "i"}},
+            {"remarks_oem": {"$regex": escaped, "$options": "i"}},
+            {"remarks_others": {"$regex": escaped, "$options": "i"}},
+            {"make": {"$regex": escaped, "$options": "i"}},
+            {"item_category": {"$regex": escaped, "$options": "i"}},
         ]}
     rows = await db.stock_master.find(
         flt,

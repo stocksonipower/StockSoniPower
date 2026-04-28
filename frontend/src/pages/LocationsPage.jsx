@@ -180,7 +180,7 @@ export default function LocationsPage() {
       <div className="mb-8">
         <div className="label-sm mb-2">Warehouse</div>
         <h1 className="text-4xl font-black tracking-tight text-slate-900">Location Master</h1>
-        <p className="text-sm text-slate-600 mt-2">Godown → Rack → Box hierarchy. Click any item to drill down, hover to edit or delete.</p>
+        <p className="text-sm text-slate-600 mt-2"> </p>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-4">
