@@ -5,7 +5,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
 import {
@@ -21,22 +21,24 @@ import AuthImage from "../components/AuthImage";
 import PartNoLink from "../components/PartNoLink";
 import ImageViewerDialog from "../components/ImageViewerDialog";
 
-const COLUMNS = [
-  { key: "model", label: "MODEL" },
-  { key: "part_no", label: "PART NO" },
-  { key: "old_part_no", label: "OLD PART NO" },
-  { key: "new_part_no", label: "NEW PART NO" },
-  { key: "make_part_no", label: "MAKE PART NO" },
-  { key: "description_1", label: "DESCRIPTION 1" },
-  { key: "description_2", label: "DESCRIPTION 2" },
-  { key: "remarks_oem", label: "OEM" },
-  { key: "remarks_others", label: "REMARKS" },
-  { key: "make", label: "MAKE" },
-  { key: "item_category", label: "ITEM CATEGORY" },
-  { key: "unit", label: "UNIT" },
-  { key: "reorder_level", label: "REORDER LEVEL", isNumeric: true },
-  { key: "images", label: "IMAGES", isImage: true },
+const DEFAULT_COLUMNS = [
+  { key: "model",          label: "MODEL",          width: 140, order: 1,  isNumeric: false, isImage: false },
+  { key: "part_no",        label: "PART NO",        width: 160, order: 2,  isNumeric: false, isImage: false },
+  { key: "old_part_no",    label: "OLD PART NO",    width: 160, order: 3,  isNumeric: false, isImage: false },
+  { key: "new_part_no",    label: "NEW PART NO",    width: 160, order: 4,  isNumeric: false, isImage: false },
+  { key: "make_part_no",   label: "MAKE PART NO",   width: 180, order: 5,  isNumeric: false, isImage: false },
+  { key: "description_1",  label: "DESCRIPTION 1",  width: 240, order: 6,  isNumeric: false, isImage: false },
+  { key: "description_2",  label: "DESCRIPTION 2",  width: 240, order: 7,  isNumeric: false, isImage: false },
+  { key: "remarks_oem",    label: "OEM",            width: 200, order: 8,  isNumeric: false, isImage: false },
+  { key: "remarks_others", label: "REMARKS",        width: 200, order: 9,  isNumeric: false, isImage: false },
+  { key: "make",           label: "MAKE",           width: 140, order: 10, isNumeric: false, isImage: false },
+  { key: "item_category",  label: "ITEM CATEGORY",  width: 160, order: 11, isNumeric: false, isImage: false },
+  { key: "unit",           label: "UNIT",           width: 100, order: 12, isNumeric: false, isImage: false },
+  { key: "reorder_level",  label: "REORDER LEVEL",  width: 130, order: 13, isNumeric: true,  isImage: false },
+  { key: "images",         label: "IMAGES",         width: 120, order: 99, isNumeric: false, isImage: true  },
 ];
+
+const COLUMNS = DEFAULT_COLUMNS;  // back-compat alias for any unmoved references
 
 const emptyForm = {
   model: "", part_no: "", old_part_no: "", new_part_no: "", make_part_no: "",
@@ -179,6 +181,25 @@ export default function StockMasterPage() {
   // Used to suppress stale highlights while the API is catching up.
   const [loadedSearch, setLoadedSearch] = useState("");
 
+  // Admin-editable column order/widths (persisted server-side)
+  const [columns, setColumns] = useState(DEFAULT_COLUMNS);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
+
+  const loadColumnSettings = async () => {
+    try {
+      const { data } = await api.get("/stock-master/column-settings");
+      const sorted = [...(data.columns || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      if (sorted.length) setColumns(sorted);
+      setIsAdmin(!!data.is_admin);
+    } catch (err) {
+      // Endpoint failure must NOT break the table — we silently keep DEFAULT_COLUMNS.
+      console.warn("Could not load column settings, using defaults:", err?.response?.status);
+    }
+  };
+
+  useEffect(() => { loadColumnSettings(); }, []);
+
   const load = async () => {
     setLoading(true);
     const requestSearch = search;
@@ -240,7 +261,7 @@ export default function StockMasterPage() {
     let cancelled = false;
     (async () => {
       const map = {};
-      for (const c of COLUMNS) {
+      for (const c of columns) {
         if (c.isImage) { map[c.key] = ["Has image", "No image"]; continue; }
         try {
           const res = await api.get(`/stock-master/distinct/${c.key}`);
@@ -252,13 +273,13 @@ export default function StockMasterPage() {
       if (!cancelled) setUniqueValues(map);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [columns]);
 
   // Refresh distinct values whenever items change (e.g. after add/edit/import) — debounced
   useEffect(() => {
     const t = setTimeout(async () => {
       const map = {};
-      for (const c of COLUMNS) {
+      for (const c of columns) {
         if (c.isImage) { map[c.key] = ["Has image", "No image"]; continue; }
         try {
           const res = await api.get(`/stock-master/distinct/${c.key}`);
@@ -270,7 +291,7 @@ export default function StockMasterPage() {
       setUniqueValues(map);
     }, 1500);
     return () => clearTimeout(t);
-  }, [total]);
+  }, [total, columns]);
 
   const itemHasImage = (row) => Array.isArray(row.images) && row.images.length > 0;
 
@@ -286,7 +307,7 @@ export default function StockMasterPage() {
     if (search !== loadedSearch) return [];
     const out = [];
     visibleItems.forEach((row, rowIdx) => {
-      COLUMNS.forEach((col) => {
+      columns.forEach((col) => {
         if (col.isImage) return;
         const val = row[col.key];
         if (val === null || val === undefined || val === "") return;
@@ -296,7 +317,7 @@ export default function StockMasterPage() {
       });
     });
     return out;
-  }, [visibleItems, search, loadedSearch]);
+  }, [visibleItems, search, loadedSearch, columns]);
 
   const currentMatch = matches[matchIdx] || null;
 
@@ -560,6 +581,19 @@ export default function StockMasterPage() {
     XLSX.writeFile(wb, filename);
   };
 
+  const saveColumnSettings = async (next) => {
+    try {
+      const { data } = await api.put("/stock-master/column-settings", { columns: next });
+      const sorted = [...(data.columns || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      setColumns(sorted);
+      toast.success("Column settings saved");
+      setColumnSettingsOpen(false);
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Could not save column settings");
+    }
+  };
+
+
  const exportFullStockMaster = async () => {
     setExportMenuOpen(false);
     setExporting(true);
@@ -610,6 +644,17 @@ export default function StockMasterPage() {
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
             <ArrowsClockwise size={16} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
+          {isAdmin && (
+            <Button
+              onClick={() => setColumnSettingsOpen(true)}
+              variant="outline"
+              className="rounded-sm border-slate-300"
+              data-testid="column-settings-button"
+              title="Reorder columns and adjust widths (admin only)"
+            >
+              <ArrowsLeftRight size={16} weight="bold" className="mr-2" /> Column Settings
+            </Button>
+          )}
           <Button onClick={downloadTemplate} variant="outline" className="rounded-sm border-slate-300" data-testid="download-template-button">
             <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
           </Button>
@@ -736,8 +781,8 @@ export default function StockMasterPage() {
           <thead>
             <tr>
               <th className={`${stickyTh} w-14`}>SL NO</th>
-              {COLUMNS.map((c) => (
-                <th key={c.key} className={stickyTh}>
+              {columns.map((c) => (
+                <th key={c.key} className={stickyTh} style={{ minWidth: c.width, maxWidth: c.width }}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -757,44 +802,70 @@ export default function StockMasterPage() {
               const isCurrentRow = !!(currentMatch && currentMatch.rowIdx === idx);
               const cellRef = (colKey) =>
                 isCurrentRow && currentMatch.colKey === colKey ? currentCellRef : null;
+              // Per-column cell renderer — keyed by the column.key so a reorder
+              // in `columns` automatically produces the cells in the new order.
+              const renderCell = (c) => {
+                if (c.isImage) {
+                  return (
+                    <td key={c.key} className={tdCls(idx, "images")} style={{ minWidth: c.width, maxWidth: c.width }}>
+                      {(() => {
+                        const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
+                        if (list.length === 0) {
+                          return (
+                            <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400" data-testid={`image-empty-${i.id}`}>
+                              <ImgIcon size={16} />
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="relative inline-flex items-center" data-testid={`image-cell-${i.id}`}>
+                            <AuthImage path={list[0]} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80" onClick={() => openViewer(i, 0)} testid={`image-thumb-${i.id}`} />
+                            {list.length > 1 && (
+                              <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm" data-testid={`image-count-${i.id}`}>+{list.length - 1}</span>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </td>
+                  );
+                }
+                // Per-key inner content + className. Keeps existing styling identical.
+                const tdStyle = { minWidth: c.width, maxWidth: c.width };
+                switch (c.key) {
+                  case "model":
+                    return <td key={c.key} ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")} style={tdStyle}>{i.model || "—"}</td>;
+                  case "part_no":
+                    return <td key={c.key} ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")} style={tdStyle}><PartNoLink partNo={i.part_no} make={i.make} /></td>;
+                  case "old_part_no":
+                    return <td key={c.key} ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.old_part_no || "—"}</td>;
+                  case "new_part_no":
+                    return <td key={c.key} ref={cellRef("new_part_no")} className={tdCls(idx, "new_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.new_part_no || "—"}</td>;
+                  case "make_part_no":
+                    return <td key={c.key} ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.make_part_no || "—"}</td>;
+                  case "description_1":
+                    return <td key={c.key} ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")} style={tdStyle}>{i.description_1 || "—"}</td>;
+                  case "description_2":
+                    return <td key={c.key} ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700 max-w-[200px] truncate")} style={tdStyle}>{i.description_2 || "—"}</td>;
+                  case "remarks_oem":
+                    return <td key={c.key} ref={cellRef("remarks_oem")} className={tdCls(idx, "remarks_oem", "text-slate-600 max-w-[180px] truncate")} style={tdStyle}>{i.remarks_oem || "—"}</td>;
+                  case "remarks_others":
+                    return <td key={c.key} ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600 max-w-[180px] truncate")} style={tdStyle}>{i.remarks_others || "—"}</td>;
+                  case "make":
+                    return <td key={c.key} ref={cellRef("make")} className={tdCls(idx, "make")} style={tdStyle}>{i.make}</td>;
+                  case "item_category":
+                    return <td key={c.key} ref={cellRef("item_category")} className={tdCls(idx, "item_category")} style={tdStyle}>{i.item_category || "—"}</td>;
+                  case "unit":
+                    return <td key={c.key} ref={cellRef("unit")} className={tdCls(idx, "unit", "font-mono text-slate-700")} style={tdStyle}>{i.unit || "—"}</td>;
+                  case "reorder_level":
+                    return <td key={c.key} ref={cellRef("reorder_level")} className={tdCls(idx, "reorder_level", "font-mono text-slate-700")} style={tdStyle}>{i.reorder_level || 0}</td>;
+                  default:
+                    return <td key={c.key} className={tdCls(idx, c.key)} style={tdStyle}>{i[c.key] ?? "—"}</td>;
+                }
+              };
               return (
                 <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
                   <td className={tdCls(idx, null, "font-mono text-slate-500")}>{idx + 1}</td>
-
-                  <td ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")}>{i.model || "—"}</td>
-                  <td ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")}><PartNoLink partNo={i.part_no} make={i.make} /></td>
-                  <td ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")}>{i.old_part_no || "—"}</td>
-                  <td ref={cellRef("new_part_no")} className={tdCls(idx, "new_part_no", "font-mono text-slate-600")}>{i.new_part_no || "—"}</td>
-                  <td ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")}>{i.make_part_no || "—"}</td>
-                  <td ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")}>{i.description_1 || "—"}</td>
-                  <td ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700 max-w-[200px] truncate")}>{i.description_2 || "—"}</td>
-                  <td ref={cellRef("remarks_oem")} className={tdCls(idx, "remarks_oem", "text-slate-600 max-w-[180px] truncate")}>{i.remarks_oem || "—"}</td>
-                  <td ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600 max-w-[180px] truncate")}>{i.remarks_others || "—"}</td>
-                  <td ref={cellRef("make")} className={tdCls(idx, "make")}>{i.make}</td>
-                  <td ref={cellRef("item_category")} className={tdCls(idx, "item_category")}>{i.item_category || "—"}</td>
-                  <td ref={cellRef("unit")} className={tdCls(idx, "unit", "font-mono text-slate-700")}>{i.unit || "—"}</td>
-                  <td ref={cellRef("reorder_level")} className={tdCls(idx, "reorder_level", "font-mono text-slate-700")}>{i.reorder_level || 0}</td>
-
-                  <td className={tdCls(idx, "images")}>
-                    {(() => {
-                      const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
-                      if (list.length === 0) {
-                        return (
-                          <div className="h-10 w-10 flex items-center justify-center bg-slate-50 border border-slate-200 rounded-sm text-slate-400" data-testid={`image-empty-${i.id}`}>
-                            <ImgIcon size={16} />
-                          </div>
-                        );
-                      }
-                      return (
-                        <div className="relative inline-flex items-center" data-testid={`image-cell-${i.id}`}>
-                          <AuthImage path={list[0]} alt="" className="h-10 w-10 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80" onClick={() => openViewer(i, 0)} testid={`image-thumb-${i.id}`} />
-                          {list.length > 1 && (
-                            <span className="ml-1 text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1 rounded-sm" data-testid={`image-count-${i.id}`}>+{list.length - 1}</span>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </td>
+                  {columns.map(renderCell)}
 
                   <td className={tdCls(idx, null, "text-right whitespace-nowrap")}>
                     <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
@@ -929,6 +1000,13 @@ export default function StockMasterPage() {
 
      <ImageViewerDialog open={!!viewer} images={viewer?.images || []} startIndex={viewer?.idx || 0} onClose={() => setViewer(null)} />
 
+      <ColumnSettingsDialog
+        open={columnSettingsOpen}
+        onOpenChange={setColumnSettingsOpen}
+        columns={columns}
+        onSave={saveColumnSettings}
+      />
+
       {exporting && (
         <Dialog open={true}>
           <DialogContent className="max-w-sm rounded-sm">
@@ -958,6 +1036,115 @@ export default function StockMasterPage() {
         </Dialog>
       )}
     </div>
+  );
+}
+
+function ColumnSettingsDialog({ open, onOpenChange, columns, onSave }) {
+  const [draft, setDraft] = React.useState([]);
+  const [saving, setSaving] = React.useState(false);
+
+  // Hydrate when the dialog opens
+  React.useEffect(() => {
+    if (open) {
+      const sorted = [...(columns || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      setDraft(sorted.map((c, i) => ({ ...c, order: c.isImage ? 99 : i + 1 })));
+    }
+  }, [open, columns]);
+
+  const movableIdxs = React.useMemo(() => draft.map((c, i) => (c.isImage ? -1 : i)).filter((i) => i >= 0), [draft]);
+
+  const move = (i, dir) => {
+    if (draft[i].isImage) return;
+    const subset = movableIdxs;
+    const pos = subset.indexOf(i);
+    const targetPos = pos + dir;
+    if (targetPos < 0 || targetPos >= subset.length) return;
+    const j = subset[targetPos];
+    const next = [...draft];
+    [next[i], next[j]] = [next[j], next[i]];
+    next.forEach((c, idx) => { c.order = c.isImage ? 99 : idx + 1; });
+    setDraft(next);
+  };
+
+  const setWidth = (i, raw) => {
+    const w = Math.max(60, Math.min(800, parseInt(raw, 10) || 60));
+    setDraft((prev) => prev.map((c, idx) => (idx === i ? { ...c, width: w } : c)));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try { await onSave(draft); } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl rounded-sm" data-testid="column-settings-dialog">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-black">Column Settings</DialogTitle>
+          <DialogDescription>Reorder columns and adjust widths. Saved settings apply to every user.</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto border border-slate-200 rounded-sm">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 sticky top-0">
+              <tr>
+                <th className="text-left px-3 py-2 w-24 text-[10px] font-bold uppercase tracking-wider text-slate-500">Order</th>
+                <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Column</th>
+                <th className="text-left px-3 py-2 w-32 text-[10px] font-bold uppercase tracking-wider text-slate-500">Width (px)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {draft.map((c, i) => (
+                <tr key={c.key} className="border-t border-slate-100" data-testid={`col-row-${c.key}`}>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-sm h-7 w-7 p-0"
+                        onClick={() => move(i, -1)}
+                        disabled={c.isImage || i === 0 || draft.slice(0, i).every((x) => x.isImage)}
+                        data-testid={`col-move-up-${c.key}`}
+                        title="Move up"
+                      >▲</Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-sm h-7 w-7 p-0"
+                        onClick={() => move(i, 1)}
+                        disabled={c.isImage || i === movableIdxs[movableIdxs.length - 1]}
+                        data-testid={`col-move-down-${c.key}`}
+                        title="Move down"
+                      >▼</Button>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className="text-sm font-semibold text-slate-800">{c.label}</span>
+                    {c.isImage && <span className="ml-2 text-[10px] uppercase tracking-wider text-slate-400">pinned last</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <Input
+                      type="number"
+                      min={60}
+                      max={800}
+                      value={c.width || 0}
+                      onChange={(e) => setWidth(i, e.target.value)}
+                      className="rounded-sm h-8 font-mono"
+                      data-testid={`col-width-${c.key}`}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex items-center justify-end gap-2 mt-4">
+          <Button variant="outline" className="rounded-sm" onClick={() => onOpenChange(false)} data-testid="col-cancel">Cancel</Button>
+          <Button className="rounded-sm bg-blue-700 hover:bg-blue-800" onClick={handleSave} disabled={saving} data-testid="col-save">
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -9,7 +9,7 @@ import io
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import bcrypt
 import jwt
@@ -1302,6 +1302,113 @@ async def export_stock_master(user=Depends(get_current_user)):
         ])
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return _csv_response(rows, TEMPLATE_COLUMNS, f"stock_master_export_{ts}.csv")
+
+
+# ============================================================================
+# STOCK MASTER COLUMN SETTINGS — admin-editable order + widths, persisted in
+# `column_settings` collection (page="stock_master"). All authed users may
+# READ; only admins may WRITE.
+# Routes are registered BEFORE /stock-master/{item_id} so the dynamic catch-all
+# does not shadow them (FastAPI matches in declaration order).
+# ============================================================================
+DEFAULT_STOCK_MASTER_COLUMNS = [
+    {"key": "model",          "label": "MODEL",          "width": 140, "order": 1,  "isNumeric": False, "isImage": False},
+    {"key": "part_no",        "label": "PART NO",        "width": 160, "order": 2,  "isNumeric": False, "isImage": False},
+    {"key": "old_part_no",    "label": "OLD PART NO",    "width": 160, "order": 3,  "isNumeric": False, "isImage": False},
+    {"key": "new_part_no",    "label": "NEW PART NO",    "width": 160, "order": 4,  "isNumeric": False, "isImage": False},
+    {"key": "make_part_no",   "label": "MAKE PART NO",   "width": 180, "order": 5,  "isNumeric": False, "isImage": False},
+    {"key": "description_1",  "label": "DESCRIPTION 1",  "width": 240, "order": 6,  "isNumeric": False, "isImage": False},
+    {"key": "description_2",  "label": "DESCRIPTION 2",  "width": 240, "order": 7,  "isNumeric": False, "isImage": False},
+    {"key": "remarks_oem",    "label": "OEM",            "width": 200, "order": 8,  "isNumeric": False, "isImage": False},
+    {"key": "remarks_others", "label": "REMARKS",        "width": 200, "order": 9,  "isNumeric": False, "isImage": False},
+    {"key": "make",           "label": "MAKE",           "width": 140, "order": 10, "isNumeric": False, "isImage": False},
+    {"key": "item_category",  "label": "ITEM CATEGORY",  "width": 160, "order": 11, "isNumeric": False, "isImage": False},
+    {"key": "unit",           "label": "UNIT",           "width": 100, "order": 12, "isNumeric": False, "isImage": False},
+    {"key": "reorder_level",  "label": "REORDER LEVEL",  "width": 130, "order": 13, "isNumeric": True,  "isImage": False},
+    {"key": "images",         "label": "IMAGES",         "width": 120, "order": 99, "isNumeric": False, "isImage": True},
+]
+
+
+class ColumnSettingsPayload(BaseModel):
+    columns: List[Dict[str, Any]]
+
+
+@api_router.get("/stock-master/column-settings")
+async def get_stock_master_column_settings(user=Depends(get_current_user)):
+    """Return the current persisted columns for the Stock Master table.
+    Falls back to DEFAULT_STOCK_MASTER_COLUMNS when no override has been saved.
+    `is_admin` lets the frontend decide whether to expose the settings dialog."""
+    doc = await db.column_settings.find_one({"page": "stock_master"}, {"_id": 0})
+    cols = (doc or {}).get("columns") or DEFAULT_STOCK_MASTER_COLUMNS
+    by_key = {c["key"]: c for c in cols}
+    merged = []
+    for d in DEFAULT_STOCK_MASTER_COLUMNS:
+        existing = by_key.get(d["key"])
+        if existing:
+            merged.append({
+                "key":       d["key"],
+                "label":     existing.get("label", d["label"]),
+                "width":     int(existing.get("width", d["width"]) or d["width"]),
+                "order":     int(existing.get("order", d["order"]) or d["order"]),
+                "isNumeric": bool(d["isNumeric"]),
+                "isImage":   bool(d["isImage"]),
+            })
+        else:
+            merged.append(d.copy())
+    for c in merged:
+        if c.get("isImage"):
+            c["order"] = 99
+    merged.sort(key=lambda c: c["order"])
+    return {"columns": merged, "is_admin": user.get("role") == "admin"}
+
+
+@api_router.put("/stock-master/column-settings")
+async def put_stock_master_column_settings(payload: ColumnSettingsPayload, user=Depends(get_current_user)):
+    """Persist new column order / widths. Admin only."""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can change column settings")
+    valid_keys = {c["key"] for c in DEFAULT_STOCK_MASTER_COLUMNS}
+    cleaned = []
+    for c in payload.columns:
+        key = c.get("key")
+        if key not in valid_keys:
+            continue
+        default = next((d for d in DEFAULT_STOCK_MASTER_COLUMNS if d["key"] == key), None)
+        if not default:
+            continue
+        try:
+            width = int(c.get("width") or default["width"])
+            order = int(c.get("order") if c.get("order") is not None else default["order"])
+        except (TypeError, ValueError):
+            width, order = default["width"], default["order"]
+        if default["isImage"]:
+            order = 99
+        width = max(60, min(800, width))
+        cleaned.append({
+            "key": key,
+            "label": (c.get("label") or default["label"]).strip() or default["label"],
+            "width": width,
+            "order": order,
+            "isNumeric": default["isNumeric"],
+            "isImage":   default["isImage"],
+        })
+    saved_keys = {c["key"] for c in cleaned}
+    next_order = (max((c["order"] for c in cleaned if c["order"] != 99), default=0) or 0) + 1
+    for d in DEFAULT_STOCK_MASTER_COLUMNS:
+        if d["key"] in saved_keys:
+            continue
+        added = d.copy()
+        if not added["isImage"]:
+            added["order"] = next_order
+            next_order += 1
+        cleaned.append(added)
+    cleaned.sort(key=lambda c: c["order"])
+    await db.column_settings.update_one(
+        {"page": "stock_master"},
+        {"$set": {"page": "stock_master", "columns": cleaned, "updated_at": now_iso(), "updated_by": user.get("email", "")}},
+        upsert=True,
+    )
+    return {"columns": cleaned, "is_admin": True}
 
 
 @api_router.get("/stock-master/{item_id}", response_model=StockMaster)
@@ -5542,6 +5649,9 @@ async def startup():
     await db.extra_received_notes.create_index("racking_status")
     await db.extra_received_notes.create_index("parent_rn_id")
     await db.extra_received_notes.create_index("parent_ern_id")
+
+    # ---- Stock Master column settings (admin-editable order/widths) ----
+    await db.column_settings.create_index("page", unique=True)
 
     # ---- Phase 2: counters self-heal ----
     # `_alloc_serial` reads/writes `db.counters` keyed by "{series}:{fy}". On first deploy after
