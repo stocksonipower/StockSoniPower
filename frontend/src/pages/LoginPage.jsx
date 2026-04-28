@@ -5,13 +5,13 @@ import { formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import { Package, SignIn } from "@phosphor-icons/react";
+import { SignIn } from "@phosphor-icons/react";
 
 export default function LoginPage() {
   const { login } = useAuth();
   const nav = useNavigate();
-  const [email, setEmail] = useState("admin@stockmgmt.com");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -30,87 +30,58 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2 bg-white" data-testid="login-page">
-      {/* Left: form */}
-      <div className="flex items-center justify-center px-6 sm:px-12 py-12">
-        <div className="w-full max-w-md">
-          <div className="flex items-center gap-3 mb-10">
-            <div className="h-10 w-10 bg-slate-900 flex items-center justify-center rounded-sm">
-              <Package size={22} weight="bold" className="text-white" />
-            </div>
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.2em] font-bold text-slate-500">Stock Master</div>
-              <div className="font-bold text-slate-900">Warehouse Control</div>
-            </div>
-          </div>
-
-          <h1 className="text-4xl font-black tracking-tight text-slate-900 mb-2">Sign In</h1>
-          <p className="text-sm text-slate-600 mb-8">Enter your credentials to access the inventory system.</p>
-
-          <form onSubmit={submit} className="space-y-5">
-            <div>
-              <Label htmlFor="email" className="label-sm">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="mt-2 rounded-sm border-slate-300 focus-visible:ring-blue-700"
-                required
-                data-testid="login-email-input"
-              />
-            </div>
-            <div>
-              <Label htmlFor="password" className="label-sm">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="mt-2 rounded-sm border-slate-300 focus-visible:ring-blue-700"
-                required
-                data-testid="login-password-input"
-              />
-            </div>
-            {error && (
-              <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-sm" data-testid="login-error">
-                {error}
-              </div>
-            )}
-            <Button
-              type="submit"
-              disabled={loading}
-              className="w-full rounded-sm bg-blue-700 hover:bg-blue-800 text-white font-semibold h-11"
-              data-testid="login-submit-button"
-            >
-              <SignIn size={18} weight="bold" className="mr-2" />
-              {loading ? "Signing in…" : "Sign In"}
-            </Button>
-          </form>
-
-          <div className="mt-10 p-4 bg-slate-50 border border-slate-200 rounded-sm">
-            <div className="label-sm mb-1">Need access?</div>
-            <div className="text-xs text-slate-600">Accounts are created by your administrator. Contact them for credentials.</div>
-          </div>
+    <div className="min-h-screen flex items-center justify-center bg-slate-50" data-testid="login-page">
+      <div className="w-full max-w-md bg-white border border-slate-200 rounded-sm p-8 shadow-sm">
+        <div className="mb-8 text-center">
+          <img src="/logo.png" alt="Soni Power" className="h-16 w-auto mx-auto mb-4" />
+          <h1 className="text-2xl font-black tracking-tight text-slate-900">Sign In</h1>
         </div>
-      </div>
 
-      {/* Right: warehouse image */}
-      <div
-        className="hidden lg:block relative bg-cover bg-center"
-        style={{
-          backgroundImage:
-            "url('https://images.pexels.com/photos/14554082/pexels-photo-14554082.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940')",
-        }}
-      >
-        <div className="absolute inset-0 bg-slate-900/50" />
-        <div className="absolute bottom-0 left-0 right-0 p-12 text-white">
-          <div className="text-[11px] uppercase tracking-[0.25em] font-bold text-blue-200 mb-3">
-            Precision Inventory
+        <form onSubmit={submit} className="space-y-5">
+          <div>
+            <Label htmlFor="email" className="label-sm">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Enter your email"
+              className="mt-2 rounded-sm border-slate-300 focus-visible:ring-blue-700"
+              required
+              data-testid="login-email-input"
+            />
           </div>
-          <div className="text-3xl font-black tracking-tight max-w-md leading-tight">
-            Every part, every rack, every box — accounted for.
+          <div>
+            <Label htmlFor="password" className="label-sm">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              className="mt-2 rounded-sm border-slate-300 focus-visible:ring-blue-700"
+              required
+              data-testid="login-password-input"
+            />
           </div>
+          {error && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-sm" data-testid="login-error">
+              {error}
+            </div>
+          )}
+          <Button
+            type="submit"
+            disabled={loading}
+            className="w-full rounded-sm bg-blue-700 hover:bg-blue-800 text-white font-semibold h-11"
+            data-testid="login-submit-button"
+          >
+            <SignIn size={18} weight="bold" className="mr-2" />
+            {loading ? "Signing in…" : "Sign In"}
+          </Button>
+        </form>
+
+        <div className="mt-6 text-center">
+          <p className="text-xs text-slate-500">Contact Admin for access</p>
         </div>
       </div>
     </div>
