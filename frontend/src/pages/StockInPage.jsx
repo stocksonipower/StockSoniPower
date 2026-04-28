@@ -664,7 +664,8 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       }
       setMasterDialog({ rowIdx: i, part_no: row.part_no.trim() });
     } else {
-      updateItem(i, { make: value });
+      // Picking a make that already exists in the master list clears the masterMissing flag.
+      updateItem(i, { make: value, masterMissing: false });
       const row = items[i];
       fetchDescription(i, row.part_no.trim(), value);
     }
@@ -674,10 +675,26 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     if (masterDialog == null) return;
     const i = masterDialog.rowIdx;
     setItems((prev) => prev.map((r, idx) => idx === i
-      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "" }
+      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "", masterMissing: false }
       : r));
     setMasterDialog(null);
     toast.success(`Master created: ${newItem.part_no} / ${newItem.make}`);
+  };
+
+  /* ---- Excel template download ---- */
+  const handleDownloadTemplate = () => {
+    // Template columns match handleExcelImport's header parser (case-/separator-insensitive).
+    // Include 2 hint rows showing a generic example + an empty row the user can fill in.
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["Part No", "Invoice Qty", "Received Qty", "Make"],
+      ["EXAMPLE-001", 10, 10, "ACME"],
+      ["", "", "", ""],
+    ]);
+    ws["!cols"] = [{ wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 16 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Receipt Note Template");
+    XLSX.writeFile(wb, "Receipt_Note_Template.xlsx");
+    toast.success("Template downloaded");
   };
 
   /* ---- Excel import ---- */
@@ -738,13 +755,17 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                 if (r.part_no !== row.part_no) return r;
                 const merged = r.make && !list.includes(r.make) ? [...list, r.make] : list;
                 const auto = r.make || (list.length === 1 ? list[0] : "");
-                return { ...r, makes: merged, partLooked: true, make: auto };
+                // masterMissing: row has a make from Excel that's NOT in the master's make list,
+                // OR part_no has no masters at all. The user must create a master via "+ Create New Make".
+                const makeToCheck = auto || r.make;
+                const masterMissing = makeToCheck ? !list.includes(makeToCheck) : list.length === 0;
+                return { ...r, makes: merged, partLooked: true, make: auto, masterMissing };
               }));
               // Fetch description for any auto-resolved make
               setTimeout(() => {
                 setItems((cur) => {
                   cur.forEach((r, idx) => {
-                    if (r.part_no === row.part_no && r.make && !r.description_1) {
+                    if (r.part_no === row.part_no && r.make && !r.description_1 && !r.masterMissing) {
                       api.get("/stock-master/lookup/item", { params: { part_no: r.part_no, make: r.make } })
                         .then(({ data: m }) => {
                           setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "" } : rr));
@@ -754,7 +775,10 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                   return cur;
                 });
               }, 0);
-            }).catch(() => {});
+            }).catch(() => {
+              // Lookup itself failed — flag the row as master-missing so user is prompted.
+              setItems((prev) => prev.map((r) => r.part_no === row.part_no ? { ...r, partLooked: true, masterMissing: true } : r));
+            });
         }, 0);
       });
       toast.success(`Imported ${newRows.length} row${newRows.length > 1 ? "s" : ""} from Excel`);
@@ -895,36 +919,12 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               <Printer size={14} weight="bold" className="mr-2" /> Print
             </Button>
           )}
-          {!isFinalEdit && (
-            <Button
-              ref={draftBtnRef}
-              onClick={saveDraft}
-              disabled={savingDraft || savingFinal}
-              variant="outline"
-              className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
-              data-testid="rn-save-draft-button"
-            >
-              <FloppyDisk size={14} weight="bold" className="mr-2" />
-              {savingDraft ? "Saving…" : "Save as Draft"}
-            </Button>
-          )}
-          <Button
-            ref={finalBtnRef}
-            onClick={saveFinal}
-            disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
-            className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
-            data-testid="rn-save-final-button"
-            title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
-          >
-            <CheckCircle size={14} weight="bold" className="mr-2" />
-            {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}
-          </Button>
         </div>
       </div>
 
       {/* HEADER */}
       <div className="bg-white border border-slate-200 rounded-sm p-6 space-y-4">
-        {/* Stock-in type radio */}
+        {/* Stock-in type radio — both radios are tabbable; Enter selects. */}
         <div className="flex items-center gap-6 flex-wrap">
           <Label className="label-sm">Stock In Type</Label>
           <label className="flex items-center gap-2 cursor-pointer" data-testid="rn-stock-in-type-invoice">
@@ -934,7 +934,9 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               value="INVOICE"
               checked={stockInType === "INVOICE"}
               onChange={() => setStockInType("INVOICE")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStockInType("INVOICE"); } }}
               disabled={isFinalEdit}
+              tabIndex={isFinalEdit ? -1 : 0}
               className="accent-blue-700"
             />
             <span className="text-sm font-semibold text-slate-700">
@@ -948,7 +950,9 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               value="GENERAL"
               checked={stockInType === "GENERAL"}
               onChange={() => setStockInType("GENERAL")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStockInType("GENERAL"); } }}
               disabled={isFinalEdit}
+              tabIndex={isFinalEdit ? -1 : 0}
               className="accent-blue-700"
             />
             <span className="text-sm font-semibold text-slate-700">
@@ -1046,6 +1050,15 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             >
               <UploadSimple size={14} weight="bold" className="mr-1" /> Import Excel
             </Button>
+            <Button
+              onClick={handleDownloadTemplate}
+              variant="outline"
+              className="rounded-sm"
+              data-testid="rn-excel-template-button"
+              title="Download an empty Excel template (Part No, Invoice Qty, Received Qty, Make)"
+            >
+              <DownloadSimple size={14} weight="bold" className="mr-1" /> Download Template
+            </Button>
             <Input
               type="number"
               min="1"
@@ -1093,8 +1106,17 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                 // In GENERAL mode the displayed invoice qty mirrors received_qty (read-only).
                 const displayedInvoice = isGeneral ? (it.received_qty || "") : it.invoice_qty;
 
+                // Import flagged this row as master-missing: (part_no, make) combo not found in stock_master.
+                const missingMaster = !!it.masterMissing;
+                const rowCls = missingMaster ? "ring-2 ring-red-400 ring-inset bg-red-50/40" : "";
+
                 return (
-                  <tr key={idx} data-testid={`rn-item-row-${idx}`}>
+                  <tr
+                    key={idx}
+                    data-testid={`rn-item-row-${idx}`}
+                    className={rowCls}
+                    title={missingMaster ? "Master not found for this Part No / Make. Use the Make dropdown → + Create New Make to create it." : undefined}
+                  >
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td>
                       <Input
@@ -1184,6 +1206,34 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             </div>
           </div>
         )}
+
+        {/* SAVE BUTTONS — placed below items, right-aligned. Tab from last-row Make lands here. */}
+        <div className="flex items-center justify-end gap-2 p-4 border-t border-slate-200 bg-slate-50">
+          {!isFinalEdit && (
+            <Button
+              ref={draftBtnRef}
+              onClick={saveDraft}
+              disabled={savingDraft || savingFinal}
+              variant="outline"
+              className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+              data-testid="rn-save-draft-button"
+            >
+              <FloppyDisk size={14} weight="bold" className="mr-2" />
+              {savingDraft ? "Saving…" : "Save as Draft"}
+            </Button>
+          )}
+          <Button
+            ref={finalBtnRef}
+            onClick={saveFinal}
+            disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
+            className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+            data-testid="rn-save-final-button"
+            title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
+          >
+            <CheckCircle size={14} weight="bold" className="mr-2" />
+            {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}
+          </Button>
+        </div>
       </div>
 
       <CreateMasterDialog
