@@ -187,18 +187,19 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/receipt-notes", { params: { page, page_size: PAGE_SIZE } });
+            const res = await api.get("/receipt-notes", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
+  }, [page, search]);
 
-  useEffect(() => { load(); }, [load, reloadKey]);
+    useEffect(() => { load(); }, [load, reloadKey, search]);
 
   const handleDelete = async (rn) => {
     if (!window.confirm(`Delete Receipt Note ${rn.rn_no}?\n\nThis cannot be undone.`)) return;
@@ -248,6 +249,13 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
           {total === 0 ? "No receipt notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> receipt notes</>}
         </div>
         <div className="flex items-center gap-2">
+<Input
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search RN no, invoice, dates, part no..."
+            className="rounded-sm font-mono h-9 w-80"
+            data-testid="rn-search-input"
+          />
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rn-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>

@@ -2303,9 +2303,20 @@ async def list_receipt_notes(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"rn_no": {"$regex": s, "$options": "i"}},
+            {"invoice_no": {"$regex": s, "$options": "i"}},
+            {"rn_date": {"$regex": s, "$options": "i"}},
+            {"invoice_date": {"$regex": s, "$options": "i"}},
+            {"goods_received_date": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     # Allow comma-separated lists for both filters
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
@@ -2391,7 +2402,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
             "quantity": qty_legacy,
         })
 
-        update = {
+    update = {
         "stock_in_type": payload.stock_in_type,
         "invoice_no": (payload.invoice_no or "").strip(),
         "invoice_date": (payload.invoice_date or "").strip(),
