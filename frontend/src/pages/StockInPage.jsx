@@ -22,7 +22,8 @@ import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import PartNoLink from "../components/PartNoLink";
 import { useAuth } from "../lib/auth";
-import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
+import ExcelColumnFilter from "../components/ExcelColumnFilter";
+import useExcelTableFilter from "../components/useExcelTableFilter";
 import { exportToExcel } from "../lib/exportExcel";
 
 /* ==============================================================
@@ -247,82 +248,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   ], []);
 
   // colFilters: { [colKey]: Set<string of allowed values> } | sort: { key, dir } | null
-  const [colFilters, setColFilters] = useState({});
-  const [sort, setSort] = useState(null);
-
-  // Unique values per column (computed from currently loaded rows)
-  const uniqueValues = useMemo(() => {
-    const map = {};
-    columns.forEach((c) => {
-      const seen = new Set();
-      rows.forEach((r) => {
-        const raw = c.value(r);
-        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-        seen.add(v);
-      });
-      map[c.key] = [...seen].sort((a, b) => {
-        if (a === BLANK) return 1;
-        if (b === BLANK) return -1;
-        const na = Number(a), nb = Number(b);
-        if (!isNaN(na) && !isNaN(nb)) return na - nb;
-        return a.localeCompare(b);
-      });
-    });
-    return map;
-  }, [rows, columns]);
-
-  const filteredRows = useMemo(() => {
-    const activeKeys = Object.keys(colFilters);
-    let out = rows;
-    if (activeKeys.length > 0) {
-      out = rows.filter((row) => activeKeys.every((k) => {
-        const allowed = colFilters[k];
-        if (!allowed || allowed.size === 0) return true;
-        const col = columns.find((c) => c.key === k);
-        if (!col) return true;
-        const raw = col.value(row);
-        const v = raw === null || raw === undefined || raw === "" ? BLANK : String(raw);
-        return allowed.has(v);
-      }));
-    }
-    if (sort && sort.key) {
-      const col = columns.find((c) => c.key === sort.key);
-      if (col) {
-        const dir = sort.dir === "desc" ? -1 : 1;
-        out = [...out].sort((a, b) => {
-          const av = col.value(a);
-          const bv = col.value(b);
-          if (col.isNumeric) {
-            const an = parseFloat(av);
-            const bn = parseFloat(bv);
-            const aNa = isNaN(an), bNa = isNaN(bn);
-            if (aNa && bNa) return 0;
-            if (aNa) return 1;
-            if (bNa) return -1;
-            return (an - bn) * dir;
-          }
-          const as = av === null || av === undefined ? "" : String(av);
-          const bs = bv === null || bv === undefined ? "" : String(bv);
-          return as.localeCompare(bs, undefined, { numeric: true, sensitivity: "base" }) * dir;
-        });
-      }
-    }
-    return out;
-  }, [rows, columns, colFilters, sort]);
-
-  const setColFilter = (key, allowedSet) => {
-    setColFilters((f) => {
-      const next = { ...f };
-      if (!allowedSet || allowedSet.size === 0) delete next[key];
-      else next[key] = allowedSet;
-      return next;
-    });
-  };
-
-  const setColumnSort = (key, dir) => {
-    if (!dir) setSort((s) => (s && s.key === key ? null : s));
-    else setSort({ key, dir });
-  };
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -1602,6 +1530,30 @@ function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
     return (r.items || []).reduce((acc, it) => acc + (parseFloat(it.extra_qty) || 0), 0);
   };
 
+  const columns = useMemo(() => {
+    const cols = [
+      { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
+      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
+      { key: "rn_date", label: "RN DATE", value: (r) => fmtDate(r.parent_rn_date) },
+      { key: "rn_no", label: "RN NO", value: (r) => r.parent_rn_no || "" },
+      { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+      { key: "qty_total", label: isSrn ? "TOTAL SHORT QTY" : "TOTAL EXTRA QTY", value: sumQty, isQty: true, isNumeric: true },
+    ];
+    if (isSrn) {
+      cols.push({ key: "fulfillment_date", label: "FULFILMENT DATE", value: (r) => r.fulfillment_date ? fmtDate(r.fulfillment_date) : "" });
+    }
+    cols.push(
+      { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+      { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
+    );
+    return cols;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSrn, noun, dateField, idField]);
+
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
+
   return (
     <div className="mt-4" data-testid={`${kind}-list-view`}>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
@@ -1622,20 +1574,25 @@ function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <th>{noun} DATE</th>
-              <th>{noun} NO</th>
-              <th>RN DATE</th>
-              <th>RN NO</th>
-              <th className="text-right">ITEMS</th>
-              <th className="text-right">{isSrn ? "TOTAL SHORT QTY" : "TOTAL EXTRA QTY"}</th>
-              {isSrn && <th>FULFILMENT DATE</th>}
-              <th>ASSIGNED TO</th>
-              <th>STATUS</th>
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="w-28">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => {
+            {filteredRows.map((r, idx) => {
               const meta = statusMeta(r.status);
               const canEdit = isSrn ? r.status !== "FULLY_RECEIVED" : r.status !== "COMPLETE";
               return (
@@ -1688,8 +1645,8 @@ function ChildList({ kind, reloadKey, onOpen, onEdit, onChanged }) {
                 </tr>
               );
             })}
-            {rows.length === 0 && (
-              <tr><td colSpan={isSrn ? 11 : 10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.`}</td></tr>
+            {filteredRows.length === 0 && (
+              <tr><td colSpan={isSrn ? 11 : 10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.` : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

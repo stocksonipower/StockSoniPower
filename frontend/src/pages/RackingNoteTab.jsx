@@ -17,7 +17,8 @@ import {
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
-import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import ExcelColumnFilter from "../components/ExcelColumnFilter";
+import useExcelTableFilter from "../components/useExcelTableFilter";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
@@ -124,16 +125,18 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
   };
 
   const columns = useMemo(() => [
-    { key: "rkn_date", label: "Racking Note Date", value: (r) => fmtDate(r.rkn_date) },
-    { key: "rkn_no", label: "Racking Note No", value: (r) => r.rkn_no || "" },
-    { key: "rn_date", label: "Receipt Note Date", value: (r) => fmtDate(r.receipt_note_date) },
-    { key: "rn_no", label: "Receipt Note No", value: (r) => r.receipt_note_no || "" },
-    { key: "items_count", label: "Items Total", value: (r) => (r.items || []).length },
-    { key: "qty_total", label: "Quantity Total", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
-    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
+    { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
+    { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
+    { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
+    { key: "items_count", label: "ITEMS TOTAL", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "qty_total", label: "QUANTITY TOTAL", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
   ], []);
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -168,14 +171,20 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("rkn_date")} label="RACKING NOTE DATE" testid="rkn-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("rkn_no")} label="RACKING NOTE NO" testid="rkn-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rkn-col-rn-date" />
-              <ColumnHeader {...getColumnHeaderProps("rn_no")} label="RECEIPT NOTE NO" testid="rkn-col-rn-no" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS TOTAL" testid="rkn-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QUANTITY TOTAL" testid="rkn-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rkn-col-assigned" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="rkn-col-status" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
