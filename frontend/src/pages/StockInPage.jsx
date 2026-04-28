@@ -188,6 +188,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -200,6 +201,19 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   }, [page, search]);
 
     useEffect(() => { load(); }, [load, reloadKey, search]);
+// Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
 
   const handleDelete = async (rn) => {
     if (!window.confirm(`Delete Receipt Note ${rn.rn_no}?\n\nThis cannot be undone.`)) return;
@@ -250,6 +264,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
         </div>
         <div className="flex items-center gap-2">
 <Input
+            ref={searchInputRef}     
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
             placeholder="Search RN no, invoice, dates, part no..."
