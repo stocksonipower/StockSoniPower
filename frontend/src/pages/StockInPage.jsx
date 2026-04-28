@@ -226,8 +226,8 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     { key: "goods_received_date", label: "Goods Received Date", value: (r) => fmtDate(r.goods_received_date) },
     { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
     { key: "total_qty", label: "Total Quantity", value: totalQtyOf },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
     { key: "status", label: "Status", value: (r) => statusMeta(r.status).label },
+    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
   ], []);
 
   const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
@@ -260,9 +260,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
+      <div className="bg-white border border-slate-200 rounded-sm overflow-auto" style={{ maxHeight: "70vh" }}>
         <table className="data-table w-full">
-          <thead>
+          <thead className="sticky top-0 z-10 bg-slate-50">
             <tr>
               <th className="w-14">SL NO</th>
               <ColumnHeader {...getColumnHeaderProps("rn_date")} label="RECEIPT NOTE DATE" testid="rn-col-date" />
@@ -273,8 +273,8 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               <ColumnHeader {...getColumnHeaderProps("goods_received_date")} label="GOODS RCVD DATE" testid="rn-col-grd" />
               <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="rn-col-items" />
               <ColumnHeader {...getColumnHeaderProps("total_qty")} align="right" label="TOTAL QUANTITY" testid="rn-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rn-col-assigned" />
               <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="rn-col-status" />
+              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="rn-col-assigned" />
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
@@ -323,13 +323,13 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
-                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`rn-assignee-${r.rn_no}`} />
-                  </td>
-                  <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sm.cls}`}
                       data-testid={`rn-status-${r.rn_no}`}>
                       {sm.label}
                     </span>
+                  </td>
+                  <td>
+                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`rn-assignee-${r.rn_no}`} />
                   </td>
                   <td className="text-right whitespace-nowrap">
                     <button
@@ -428,11 +428,11 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
                   <tr>
                     <th className="w-14">SL NO</th>
                     <th>PART NO</th>
-                    <th>MAKE</th>
                     <th>DESCRIPTION 1</th>
                     <th className="text-right">INVOICE QTY</th>
                     <th className="text-right">RECEIVED QTY</th>
                     <th className="text-right">QTY DIFF</th>
+                    <th>MAKE</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -443,13 +443,13 @@ function ReceiptNoteDetailDialog({ rn, onClose }) {
                       <tr key={idx}>
                         <td className="font-mono text-slate-500">{idx + 1}</td>
                         <td className="font-mono font-semibold">{it.part_no}</td>
-                        <td>{it.make}</td>
                         <td className="text-slate-700">{it.description_1 || "—"}</td>
                         <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
                         <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
                         <td className={`text-right font-mono font-bold ${diffCls}`}>
                           {toNum(it.received_qty) == null ? "—" : (diff > 0 ? `+${diff}` : diff)}
                         </td>
+                        <td>{it.make}</td>
                       </tr>
                     );
                   })}
@@ -487,11 +487,11 @@ function printReceiptNote(rn) {
     return `<tr>
       <td>${idx + 1}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
-      <td>${escapeHtml(it.make || "")}</td>
       <td>${escapeHtml(it.description_1 || "—")}</td>
       <td style="text-align:right">${inv}</td>
       <td style="text-align:right">${rec ?? "—"}</td>
       <td style="text-align:right">${diffStr}</td>
+      <td>${escapeHtml(it.make || "")}</td>
     </tr>`;
   }).join("");
 
@@ -535,10 +535,11 @@ function printReceiptNote(rn) {
   <div class="muted" style="margin-top:24px;">Items (${(rn.items || []).length})</div>
   <table>
     <thead><tr>
-      <th>Sl No</th><th>Part No</th><th>Make</th><th>Description 1</th>
+      <th>Sl No</th><th>Part No</th><th>Description 1</th>
       <th style="text-align:right">Invoice Qty</th>
       <th style="text-align:right">Received Qty</th>
       <th style="text-align:right">Qty Diff</th>
+      <th>Make</th>
     </tr></thead>
     <tbody>${items}</tbody>
   </table>
