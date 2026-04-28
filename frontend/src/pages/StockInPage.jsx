@@ -14,8 +14,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs"
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, Stack,
-  DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning, Eye,
+  Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, PencilSimple, Stack,
+  DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning, Eye, X,
   Receipt, Package as PackageIcon,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
@@ -1749,14 +1749,15 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
         {list.map((c, i) => {
           const childNo = c.child_srn_no || c.child_ern_no;
           const childId = c.child_srn_id || c.child_ern_id;
-          const qty = isSrn ? c.short_qty : c.extra_qty;
+          const qty = isSrn ? c.fulfilled_qty : c.accepted_qty;
+          const date = isSrn ? c.fulfilled_date : c.accepted_date;
           return (
             <button
               key={i}
               type="button"
               onClick={() => onOpen?.(childId, isSrn ? "srn" : "ern")}
               className="font-mono text-blue-700 hover:underline text-[11px]"
-              title={`${childNo} · qty ${qty}`}
+              title={`${childNo} · qty ${qty}${date ? ` · ${date}` : ""}`}
               data-testid={`${kind}-child-${childNo}`}
             >
               {childNo}
@@ -1822,7 +1823,14 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
               {(doc.items || []).map((it, idx) => {
                 if (isSrn) {
                   const shortQ = parseFloat(it.short_qty) || 0;
-                  const ful = it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0);
+                  // In the new slice model, fulfilled is the sum across children;
+                  // legacy SRNs (or child SRNs) still have it.fulfilled_qty.
+                  const childFilled = (it.children || []).reduce(
+                    (s, c) => s + (parseFloat(c.fulfilled_qty) || 0), 0,
+                  );
+                  const ful = childFilled > 0
+                    ? childFilled
+                    : (it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0));
                   const pending = ful == null ? shortQ : (shortQ - ful);
                   return (
                     <tr key={idx}>
@@ -1840,7 +1848,12 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                   );
                 }
                 const extraQ = parseFloat(it.extra_qty) || 0;
-                const acc = it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0);
+                const childAccepted = (it.children || []).reduce(
+                  (s, c) => s + (parseFloat(c.accepted_qty) || 0), 0,
+                );
+                const acc = childAccepted > 0
+                  ? childAccepted
+                  : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
                 const rej = it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0);
                 const undecided = extraQ - (acc || 0) - (rej || 0);
                 return (
@@ -1868,89 +1881,95 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
 }
 
 /** SRN finalize/edit form — user enters fulfilled_qty per row + fulfillment_date. */
-function SrnFinalizeForm({ srn, onCancel, onSaved }) {
-  const [items, setItems] = useState(() => (srn.items || []).map((it) => ({
-    part_no: it.part_no,
-    make: it.make,
-    description_1: it.description_1 || "",
-    invoice_qty: parseFloat(it.invoice_qty) || 0,
-    received_qty: parseFloat(it.received_qty) || 0,
-    short_qty: parseFloat(it.short_qty) || 0,
-    fulfilled_qty: it.fulfilled_qty == null ? "" : it.fulfilled_qty,
-  })));
-  const [fulfillmentDate, setFulfillmentDate] = useState(srn.fulfillment_date || todayISO());
-  const [savingDraft, setSavingDraft] = useState(false);
-  const [savingFinal, setSavingFinal] = useState(false);
-  const finalBtnRef = useRef(null);
+function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
+  // Re-fetch the parent on every save so children[] stays current.
+  const [parent, setParent] = useState(initialSrn);
+  // Per-item draft input: { [itemIdx]: { fulfilled_qty, fulfillment_date } }
+  const [drafts, setDrafts] = useState({});
+  const [editingChild, setEditingChild] = useState(null);     // {itemIdx, child_srn_id, fulfilled_qty, fulfilled_date}
+  const [busy, setBusy] = useState(false);
 
-  const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
-
-  const buildPayload = () => ({
-    fulfillment_date: fulfillmentDate || "",
-    items: items.map((it) => ({
-      part_no: it.part_no,
-      make: it.make,
-      fulfilled_qty: it.fulfilled_qty === "" ? null : (parseFloat(it.fulfilled_qty) || 0),
-    })),
-  });
-
-  const validate = () => {
-    if (fulfillmentDate && fulfillmentDate > todayISO()) {
-      toast.error("Fulfilment Date cannot be in the future"); return false;
-    }
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      const f = it.fulfilled_qty === "" ? null : parseFloat(it.fulfilled_qty);
-      if (f != null) {
-        if (isNaN(f) || f < 0) { toast.error(`Row ${i + 1}: Fulfilled Qty must be ≥ 0`); return false; }
-        if (f > it.short_qty + 1e-6) { toast.error(`Row ${i + 1}: Fulfilled Qty (${f}) cannot exceed Short Qty (${it.short_qty})`); return false; }
-      }
-    }
-    return true;
-  };
-
-  const saveDraft = async () => {
-    if (!validate()) return;
-    setSavingDraft(true);
+  const reload = async () => {
     try {
-      await api.put(`/short-received-notes/${srn.id}`, buildPayload());
-      toast.success(`${srn.srn_no} saved`);
-      onSaved();
+      const { data } = await api.get(`/short-received-notes/${parent.id}`);
+      setParent(data);
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
-    } finally { setSavingDraft(false); }
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not reload");
+    }
   };
 
-  const saveFinal = async () => {
-    if (!validate()) return;
-    // Require every row to have fulfilled_qty filled (>= 0; 0 is allowed → child SRN takes over)
-    for (let i = 0; i < items.length; i++) {
-      const f = items[i].fulfilled_qty;
-      if (f === "" || f == null) {
-        toast.error(`Row ${i + 1}: Fulfilled Qty is required for Final Save (use 0 if nothing arrived for this row)`);
-        return;
-      }
+  const setDraft = (idx, patch) =>
+    setDrafts((d) => ({ ...d, [idx]: { ...(d[idx] || {}), ...patch } }));
+
+  const remainingFor = (it) => {
+    const filled = (it.children || []).reduce(
+      (s, c) => s + (parseFloat(c.fulfilled_qty) || 0), 0,
+    );
+    return (parseFloat(it.short_qty) || 0) - filled;
+  };
+
+  const saveSlice = async (idx) => {
+    const it = parent.items[idx];
+    const d = drafts[idx] || {};
+    const qty = parseFloat(d.fulfilled_qty);
+    if (!qty || qty <= 0) {
+      toast.error(`Row ${idx + 1}: enter a Fulfilled Qty > 0`); return;
     }
-    setSavingFinal(true);
+    const remain = remainingFor(it);
+    if (qty > remain + 1e-6) {
+      toast.error(`Row ${idx + 1}: exceeds remaining short (${remain.toFixed(2)})`);
+      return;
+    }
+    const date = d.fulfillment_date || todayISO();
+    if (date > todayISO()) { toast.error("Fulfilment Date cannot be in the future"); return; }
+    setBusy(true);
     try {
-      // Save the qty + date first
-      await api.put(`/short-received-notes/${srn.id}`, buildPayload());
-      // Then finalize (auto-creates child SRN if any row's fulfilled < short)
-      const { data } = await api.post(`/short-received-notes/${srn.id}/finalize`);
-      toast.success(`${srn.srn_no} finalized · ${statusMeta(data.status).label}`);
-      onSaved();
+      await api.post(`/short-received-notes/${parent.id}/fulfill`, {
+        part_no: it.part_no, make: it.make,
+        fulfilled_qty: qty, fulfillment_date: date,
+      });
+      toast.success(`Slice saved · child SRN created`);
+      setDrafts((d2) => ({ ...d2, [idx]: { fulfilled_qty: "", fulfillment_date: "" } }));
+      await reload();
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize");
-    } finally { setSavingFinal(false); }
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save slice");
+    } finally { setBusy(false); }
   };
 
-  const handleLastRowKey = (e, isLastRow) => {
-    if (!isLastRow) return;
-    if (e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      finalBtnRef.current?.focus();
-    }
+  const editSlice = async () => {
+    if (!editingChild) return;
+    const { itemIdx, child_srn_id, fulfilled_qty, fulfilled_date } = editingChild;
+    const it = parent.items[itemIdx];
+    const qty = parseFloat(fulfilled_qty);
+    if (!qty || qty <= 0) { toast.error("Fulfilled Qty must be > 0"); return; }
+    setBusy(true);
+    try {
+      await api.put(
+        `/short-received-notes/${parent.id}/children/${child_srn_id}`,
+        { part_no: it.part_no, make: it.make,
+          fulfilled_qty: qty, fulfillment_date: fulfilled_date || todayISO() },
+      );
+      toast.success("Slice updated");
+      setEditingChild(null);
+      await reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
+    } finally { setBusy(false); }
   };
+
+  const deleteSlice = async (childId) => {
+    if (!window.confirm("Delete this fulfillment slice?")) return;
+    setBusy(true);
+    try {
+      await api.delete(`/short-received-notes/${parent.id}/children/${childId}`);
+      toast.success("Slice deleted");
+      await reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
+    } finally { setBusy(false); }
+  };
+
+  const meta = statusMeta(parent.status);
 
   return (
     <div className="mt-4 space-y-6" data-testid="srn-finalize-view">
@@ -1958,191 +1977,287 @@ function SrnFinalizeForm({ srn, onCancel, onSaved }) {
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="srn-back">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={saveDraft}
-            disabled={savingDraft || savingFinal}
-            variant="outline"
-            className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
-            data-testid="srn-save-draft"
-          >
-            <FloppyDisk size={14} weight="bold" className="mr-2" />
-            {savingDraft ? "Saving…" : "Save"}
-          </Button>
-          <Button
-            ref={finalBtnRef}
-            onClick={saveFinal}
-            disabled={savingDraft || savingFinal}
-            className="rounded-sm bg-blue-700 hover:bg-blue-800"
-            data-testid="srn-save-final"
-            title="Final Save · creates child SRN for any residual shortfall"
-          >
-            <CheckCircle size={14} weight="bold" className="mr-2" />
-            {savingFinal ? "Saving…" : "Save Final"}
-          </Button>
-        </div>
+        <Button
+          onClick={onSaved}
+          variant="outline"
+          className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+          data-testid="srn-done"
+        >
+          <CheckCircle size={14} weight="bold" className="mr-2" /> Done
+        </Button>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Detail k="SRN Date" v={fmtDate(srn.srn_date)} />
-        <Detail k="SRN No" v={srn.srn_no} />
-        <Detail k="Parent RN" v={`${srn.parent_rn_no || "—"} (${fmtDate(srn.parent_rn_date) || "—"})`} />
-        <Detail k="Invoice No" v={srn.invoice_no || "—"} />
-        <div>
-          <Label className="label-sm">Fulfilment Date</Label>
-          <Input
-            type="date"
-            value={fulfillmentDate}
-            max={todayISO()}
-            onChange={(e) => setFulfillmentDate(e.target.value)}
-            className="mt-2 rounded-sm font-mono"
-            data-testid="srn-fulfillment-date"
-          />
-          <div className="text-[11px] text-slate-500 mt-1">Date material arrived · no future date</div>
-        </div>
-        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(srn.status).cls}`}>{statusMeta(srn.status).label}</span>} />
+        <Detail k="SRN Date" v={fmtDate(parent.srn_date)} />
+        <Detail k="SRN No" v={parent.srn_no} />
+        <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
+        <Detail k="Invoice No" v={parent.invoice_no || "—"} />
+        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
-        <div className="px-4 py-3 border-b border-slate-200 label-sm">SHORT ITEMS — Enter Fulfilled Qty</div>
+      <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-200 label-sm flex items-center justify-between">
+          <span>SHORT ITEMS — Record fulfilled qty as material arrives in batches</span>
+          <span className="text-[11px] text-slate-500 normal-case">Each batch saved creates its own Child SRN, immediately rackable.</span>
+        </div>
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-10">#</th>
               <th className="w-44">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-28 text-right">INV QTY</th>
-              <th className="w-28 text-right">RCVD QTY</th>
-              <th className="w-28 text-right">SHORT QTY</th>
-              <th className="w-32 text-right">FULFILLED QTY</th>
-              <th className="w-28 text-right">PENDING QTY</th>
+              <th className="w-24 text-right">SHORT QTY</th>
+              <th className="w-24 text-right">FILLED</th>
+              <th className="w-24 text-right">PENDING</th>
+              <th className="w-44">FULFILLED QTY</th>
+              <th className="w-40">FULFILLED DATE</th>
+              <th className="w-32">CHILD SRN</th>
+              <th className="w-24 text-right">ACTION</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((it, idx) => {
-              const f = it.fulfilled_qty === "" ? null : parseFloat(it.fulfilled_qty);
-              const pending = f == null ? it.short_qty : (it.short_qty - f);
-              const pendingCls = pending > 0 ? "text-amber-700 font-bold" : (pending < 0 ? "text-red-700 font-bold" : "text-green-700 font-bold");
-              const isLastRow = idx === items.length - 1;
-              return (
-                <tr key={idx} data-testid={`srn-item-${idx}`}>
-                  <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                  <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
-                  <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-red-700">{it.short_qty.toFixed(2)}</td>
-                  <td>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="any"
-                      value={it.fulfilled_qty}
-                      onChange={(e) => updateItem(idx, { fulfilled_qty: e.target.value })}
-                      onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
-                      placeholder="0"
-                      className="rounded-sm font-mono h-8 text-right"
-                      data-testid={`srn-fulfilled-${idx}`}
-                    />
-                  </td>
-                  <td className={`text-right font-mono ${pendingCls}`}>
-                    {pending.toFixed(2)}
-                  </td>
-                </tr>
-              );
+            {(parent.items || []).flatMap((it, idx) => {
+              const shortQ = parseFloat(it.short_qty) || 0;
+              const filled = (it.children || []).reduce((s, c) => s + (parseFloat(c.fulfilled_qty) || 0), 0);
+              const pending = shortQ - filled;
+              const rows = [];
+
+              // 1) Saved slices (read-only or editable)
+              (it.children || []).forEach((c, ci) => {
+                const isEditing = editingChild && editingChild.child_srn_id === c.child_srn_id;
+                rows.push(
+                  <tr key={`${idx}-c${ci}`} className="bg-green-50/30" data-testid={`srn-slice-${idx}-${ci}`}>
+                    <td className="font-mono text-slate-400">{idx + 1}.{ci + 1}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="text-xs text-slate-500 truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td>
+                      {isEditing ? (
+                        <Input type="number" min="0" step="any" value={editingChild.fulfilled_qty}
+                          onChange={(e) => setEditingChild({ ...editingChild, fulfilled_qty: e.target.value })}
+                          className="rounded-sm font-mono h-7 text-right" />
+                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.fulfilled_qty) || 0).toFixed(2)}</span>}
+                    </td>
+                    <td>
+                      {isEditing ? (
+                        <Input type="date" value={editingChild.fulfilled_date}
+                          max={todayISO()}
+                          onChange={(e) => setEditingChild({ ...editingChild, fulfilled_date: e.target.value })}
+                          className="rounded-sm font-mono h-7" />
+                      ) : <span className="font-mono text-slate-700">{fmtDate(c.fulfilled_date)}</span>}
+                    </td>
+                    <td className="font-mono text-blue-700 text-xs">{c.child_srn_no}</td>
+                    <td className="text-right">
+                      {isEditing ? (
+                        <div className="flex gap-1 justify-end">
+                          <button onClick={editSlice} disabled={busy}
+                            className="text-green-700 hover:bg-green-100 p-1 rounded-sm"
+                            title="Save" data-testid={`srn-slice-save-${idx}-${ci}`}>
+                            <FloppyDisk size={14} weight="bold" />
+                          </button>
+                          <button onClick={() => setEditingChild(null)} disabled={busy}
+                            className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel">
+                            <X size={14} weight="bold" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex gap-1 justify-end">
+                          <button onClick={() => setEditingChild({
+                            itemIdx: idx, child_srn_id: c.child_srn_id,
+                            fulfilled_qty: c.fulfilled_qty, fulfilled_date: c.fulfilled_date,
+                          })}
+                            disabled={busy}
+                            className="text-blue-700 hover:bg-blue-100 p-1 rounded-sm"
+                            title="Edit slice"
+                            data-testid={`srn-slice-edit-${idx}-${ci}`}>
+                            <PencilSimple size={14} weight="bold" />
+                          </button>
+                          <button onClick={() => deleteSlice(c.child_srn_id)} disabled={busy}
+                            className="text-red-700 hover:bg-red-100 p-1 rounded-sm"
+                            title="Delete slice"
+                            data-testid={`srn-slice-del-${idx}-${ci}`}>
+                            <Trash size={14} weight="bold" />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              });
+
+              // 2) Pending slice row (only if pending > 0)
+              if (pending > 1e-6) {
+                const d = drafts[idx] || {};
+                rows.push(
+                  <tr key={`${idx}-pending`} data-testid={`srn-pending-${idx}`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="text-slate-700 text-xs truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-right font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
+                    <td className="text-right font-mono">{filled.toFixed(2)}</td>
+                    <td className="text-right font-mono font-bold text-amber-700">{pending.toFixed(2)}</td>
+                    <td>
+                      <Input type="number" min="0" step="any"
+                        max={pending}
+                        value={d.fulfilled_qty || ""}
+                        onChange={(e) => setDraft(idx, { fulfilled_qty: e.target.value })}
+                        placeholder={`max ${pending.toFixed(2)}`}
+                        className="rounded-sm font-mono h-8 text-right"
+                        data-testid={`srn-input-qty-${idx}`} />
+                    </td>
+                    <td>
+                      <Input type="date"
+                        value={d.fulfillment_date || ""}
+                        max={todayISO()}
+                        onChange={(e) => setDraft(idx, { fulfillment_date: e.target.value })}
+                        className="rounded-sm font-mono h-8"
+                        data-testid={`srn-input-date-${idx}`} />
+                    </td>
+                    <td className="text-slate-300 italic text-xs">— pending —</td>
+                    <td className="text-right">
+                      <Button onClick={() => saveSlice(idx)} disabled={busy}
+                        size="sm" className="rounded-sm bg-blue-700 hover:bg-blue-800 h-7 px-2 text-[11px]"
+                        data-testid={`srn-save-slice-${idx}`}>
+                        <FloppyDisk size={12} weight="bold" className="mr-1" /> Save
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              }
+              if ((it.children || []).length === 0 && pending <= 1e-6) {
+                // Edge: short_qty was 0 — nothing to do.
+                rows.push(
+                  <tr key={`${idx}-noop`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td colSpan={9} className="text-center text-slate-400 italic">No short qty</td>
+                  </tr>
+                );
+              }
+              return rows;
             })}
           </tbody>
         </table>
         <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
-          <strong>Note:</strong> Saving Final with any row where Fulfilled Qty &lt; Short Qty will auto-create a child SRN
-          for the residual shortfall, linked to the original Receipt Note. The Fulfilled Qty entered here is immediately
-          available to Racking — you don't need a fully-received SRN before racking.
+          <strong>How this works:</strong> Each row above represents a Child SRN that holds a fulfilled batch of material.
+          Save a slice as material arrives — a Child SRN is created and is immediately available for Racking.
+          The parent SRN status flips to <em>Complete</em> automatically when the total filled equals the original short qty.
+          Slices can be edited or deleted until a Racking Note is created against their Child SRN.
         </div>
       </div>
     </div>
   );
 }
 
-/** ERN finalize/edit form — user enters accepted_qty + rejected_qty per row. */
-function ErnFinalizeForm({ ern, onCancel, onSaved }) {
-  const [items, setItems] = useState(() => (ern.items || []).map((it) => ({
-    part_no: it.part_no,
-    make: it.make,
-    description_1: it.description_1 || "",
-    invoice_qty: parseFloat(it.invoice_qty) || 0,
-    received_qty: parseFloat(it.received_qty) || 0,
-    extra_qty: parseFloat(it.extra_qty) || 0,
-    accepted_qty: it.accepted_qty == null ? "" : it.accepted_qty,
-    rejected_qty: it.rejected_qty == null ? "" : it.rejected_qty,
-  })));
-  const [savingDraft, setSavingDraft] = useState(false);
-  const [savingFinal, setSavingFinal] = useState(false);
-  const finalBtnRef = useRef(null);
+/** ERN slice/edit form — user enters accepted_qty (creates child ERN per slice) +
+ *  rejected_qty (top-level field on parent). */
+function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
+  const [parent, setParent] = useState(initialErn);
+  const [drafts, setDrafts] = useState({});                  // { idx: { accepted_qty, accepted_date } }
+  const [rejectDrafts, setRejectDrafts] = useState({});      // { idx: rejected_qty input }
+  const [editingChild, setEditingChild] = useState(null);
+  const [busy, setBusy] = useState(false);
 
-  const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
-
-  const buildPayload = () => ({
-    items: items.map((it) => ({
-      part_no: it.part_no,
-      make: it.make,
-      accepted_qty: it.accepted_qty === "" ? null : (parseFloat(it.accepted_qty) || 0),
-      rejected_qty: it.rejected_qty === "" ? null : (parseFloat(it.rejected_qty) || 0),
-    })),
-  });
-
-  const validate = () => {
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      const a = it.accepted_qty === "" ? null : parseFloat(it.accepted_qty);
-      const r = it.rejected_qty === "" ? null : parseFloat(it.rejected_qty);
-      if (a != null && (isNaN(a) || a < 0)) { toast.error(`Row ${i + 1}: Accepted Qty must be ≥ 0`); return false; }
-      if (r != null && (isNaN(r) || r < 0)) { toast.error(`Row ${i + 1}: Rejected Qty must be ≥ 0`); return false; }
-      if ((a || 0) + (r || 0) > it.extra_qty + 1e-6) {
-        toast.error(`Row ${i + 1}: Accepted (${a || 0}) + Rejected (${r || 0}) cannot exceed Extra (${it.extra_qty})`);
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const saveDraft = async () => {
-    if (!validate()) return;
-    setSavingDraft(true);
+  const reload = async () => {
     try {
-      await api.put(`/extra-received-notes/${ern.id}`, buildPayload());
-      toast.success(`${ern.ern_no} saved`);
-      onSaved();
+      const { data } = await api.get(`/extra-received-notes/${parent.id}`);
+      setParent(data);
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
-    } finally { setSavingDraft(false); }
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not reload");
+    }
   };
 
-  const saveFinal = async () => {
-    if (!validate()) return;
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].accepted_qty === "" || items[i].accepted_qty == null) {
-        toast.error(`Row ${i + 1}: Accepted Qty is required for Final Save (use 0 if nothing accepted for this row)`);
-        return;
-      }
+  const setDraft = (idx, patch) =>
+    setDrafts((d) => ({ ...d, [idx]: { ...(d[idx] || {}), ...patch } }));
+
+  const setRejectDraft = (idx, val) =>
+    setRejectDrafts((d) => ({ ...d, [idx]: val }));
+
+  const undecidedFor = (it) => {
+    const accepted = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
+    return (parseFloat(it.extra_qty) || 0) - (parseFloat(it.rejected_qty) || 0) - accepted;
+  };
+
+  const acceptSlice = async (idx) => {
+    const it = parent.items[idx];
+    const d = drafts[idx] || {};
+    const qty = parseFloat(d.accepted_qty);
+    if (!qty || qty <= 0) { toast.error(`Row ${idx + 1}: enter Accepted Qty > 0`); return; }
+    const undecided = undecidedFor(it);
+    if (qty > undecided + 1e-6) {
+      toast.error(`Row ${idx + 1}: exceeds undecided (${undecided.toFixed(2)})`);
+      return;
     }
-    setSavingFinal(true);
+    const date = d.accepted_date || todayISO();
+    if (date > todayISO()) { toast.error("Accepted Date cannot be in the future"); return; }
+    setBusy(true);
     try {
-      await api.put(`/extra-received-notes/${ern.id}`, buildPayload());
-      const { data } = await api.post(`/extra-received-notes/${ern.id}/finalize`);
-      toast.success(`${ern.ern_no} finalized · ${statusMeta(data.status).label}`);
-      onSaved();
+      await api.post(`/extra-received-notes/${parent.id}/accept`, {
+        part_no: it.part_no, make: it.make,
+        accepted_qty: qty, accepted_date: date,
+      });
+      toast.success("Slice accepted · child ERN created");
+      setDrafts((d2) => ({ ...d2, [idx]: { accepted_qty: "", accepted_date: "" } }));
+      await reload();
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize");
-    } finally { setSavingFinal(false); }
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not accept");
+    } finally { setBusy(false); }
   };
 
-  const handleLastRowKey = (e, isLastRow) => {
-    if (!isLastRow) return;
-    if (e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      finalBtnRef.current?.focus();
-    }
+  const setRejected = async (idx) => {
+    const it = parent.items[idx];
+    const v = rejectDrafts[idx];
+    if (v === "" || v == null) return;
+    const qty = parseFloat(v);
+    if (isNaN(qty) || qty < 0) { toast.error("Rejected Qty must be ≥ 0"); return; }
+    setBusy(true);
+    try {
+      await api.put(`/extra-received-notes/${parent.id}/reject`, {
+        part_no: it.part_no, make: it.make, rejected_qty: qty,
+      });
+      toast.success("Rejected qty saved");
+      setRejectDrafts((d) => ({ ...d, [idx]: "" }));
+      await reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save rejected");
+    } finally { setBusy(false); }
   };
+
+  const editSlice = async () => {
+    if (!editingChild) return;
+    const { itemIdx, child_ern_id, accepted_qty, accepted_date } = editingChild;
+    const it = parent.items[itemIdx];
+    const qty = parseFloat(accepted_qty);
+    if (!qty || qty <= 0) { toast.error("Accepted Qty must be > 0"); return; }
+    setBusy(true);
+    try {
+      await api.put(
+        `/extra-received-notes/${parent.id}/children/${child_ern_id}`,
+        { part_no: it.part_no, make: it.make,
+          accepted_qty: qty, accepted_date: accepted_date || todayISO() },
+      );
+      toast.success("Slice updated");
+      setEditingChild(null);
+      await reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
+    } finally { setBusy(false); }
+  };
+
+  const deleteSlice = async (childId) => {
+    if (!window.confirm("Delete this accepted slice?")) return;
+    setBusy(true);
+    try {
+      await api.delete(`/extra-received-notes/${parent.id}/children/${childId}`);
+      toast.success("Slice deleted");
+      await reload();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
+    } finally { setBusy(false); }
+  };
+
+  const meta = statusMeta(parent.status);
 
   return (
     <div className="mt-4 space-y-6" data-testid="ern-finalize-view">
@@ -2150,105 +2265,179 @@ function ErnFinalizeForm({ ern, onCancel, onSaved }) {
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="ern-back">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={saveDraft}
-            disabled={savingDraft || savingFinal}
-            variant="outline"
-            className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
-            data-testid="ern-save-draft"
-          >
-            <FloppyDisk size={14} weight="bold" className="mr-2" />
-            {savingDraft ? "Saving…" : "Save"}
-          </Button>
-          <Button
-            ref={finalBtnRef}
-            onClick={saveFinal}
-            disabled={savingDraft || savingFinal}
-            className="rounded-sm bg-blue-700 hover:bg-blue-800"
-            data-testid="ern-save-final"
-            title="Final Save · creates child ERN for any residual undecided extra"
-          >
-            <CheckCircle size={14} weight="bold" className="mr-2" />
-            {savingFinal ? "Saving…" : "Save Final"}
-          </Button>
-        </div>
+        <Button onClick={onSaved} variant="outline"
+          className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50" data-testid="ern-done">
+          <CheckCircle size={14} weight="bold" className="mr-2" /> Done
+        </Button>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Detail k="ERN Date" v={fmtDate(ern.ern_date)} />
-        <Detail k="ERN No" v={ern.ern_no} />
-        <Detail k="Parent RN" v={`${ern.parent_rn_no || "—"} (${fmtDate(ern.parent_rn_date) || "—"})`} />
-        <Detail k="Invoice No" v={ern.invoice_no || "—"} />
-        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(ern.status).cls}`}>{statusMeta(ern.status).label}</span>} />
+        <Detail k="ERN Date" v={fmtDate(parent.ern_date)} />
+        <Detail k="ERN No" v={parent.ern_no} />
+        <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
+        <Detail k="Invoice No" v={parent.invoice_no || "—"} />
+        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
-        <div className="px-4 py-3 border-b border-slate-200 label-sm">EXTRA ITEMS — Enter Accepted / Rejected Qty</div>
+      <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-200 label-sm flex items-center justify-between">
+          <span>EXTRA ITEMS — Accept slice-by-slice (creates child ERN) or set rejected qty</span>
+          <span className="text-[11px] text-slate-500 normal-case">Each accepted batch creates its own Child ERN, immediately rackable.</span>
+        </div>
         <table className="data-table w-full">
           <thead>
             <tr>
               <th className="w-10">#</th>
               <th className="w-44">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-24 text-right">INV QTY</th>
-              <th className="w-24 text-right">RCVD QTY</th>
-              <th className="w-24 text-right">EXTRA QTY</th>
-              <th className="w-32 text-right">ACCEPTED QTY</th>
-              <th className="w-32 text-right">REJECTED QTY</th>
-              <th className="w-28 text-right">UNDECIDED</th>
+              <th className="w-20 text-right">EXTRA</th>
+              <th className="w-24 text-right">ACCEPTED</th>
+              <th className="w-24 text-right">REJECTED</th>
+              <th className="w-24 text-right">UNDECIDED</th>
+              <th className="w-44">ACCEPTED QTY / REJECTED QTY</th>
+              <th className="w-40">ACCEPTED DATE</th>
+              <th className="w-32">CHILD ERN</th>
+              <th className="w-24 text-right">ACTION</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((it, idx) => {
-              const a = it.accepted_qty === "" ? 0 : (parseFloat(it.accepted_qty) || 0);
-              const r = it.rejected_qty === "" ? 0 : (parseFloat(it.rejected_qty) || 0);
-              const undecided = it.extra_qty - a - r;
-              const undecidedCls = undecided > 0.0001 ? "text-amber-700 font-bold" : (undecided < -0.0001 ? "text-red-700 font-bold" : "text-green-700 font-bold");
-              const isLastRow = idx === items.length - 1;
-              return (
-                <tr key={idx} data-testid={`ern-item-${idx}`}>
-                  <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                  <td className="text-slate-700 text-xs truncate max-w-[260px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono">{it.invoice_qty.toFixed(2)}</td>
-                  <td className="text-right font-mono">{it.received_qty.toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-amber-700">{it.extra_qty.toFixed(2)}</td>
-                  <td>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="any"
-                      value={it.accepted_qty}
-                      onChange={(e) => updateItem(idx, { accepted_qty: e.target.value })}
-                      placeholder="0"
-                      className="rounded-sm font-mono h-8 text-right"
-                      data-testid={`ern-accepted-${idx}`}
-                    />
-                  </td>
-                  <td>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="any"
-                      value={it.rejected_qty}
-                      onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
-                      onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
-                      placeholder="0"
-                      className="rounded-sm font-mono h-8 text-right"
-                      data-testid={`ern-rejected-${idx}`}
-                    />
-                  </td>
-                  <td className={`text-right font-mono ${undecidedCls}`}>{undecided.toFixed(2)}</td>
-                </tr>
-              );
+            {(parent.items || []).flatMap((it, idx) => {
+              const extra = parseFloat(it.extra_qty) || 0;
+              const rejected = parseFloat(it.rejected_qty) || 0;
+              const accepted = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
+              const undecided = extra - rejected - accepted;
+              const rows = [];
+
+              // Saved accepted slices
+              (it.children || []).forEach((c, ci) => {
+                const isEditing = editingChild && editingChild.child_ern_id === c.child_ern_id;
+                rows.push(
+                  <tr key={`${idx}-c${ci}`} className="bg-green-50/30" data-testid={`ern-slice-${idx}-${ci}`}>
+                    <td className="font-mono text-slate-400">{idx + 1}.{ci + 1}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="text-xs text-slate-500 truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td className="text-right font-mono text-slate-400">—</td>
+                    <td>
+                      {isEditing ? (
+                        <Input type="number" min="0" step="any" value={editingChild.accepted_qty}
+                          onChange={(e) => setEditingChild({ ...editingChild, accepted_qty: e.target.value })}
+                          className="rounded-sm font-mono h-7 text-right" />
+                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.accepted_qty) || 0).toFixed(2)} accepted</span>}
+                    </td>
+                    <td>
+                      {isEditing ? (
+                        <Input type="date" value={editingChild.accepted_date} max={todayISO()}
+                          onChange={(e) => setEditingChild({ ...editingChild, accepted_date: e.target.value })}
+                          className="rounded-sm font-mono h-7" />
+                      ) : <span className="font-mono text-slate-700">{fmtDate(c.accepted_date)}</span>}
+                    </td>
+                    <td className="font-mono text-blue-700 text-xs">{c.child_ern_no}</td>
+                    <td className="text-right">
+                      {isEditing ? (
+                        <div className="flex gap-1 justify-end">
+                          <button onClick={editSlice} disabled={busy}
+                            className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
+                            data-testid={`ern-slice-save-${idx}-${ci}`}>
+                            <FloppyDisk size={14} weight="bold" />
+                          </button>
+                          <button onClick={() => setEditingChild(null)} disabled={busy}
+                            className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel">
+                            <X size={14} weight="bold" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex gap-1 justify-end">
+                          <button onClick={() => setEditingChild({
+                            itemIdx: idx, child_ern_id: c.child_ern_id,
+                            accepted_qty: c.accepted_qty, accepted_date: c.accepted_date,
+                          })} disabled={busy}
+                            className="text-blue-700 hover:bg-blue-100 p-1 rounded-sm" title="Edit slice"
+                            data-testid={`ern-slice-edit-${idx}-${ci}`}>
+                            <PencilSimple size={14} weight="bold" />
+                          </button>
+                          <button onClick={() => deleteSlice(c.child_ern_id)} disabled={busy}
+                            className="text-red-700 hover:bg-red-100 p-1 rounded-sm" title="Delete slice"
+                            data-testid={`ern-slice-del-${idx}-${ci}`}>
+                            <Trash size={14} weight="bold" />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              });
+
+              // Pending row (only if undecided > 0)
+              if (undecided > 1e-6) {
+                const d = drafts[idx] || {};
+                const rDraft = rejectDrafts[idx] != null ? rejectDrafts[idx] : "";
+                rows.push(
+                  <tr key={`${idx}-pending`} data-testid={`ern-pending-${idx}`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="text-slate-700 text-xs truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-right font-mono font-bold text-amber-700">{extra.toFixed(2)}</td>
+                    <td className="text-right font-mono">{accepted.toFixed(2)}</td>
+                    <td className="text-right font-mono">{rejected.toFixed(2)}</td>
+                    <td className="text-right font-mono font-bold text-amber-700">{undecided.toFixed(2)}</td>
+                    <td>
+                      <div className="flex flex-col gap-1">
+                        <Input type="number" min="0" step="any" max={undecided}
+                          value={d.accepted_qty || ""}
+                          onChange={(e) => setDraft(idx, { accepted_qty: e.target.value })}
+                          placeholder={`accept (max ${undecided.toFixed(2)})`}
+                          className="rounded-sm font-mono h-7 text-right text-[11px]"
+                          data-testid={`ern-input-acc-${idx}`} />
+                        <div className="flex gap-1">
+                          <Input type="number" min="0" step="any"
+                            value={rDraft}
+                            onChange={(e) => setRejectDraft(idx, e.target.value)}
+                            placeholder={`reject (now ${rejected.toFixed(2)})`}
+                            className="rounded-sm font-mono h-7 text-right text-[11px]"
+                            data-testid={`ern-input-rej-${idx}`} />
+                          <button onClick={() => setRejected(idx)} disabled={busy}
+                            className="bg-red-700 text-white hover:bg-red-800 px-2 rounded-sm text-[10px] font-bold"
+                            data-testid={`ern-set-rej-${idx}`}>SET</button>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <Input type="date" value={d.accepted_date || ""} max={todayISO()}
+                        onChange={(e) => setDraft(idx, { accepted_date: e.target.value })}
+                        className="rounded-sm font-mono h-8"
+                        data-testid={`ern-input-date-${idx}`} />
+                    </td>
+                    <td className="text-slate-300 italic text-xs">— pending —</td>
+                    <td className="text-right">
+                      <Button onClick={() => acceptSlice(idx)} disabled={busy}
+                        size="sm" className="rounded-sm bg-blue-700 hover:bg-blue-800 h-7 px-2 text-[11px]"
+                        data-testid={`ern-accept-slice-${idx}`}>
+                        <FloppyDisk size={12} weight="bold" className="mr-1" /> Accept
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              }
+              if ((it.children || []).length === 0 && rejected === 0 && undecided <= 1e-6) {
+                rows.push(
+                  <tr key={`${idx}-noop`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td colSpan={10} className="text-center text-slate-400 italic">No extra qty</td>
+                  </tr>
+                );
+              }
+              return rows;
             })}
           </tbody>
         </table>
         <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
-          <strong>Note:</strong> Accepted Qty becomes available to Racking immediately. Rejected Qty is recorded but
-          not racked (returned to supplier). If Accepted + Rejected &lt; Extra Qty for any row, a child ERN is auto-created
-          for the residual undecided quantity.
+          <strong>How this works:</strong> Each accepted batch creates its own Child ERN (rackable artifact).
+          Use the <strong>SET</strong> button to record rejected qty (returned to supplier — not rackable).
+          The parent ERN flips to <em>Complete</em> once accepted + rejected = extra. Slices can be edited/deleted
+          until a Racking Note is created against their Child ERN.
         </div>
       </div>
     </div>

@@ -1,0 +1,52 @@
+{
+  "summary": "Iter-24 verified the new per-batch SRN/ERN slice mechanism. New 10-test suite covering TC1-TC9 + TC11 (TC10 = regression run) all PASS (10/10). Discovered ONE bug: response_model on POST/PUT slice endpoints strips the children[] field from the response payload (data is correctly persisted; GET re-fetch returns it). Iter-21 (5/17 fail) and iter-23 (2/5 fail) regressions have EXPECTED breakages because the legacy PUT /short-received-notes/{id} endpoint writes fulfilled_qty directly on PARENT items, but the new _compute_srn_status/_compute_ern_status helpers only count children[]. These legacy paths are now stuck at PENDING — main agent should either deprecate the legacy PUT endpoints or update them to spawn children too.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/short-received-notes/{id}/fulfill, PUT /children/{cid}, POST /api/extra-received-notes/{id}/accept, PUT /children/{cid}, PUT /reject",
+        "issue": "response_model=ShortReceivedNote/ExtraReceivedNote strips items[].children from the JSON response because ShortReceivedNoteItem/ExtraReceivedNoteItem Pydantic models (server.py lines 387 & 445) do NOT declare a `children` field. Data IS persisted in MongoDB and is returned correctly by the GET endpoints. Frontend code that relies on the immediate POST/PUT response to refresh slice list will see an empty children[] until it re-fetches via GET. Fix: add `children: Optional[List[dict]] = []` to ShortReceivedNoteItem and ExtraReceivedNoteItem."
+      },
+      {
+        "endpoint": "PUT /api/short-received-notes/{id}, PUT /api/extra-received-notes/{id} (LEGACY)",
+        "issue": "Legacy PUT writes fulfilled_qty / accepted_qty directly onto parent items but the new _compute_srn_status / _compute_ern_status helpers only sum children[]. Result: parent SRN/ERN status remains PENDING even when fulfilled_qty/accepted_qty is set on parent items — breaking iter-21 SRN/ERN status tests and iter-23 TC2/TC3. Also breaks finalize-with-residual auto-spawn (legacy SRN.finalize uses fulfilled_qty on parent, status no longer transitions to PARTIALLY_RECEIVED/COMPLETE). Either remove these legacy endpoints (frontend now uses /fulfill, /accept) or migrate them to spawn children too."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter24_slice_workflow.py",
+    "/app/test_reports/pytest/iter24_slice_workflow.xml",
+    "/app/test_reports/pytest/iter24_iter21_regression.xml"
+  ],
+  "action_items": [
+    "Add `children: Optional[List[dict]] = []` to ShortReceivedNoteItem (server.py line 387) and ExtraReceivedNoteItem (line 445) so POST /fulfill, /accept, PUT /children/{cid}, /reject responses include the children array. Frontend can then update slice tables from the mutation response without an extra GET round-trip.",
+    "Decide on legacy PUT /api/short-received-notes/{id} and /api/extra-received-notes/{id} (and their /finalize counterparts): either remove them (review_request notes 'Frontend will use the new slice endpoints exclusively') or rewrite them to push to children[] so the new status helpers work. Currently they no longer transition status from PENDING.",
+    "Update or delete legacy iter-21 tests (test_iter21_status_workflow.py — TestSRNFlow.test_partial_fulfillment_marks_srn_partially_received, test_full_fulfillment_marks_complete_not_legacy_label, test_finalize_partial_keeps_partially_received_and_spawns_child; TestERNFlow.test_partial_accept_marks_partially_accepted, test_fully_decided_ern_marks_complete) and iter-23 (TestTC2ChildSrnTracking, TestTC3ChildErnTracking) since they exercise the deprecated legacy PUT contract."
+  ],
+  "critical_code_review_comments": [
+    "BUG: Pydantic models ShortReceivedNoteItem & ExtraReceivedNoteItem missing `children` field — silently strips data from POST/PUT mutation responses (lines 387-406 and 445-462 in server.py).",
+    "Legacy PUT /api/short-received-notes/{id} and PUT /api/extra-received-notes/{id} write fulfilled_qty/accepted_qty on parent items but new _compute_srn_status / _compute_ern_status only consider children[] sum — orphaned code path that will silently no-op the status workflow.",
+    "_create_child_srn_for_slice / _create_child_ern_for_slice correctly stamp parent_srn_id / parent_ern_id and propagate parent_rn_id; child status hard-coded to COMPLETE and racking_status RACKING_PENDING — immediately rackable, matches spec.",
+    "Validation guards present: /fulfill rejects qty > short_qty - already, /accept rejects qty > extra - rejected - accepted_so_far, /reject rejects rejected > extra - accepted_so_far, /children edit rejects exceeds short - others, /children edit/delete rejects when an RKN exists against the child (409). All five guards verified by tests.",
+    "Status helper (_compute_srn_status / _compute_ern_status) correctly returns parent's stored status for child docs (parent_srn_id/parent_ern_id set) and recomputes parent from children[].",
+    "Racking sources endpoint /api/racking-notes/sources correctly filters parent SRN/ERN out (no fulfilled_qty / accepted_qty on parent items) and surfaces only children — verified by TC11."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter24_slice_workflow.py (NEW — 10 tests covering TC1-TC9 + TC11)"
+  ],
+  "success_rate": {
+    "backend": "100% on new slice flow (10/10 TC1-TC9 + TC11). 12/17 iter-21 regression. 3/5 iter-23 regression. The 5 + 2 failures are EXPECTED migration breakages of legacy PUT endpoints.",
+    "frontend": "N/A (skipped per request)"
+  },
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each test creates fresh TESTPN_<uuid8> stock_master rows + TEST_GD/TR/TB godown/rack/box per session; no pre-existing seed dependency.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "New regression file: /app/backend/tests/test_iter24_slice_workflow.py — 10 PASS. Tests use GET re-fetch after mutation to work around the response_model bug. Run: `export REACT_APP_BACKEND_URL=https://inventory-ops-dash.preview.emergentagent.com && pytest backend/tests/test_iter24_slice_workflow.py -v`. Once main agent fixes the Pydantic models (add children field), the GET re-fetch can be removed and assertions can run on POST response directly. Iter-21 SRN/ERN tests and iter-23 TC2/TC3 currently fail by design (legacy PUT contract changed); main agent should either delete those tests or migrate the legacy endpoints.",
+  "rca of the issue": "ROOT CAUSE (Pydantic stripping bug): FastAPI's response_model coercion drops fields not declared on the Pydantic model. Since ShortReceivedNoteItem/ExtraReceivedNoteItem don't declare `children`, the serializer drops the array during response serialization. Reproduction: POST /api/short-received-notes/{id}/fulfill returns item without `children` key; immediate GET on same id returns item WITH `children` populated. Mitigation: add `children: Optional[List[dict]] = []` to both item models. ROOT CAUSE (legacy PUT migration): _compute_srn_status / _compute_ern_status were rewritten to derive status purely from children[] sum, but the legacy PUT endpoint still mutates parent items[].fulfilled_qty without ever pushing to children[]. The legacy paths now silently keep parent at PENDING."
+}

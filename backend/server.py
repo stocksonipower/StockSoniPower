@@ -3805,45 +3805,56 @@ async def record_racking_note(rkn_id: str, user=Depends(_module_dep("stock_in"))
 # ===================== SRN / ERN STATUS HELPERS (Phase 2) =====================
 
 def _compute_srn_status(srn: dict) -> str:
-    """Status formula:
-        sum(short_qty) == 0                                   -> PENDING (degenerate)
-        sum(fulfilled_qty) == 0                               -> PENDING
-        0 < sum(fulfilled_qty) < sum(short_qty)               -> PARTIALLY_RECEIVED
-        sum(fulfilled_qty) == sum(short_qty)                  -> COMPLETE
+    """Status formula (slice model):
+      A child SRN (parent_srn_id set) is created COMPLETE and never recomputed.
+      A parent SRN (parent_srn_id is None) status is derived from items[].children:
+        sum(short_qty) == 0                                            -> PENDING
+        sum(children.fulfilled_qty) == 0                               -> PENDING
+        0 < sum(children.fulfilled_qty) < sum(short_qty)               -> PARTIALLY_RECEIVED
+        sum(children.fulfilled_qty) == sum(short_qty)                  -> COMPLETE
     """
+    # Child SRN (created with status=COMPLETE) — leave the status as set.
+    if srn.get("parent_srn_id"):
+        return srn.get("status") or "COMPLETE"
     items = srn.get("items") or []
     total_short = 0.0
-    total_fulfilled = 0.0
+    total_filled = 0.0
     for it in items:
         total_short += float(it.get("short_qty") or 0)
-        f = it.get("fulfilled_qty")
-        total_fulfilled += float(f or 0)
+        for c in (it.get("children") or []):
+            total_filled += float(c.get("fulfilled_qty") or 0)
     if total_short <= 0:
         return "PENDING"
-    if total_fulfilled <= 0:
+    if total_filled <= 0:
         return "PENDING"
-    if total_fulfilled + 1e-6 >= total_short:
+    if total_filled + 1e-6 >= total_short:
         return "COMPLETE"
     return "PARTIALLY_RECEIVED"
 
 
 def _compute_ern_status(ern: dict) -> str:
-    """Status formula:
-        accepted == 0 AND rejected == 0                          -> PENDING
-        accepted > 0 AND rejected == 0 AND accepted < extra      -> PARTIALLY_ACCEPTED
-        accepted == 0 AND rejected > 0 AND rejected < extra      -> PARTIALLY_REJECTED
-        accepted + rejected == extra                             -> COMPLETE
-    Mixed case (accepted>0 AND rejected>0 AND accepted+rejected<extra) is treated
-    as PARTIALLY_ACCEPTED (some material is accepted, the residual goes to a child ERN).
+    """Status formula (slice model):
+      A child ERN (parent_ern_id set) is created COMPLETE.
+      For a parent ERN, accepted comes from items[].children[].accepted_qty;
+      rejected is the sum of items[].rejected_qty (top-level on parent).
+
+        accepted == 0 AND rejected == 0                           -> PENDING
+        accepted + rejected == extra                              -> COMPLETE
+        accepted > 0 AND undecided > 0                            -> PARTIALLY_ACCEPTED
+        rejected > 0 AND undecided > 0 AND accepted == 0          -> PARTIALLY_REJECTED
+        mixed partial                                             -> PARTIALLY_ACCEPTED
     """
+    if ern.get("parent_ern_id"):
+        return ern.get("status") or "COMPLETE"
     items = ern.get("items") or []
     total_extra = 0.0
     total_acc = 0.0
     total_rej = 0.0
     for it in items:
         total_extra += float(it.get("extra_qty") or 0)
-        total_acc += float(it.get("accepted_qty") or 0)
         total_rej += float(it.get("rejected_qty") or 0)
+        for c in (it.get("children") or []):
+            total_acc += float(c.get("accepted_qty") or 0)
     if total_extra <= 0:
         return "PENDING"
     decided = total_acc + total_rej
@@ -3855,7 +3866,7 @@ def _compute_ern_status(ern: dict) -> str:
         return "PARTIALLY_ACCEPTED"
     if total_rej > 0 and total_acc <= 0:
         return "PARTIALLY_REJECTED"
-    # Mixed partial: treat as PARTIALLY_ACCEPTED (acceptance is the action that gates racking).
+    # Mixed partial
     return "PARTIALLY_ACCEPTED"
 
 
@@ -4109,6 +4120,255 @@ async def finalize_short_received_note(srn_id: str, user=Depends(_module_dep("st
     return doc
 
 
+# ===================== SRN slice (per-batch fulfillment) endpoints =====================
+
+class SrnFulfillSliceBody(BaseModel):
+    part_no: str
+    make: str
+    fulfilled_qty: float
+    fulfillment_date: str          # ISO YYYY-MM-DD
+
+
+async def _create_child_srn_for_slice(parent_srn: dict, part_no: str, make: str,
+                                      fulfilled_qty: float, fulfillment_date: str,
+                                      actor: dict) -> dict:
+    """Create a CHILD SRN doc holding the FULFILLED portion of a slice.
+    The child is created with status=COMPLETE and is immediately rackable
+    (its single item carries fulfilled_qty == short_qty == quantity).
+    """
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    serial = await _alloc_serial("srn", fy)
+    srn_no = f"SRN/{fy}/{serial:03d}"
+
+    # Locate the parent item to clone its master snapshot onto the child.
+    parent_item = next(
+        (it for it in (parent_srn.get("items") or [])
+         if it.get("part_no") == part_no and it.get("make") == make),
+        None,
+    )
+    if not parent_item:
+        raise HTTPException(status_code=400, detail="Item not found on parent SRN")
+
+    child_item = {
+        "part_no": part_no,
+        "make": make,
+        "invoice_qty": float(parent_item.get("invoice_qty") or 0),
+        "received_qty": float(parent_item.get("received_qty") or 0),
+        "short_qty": float(fulfilled_qty),     # this slice represents fulfilled portion
+        "fulfilled_qty": float(fulfilled_qty),
+        "quantity": float(fulfilled_qty),      # legacy alias for racking pipeline
+        "model": parent_item.get("model", ""),
+        "old_part_no": parent_item.get("old_part_no", ""),
+        "make_part_no": parent_item.get("make_part_no", ""),
+        "description_1": parent_item.get("description_1", ""),
+        "description_2": parent_item.get("description_2", ""),
+        "remarks_oem": parent_item.get("remarks_oem", ""),
+        "remarks_others": parent_item.get("remarks_others", ""),
+        "item_category": parent_item.get("item_category", ""),
+    }
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "srn_no": srn_no,
+        "srn_date": today.date().isoformat(),
+        "fy": fy,
+        "serial": serial,
+        "parent_rn_id": parent_srn.get("parent_rn_id", ""),
+        "parent_rn_no": parent_srn.get("parent_rn_no", ""),
+        "parent_rn_date": parent_srn.get("parent_rn_date", ""),
+        "parent_srn_id": parent_srn["id"],
+        "parent_srn_no": parent_srn.get("srn_no", ""),
+        "chain_remarks": f"Fulfilled slice from {parent_srn.get('srn_no', '')}",
+        "invoice_no": parent_srn.get("invoice_no", ""),
+        "invoice_date": parent_srn.get("invoice_date", ""),
+        "fulfillment_date": fulfillment_date,
+        "items": [child_item],
+        "status": "COMPLETE",
+        "finalized_at": now_iso(),
+        "racking_status": "RACKING_PENDING",
+        "racked_at": None,
+        "created_at": now_iso(),
+        "created_by": (actor or {}).get("email", ""),
+        "assigned_to_user_id": parent_srn.get("assigned_to_user_id"),
+        "assigned_to_name": parent_srn.get("assigned_to_name", ""),
+        "assigned_to_email": parent_srn.get("assigned_to_email", ""),
+    }
+    await db.short_received_notes.insert_one(doc)
+    return doc
+
+
+@api_router.post("/short-received-notes/{srn_id}/fulfill", response_model=ShortReceivedNote)
+async def fulfill_srn_slice(srn_id: str, body: SrnFulfillSliceBody,
+                            user=Depends(_module_dep("stock_in"))):
+    """Save a fulfillment slice on a parent SRN. Creates a child SRN holding the
+    fulfilled portion (rackable artifact) and appends the slice reference to the
+    parent item's children[] array. The parent SRN's residual = short_qty - sum(children)."""
+    parent = await db.short_received_notes.find_one({"id": srn_id})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Short Received Note not found")
+    if parent.get("parent_srn_id"):
+        raise HTTPException(status_code=400, detail="Cannot fulfill slices on a child SRN")
+    _enforce_assignee(parent, user, "fulfill a slice on this Short Received Note")
+    _no_future_date(body.fulfillment_date, "Fulfillment Date")
+
+    qty = float(body.fulfilled_qty or 0)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Fulfilled Qty must be greater than 0")
+
+    # Locate the matching parent item & validate residual.
+    item_idx = None
+    for i, it in enumerate(parent.get("items") or []):
+        if it.get("part_no") == body.part_no and it.get("make") == body.make:
+            item_idx = i
+            break
+    if item_idx is None:
+        raise HTTPException(status_code=400, detail="Item not found on this SRN")
+
+    p_item = parent["items"][item_idx]
+    short_qty = float(p_item.get("short_qty") or 0)
+    already = sum(float(c.get("fulfilled_qty") or 0) for c in (p_item.get("children") or []))
+    if qty > short_qty - already + 1e-6:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fulfilled Qty exceeds remaining short ({short_qty - already})",
+        )
+
+    # Create the child SRN holding the fulfilled portion.
+    child = await _create_child_srn_for_slice(parent, body.part_no, body.make, qty,
+                                              body.fulfillment_date, user)
+
+    # Append a slice entry to the parent item's children[].
+    new_items = []
+    for i, it in enumerate(parent["items"]):
+        new_it = dict(it)
+        if i == item_idx:
+            children = list(new_it.get("children") or [])
+            children.append({
+                "child_srn_id": child["id"],
+                "child_srn_no": child["srn_no"],
+                "fulfilled_qty": qty,
+                "fulfilled_date": body.fulfillment_date,
+                "created_at": now_iso(),
+            })
+            new_it["children"] = children
+        new_items.append(new_it)
+    new_status = _compute_srn_status({**parent, "items": new_items})
+    await db.short_received_notes.update_one(
+        {"id": srn_id},
+        {"$set": {"items": new_items, "status": new_status,
+                  "fulfillment_date": body.fulfillment_date}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
+
+
+@api_router.put("/short-received-notes/{srn_id}/children/{child_srn_id}", response_model=ShortReceivedNote)
+async def edit_srn_child_slice(srn_id: str, child_srn_id: str,
+                               body: SrnFulfillSliceBody,
+                               user=Depends(_module_dep("stock_in"))):
+    """Edit a fulfilled slice (qty + date). Allowed only if no Racking Note has
+    been created against the child SRN yet."""
+    parent = await db.short_received_notes.find_one({"id": srn_id})
+    if not parent or parent.get("parent_srn_id"):
+        raise HTTPException(status_code=404, detail="Parent SRN not found")
+    _enforce_assignee(parent, user, "edit a slice on this Short Received Note")
+    _no_future_date(body.fulfillment_date, "Fulfillment Date")
+
+    child = await db.short_received_notes.find_one({"id": child_srn_id})
+    if not child or child.get("parent_srn_id") != srn_id:
+        raise HTTPException(status_code=404, detail="Child SRN not found on this parent")
+    if await db.racking_notes.find_one({"source_type": "SRN", "source_id": child_srn_id}):
+        raise HTTPException(status_code=409, detail="Cannot edit — a Racking Note already exists against this child SRN")
+
+    qty = float(body.fulfilled_qty or 0)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Fulfilled Qty must be greater than 0")
+
+    # Validate residual: qty <= short_qty - (sum of OTHER children's fulfilled_qty)
+    item_idx = None
+    for i, it in enumerate(parent.get("items") or []):
+        if it.get("part_no") == body.part_no and it.get("make") == body.make:
+            item_idx = i
+            break
+    if item_idx is None:
+        raise HTTPException(status_code=400, detail="Item not found")
+    p_item = parent["items"][item_idx]
+    short_qty = float(p_item.get("short_qty") or 0)
+    others = sum(float(c.get("fulfilled_qty") or 0)
+                 for c in (p_item.get("children") or [])
+                 if c.get("child_srn_id") != child_srn_id)
+    if qty > short_qty - others + 1e-6:
+        raise HTTPException(status_code=400,
+                            detail=f"Fulfilled Qty exceeds remaining short ({short_qty - others})")
+
+    # Update child SRN's item and date.
+    new_child_items = [{
+        **child["items"][0],
+        "short_qty": qty, "fulfilled_qty": qty, "quantity": qty,
+    }]
+    await db.short_received_notes.update_one(
+        {"id": child_srn_id},
+        {"$set": {"items": new_child_items, "fulfillment_date": body.fulfillment_date}},
+    )
+
+    # Update parent item's children[] entry.
+    new_items = []
+    for i, it in enumerate(parent["items"]):
+        new_it = dict(it)
+        if i == item_idx:
+            new_children = []
+            for c in (new_it.get("children") or []):
+                if c.get("child_srn_id") == child_srn_id:
+                    new_children.append({**c, "fulfilled_qty": qty,
+                                         "fulfilled_date": body.fulfillment_date})
+                else:
+                    new_children.append(c)
+            new_it["children"] = new_children
+        new_items.append(new_it)
+    new_status = _compute_srn_status({**parent, "items": new_items})
+    await db.short_received_notes.update_one(
+        {"id": srn_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
+
+
+@api_router.delete("/short-received-notes/{srn_id}/children/{child_srn_id}")
+async def delete_srn_child_slice(srn_id: str, child_srn_id: str,
+                                 user=Depends(_module_dep("stock_in"))):
+    """Delete a fulfilled slice. Allowed only if no Racking Note exists against
+    the child SRN."""
+    parent = await db.short_received_notes.find_one({"id": srn_id})
+    if not parent or parent.get("parent_srn_id"):
+        raise HTTPException(status_code=404, detail="Parent SRN not found")
+    _enforce_assignee(parent, user, "delete a slice on this Short Received Note")
+    child = await db.short_received_notes.find_one({"id": child_srn_id})
+    if not child or child.get("parent_srn_id") != srn_id:
+        raise HTTPException(status_code=404, detail="Child SRN not found")
+    if await db.racking_notes.find_one({"source_type": "SRN", "source_id": child_srn_id}):
+        raise HTTPException(status_code=409, detail="Cannot delete — a Racking Note exists against this child SRN")
+
+    await db.short_received_notes.delete_one({"id": child_srn_id})
+    new_items = []
+    for it in parent.get("items") or []:
+        new_it = dict(it)
+        new_it["children"] = [c for c in (new_it.get("children") or [])
+                              if c.get("child_srn_id") != child_srn_id]
+        new_items.append(new_it)
+    new_status = _compute_srn_status({**parent, "items": new_items})
+    await db.short_received_notes.update_one(
+        {"id": srn_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return {"ok": True}
+
+
 @api_router.delete("/short-received-notes/{srn_id}")
 async def delete_short_received_note(srn_id: str, user=Depends(_module_dep("stock_in"))):
     existing = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
@@ -4303,6 +4563,289 @@ async def finalize_extra_received_note(ern_id: str, user=Depends(_module_dep("st
 
     doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
     return doc
+
+
+# ===================== ERN slice (per-batch acceptance) endpoints =====================
+
+class ErnAcceptSliceBody(BaseModel):
+    part_no: str
+    make: str
+    accepted_qty: float
+    accepted_date: str          # ISO YYYY-MM-DD
+
+
+async def _create_child_ern_for_slice(parent_ern: dict, part_no: str, make: str,
+                                      accepted_qty: float, accepted_date: str,
+                                      actor: dict) -> dict:
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    serial = await _alloc_serial("ern", fy)
+    ern_no = f"ERN/{fy}/{serial:03d}"
+
+    parent_item = next(
+        (it for it in (parent_ern.get("items") or [])
+         if it.get("part_no") == part_no and it.get("make") == make),
+        None,
+    )
+    if not parent_item:
+        raise HTTPException(status_code=400, detail="Item not found on parent ERN")
+
+    child_item = {
+        "part_no": part_no,
+        "make": make,
+        "invoice_qty": float(parent_item.get("invoice_qty") or 0),
+        "received_qty": float(parent_item.get("received_qty") or 0),
+        "extra_qty": float(accepted_qty),
+        "accepted_qty": float(accepted_qty),
+        "rejected_qty": 0,
+        "quantity": float(accepted_qty),
+        "model": parent_item.get("model", ""),
+        "old_part_no": parent_item.get("old_part_no", ""),
+        "make_part_no": parent_item.get("make_part_no", ""),
+        "description_1": parent_item.get("description_1", ""),
+        "description_2": parent_item.get("description_2", ""),
+        "remarks_oem": parent_item.get("remarks_oem", ""),
+        "remarks_others": parent_item.get("remarks_others", ""),
+        "item_category": parent_item.get("item_category", ""),
+    }
+    doc = {
+        "id": str(uuid.uuid4()),
+        "ern_no": ern_no,
+        "ern_date": today.date().isoformat(),
+        "fy": fy,
+        "serial": serial,
+        "parent_rn_id": parent_ern.get("parent_rn_id", ""),
+        "parent_rn_no": parent_ern.get("parent_rn_no", ""),
+        "parent_rn_date": parent_ern.get("parent_rn_date", ""),
+        "parent_ern_id": parent_ern["id"],
+        "parent_ern_no": parent_ern.get("ern_no", ""),
+        "chain_remarks": f"Accepted slice from {parent_ern.get('ern_no', '')}",
+        "invoice_no": parent_ern.get("invoice_no", ""),
+        "invoice_date": parent_ern.get("invoice_date", ""),
+        "goods_received_date": parent_ern.get("goods_received_date", ""),
+        "items": [child_item],
+        "status": "COMPLETE",
+        "finalized_at": now_iso(),
+        "racking_status": "RACKING_PENDING",
+        "racked_at": None,
+        "created_at": now_iso(),
+        "created_by": (actor or {}).get("email", ""),
+        "assigned_to_user_id": parent_ern.get("assigned_to_user_id"),
+        "assigned_to_name": parent_ern.get("assigned_to_name", ""),
+        "assigned_to_email": parent_ern.get("assigned_to_email", ""),
+    }
+    await db.extra_received_notes.insert_one(doc)
+    return doc
+
+
+@api_router.post("/extra-received-notes/{ern_id}/accept", response_model=ExtraReceivedNote)
+async def accept_ern_slice(ern_id: str, body: ErnAcceptSliceBody,
+                           user=Depends(_module_dep("stock_in"))):
+    """Save an accepted slice. Creates a child ERN with the accepted_qty
+    (rackable) and appends to parent.items[i].children."""
+    parent = await db.extra_received_notes.find_one({"id": ern_id})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Extra Received Note not found")
+    if parent.get("parent_ern_id"):
+        raise HTTPException(status_code=400, detail="Cannot accept slices on a child ERN")
+    _enforce_assignee(parent, user, "accept a slice on this Extra Received Note")
+    _no_future_date(body.accepted_date, "Accepted Date")
+
+    qty = float(body.accepted_qty or 0)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Accepted Qty must be greater than 0")
+
+    item_idx = None
+    for i, it in enumerate(parent.get("items") or []):
+        if it.get("part_no") == body.part_no and it.get("make") == body.make:
+            item_idx = i
+            break
+    if item_idx is None:
+        raise HTTPException(status_code=400, detail="Item not found on this ERN")
+
+    p_item = parent["items"][item_idx]
+    extra_qty = float(p_item.get("extra_qty") or 0)
+    rejected = float(p_item.get("rejected_qty") or 0)
+    accepted_so_far = sum(float(c.get("accepted_qty") or 0) for c in (p_item.get("children") or []))
+    undecided = extra_qty - rejected - accepted_so_far
+    if qty > undecided + 1e-6:
+        raise HTTPException(status_code=400,
+                            detail=f"Accepted Qty exceeds undecided ({undecided})")
+
+    child = await _create_child_ern_for_slice(parent, body.part_no, body.make, qty,
+                                              body.accepted_date, user)
+
+    new_items = []
+    for i, it in enumerate(parent["items"]):
+        new_it = dict(it)
+        if i == item_idx:
+            children = list(new_it.get("children") or [])
+            children.append({
+                "child_ern_id": child["id"],
+                "child_ern_no": child["ern_no"],
+                "accepted_qty": qty,
+                "accepted_date": body.accepted_date,
+                "created_at": now_iso(),
+            })
+            new_it["children"] = children
+        new_items.append(new_it)
+    new_status = _compute_ern_status({**parent, "items": new_items})
+    await db.extra_received_notes.update_one(
+        {"id": ern_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
+
+
+@api_router.put("/extra-received-notes/{ern_id}/children/{child_ern_id}", response_model=ExtraReceivedNote)
+async def edit_ern_child_slice(ern_id: str, child_ern_id: str,
+                               body: ErnAcceptSliceBody,
+                               user=Depends(_module_dep("stock_in"))):
+    parent = await db.extra_received_notes.find_one({"id": ern_id})
+    if not parent or parent.get("parent_ern_id"):
+        raise HTTPException(status_code=404, detail="Parent ERN not found")
+    _enforce_assignee(parent, user, "edit a slice on this Extra Received Note")
+    _no_future_date(body.accepted_date, "Accepted Date")
+
+    child = await db.extra_received_notes.find_one({"id": child_ern_id})
+    if not child or child.get("parent_ern_id") != ern_id:
+        raise HTTPException(status_code=404, detail="Child ERN not found")
+    if await db.racking_notes.find_one({"source_type": "ERN", "source_id": child_ern_id}):
+        raise HTTPException(status_code=409, detail="Cannot edit — a Racking Note already exists against this child ERN")
+
+    qty = float(body.accepted_qty or 0)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Accepted Qty must be greater than 0")
+
+    item_idx = None
+    for i, it in enumerate(parent.get("items") or []):
+        if it.get("part_no") == body.part_no and it.get("make") == body.make:
+            item_idx = i
+            break
+    if item_idx is None:
+        raise HTTPException(status_code=400, detail="Item not found")
+    p_item = parent["items"][item_idx]
+    extra_qty = float(p_item.get("extra_qty") or 0)
+    rejected = float(p_item.get("rejected_qty") or 0)
+    others = sum(float(c.get("accepted_qty") or 0)
+                 for c in (p_item.get("children") or [])
+                 if c.get("child_ern_id") != child_ern_id)
+    if qty > extra_qty - rejected - others + 1e-6:
+        raise HTTPException(status_code=400,
+                            detail=f"Accepted Qty exceeds undecided ({extra_qty - rejected - others})")
+
+    new_child_items = [{
+        **child["items"][0],
+        "extra_qty": qty, "accepted_qty": qty, "quantity": qty,
+    }]
+    await db.extra_received_notes.update_one(
+        {"id": child_ern_id},
+        {"$set": {"items": new_child_items, "goods_received_date": body.accepted_date}},
+    )
+    new_items = []
+    for i, it in enumerate(parent["items"]):
+        new_it = dict(it)
+        if i == item_idx:
+            new_children = []
+            for c in (new_it.get("children") or []):
+                if c.get("child_ern_id") == child_ern_id:
+                    new_children.append({**c, "accepted_qty": qty,
+                                         "accepted_date": body.accepted_date})
+                else:
+                    new_children.append(c)
+            new_it["children"] = new_children
+        new_items.append(new_it)
+    new_status = _compute_ern_status({**parent, "items": new_items})
+    await db.extra_received_notes.update_one(
+        {"id": ern_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
+
+
+@api_router.delete("/extra-received-notes/{ern_id}/children/{child_ern_id}")
+async def delete_ern_child_slice(ern_id: str, child_ern_id: str,
+                                 user=Depends(_module_dep("stock_in"))):
+    parent = await db.extra_received_notes.find_one({"id": ern_id})
+    if not parent or parent.get("parent_ern_id"):
+        raise HTTPException(status_code=404, detail="Parent ERN not found")
+    _enforce_assignee(parent, user, "delete a slice on this Extra Received Note")
+    child = await db.extra_received_notes.find_one({"id": child_ern_id})
+    if not child or child.get("parent_ern_id") != ern_id:
+        raise HTTPException(status_code=404, detail="Child ERN not found")
+    if await db.racking_notes.find_one({"source_type": "ERN", "source_id": child_ern_id}):
+        raise HTTPException(status_code=409, detail="Cannot delete — a Racking Note exists against this child ERN")
+
+    await db.extra_received_notes.delete_one({"id": child_ern_id})
+    new_items = []
+    for it in parent.get("items") or []:
+        new_it = dict(it)
+        new_it["children"] = [c for c in (new_it.get("children") or [])
+                              if c.get("child_ern_id") != child_ern_id]
+        new_items.append(new_it)
+    new_status = _compute_ern_status({**parent, "items": new_items})
+    await db.extra_received_notes.update_one(
+        {"id": ern_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return {"ok": True}
+
+
+# ===================== ERN — set rejected qty per item (top-level on parent) =====================
+
+class ErnSetRejectedBody(BaseModel):
+    part_no: str
+    make: str
+    rejected_qty: float
+
+
+@api_router.put("/extra-received-notes/{ern_id}/reject", response_model=ExtraReceivedNote)
+async def set_ern_rejected(ern_id: str, body: ErnSetRejectedBody,
+                           user=Depends(_module_dep("stock_in"))):
+    """Set/update the rejected qty for one item on a parent ERN. Rejection does
+    NOT create a child (rejected material is returned/discarded, not rackable)."""
+    parent = await db.extra_received_notes.find_one({"id": ern_id})
+    if not parent or parent.get("parent_ern_id"):
+        raise HTTPException(status_code=404, detail="Parent ERN not found")
+    _enforce_assignee(parent, user, "set rejected qty on this Extra Received Note")
+    qty = float(body.rejected_qty or 0)
+    if qty < 0:
+        raise HTTPException(status_code=400, detail="Rejected Qty cannot be negative")
+
+    item_idx = None
+    for i, it in enumerate(parent.get("items") or []):
+        if it.get("part_no") == body.part_no and it.get("make") == body.make:
+            item_idx = i
+            break
+    if item_idx is None:
+        raise HTTPException(status_code=400, detail="Item not found")
+    p_item = parent["items"][item_idx]
+    extra_qty = float(p_item.get("extra_qty") or 0)
+    accepted_so_far = sum(float(c.get("accepted_qty") or 0) for c in (p_item.get("children") or []))
+    if qty > extra_qty - accepted_so_far + 1e-6:
+        raise HTTPException(status_code=400,
+                            detail=f"Rejected Qty exceeds undecided ({extra_qty - accepted_so_far})")
+
+    new_items = []
+    for i, it in enumerate(parent["items"]):
+        new_it = dict(it)
+        if i == item_idx:
+            new_it["rejected_qty"] = qty
+        new_items.append(new_it)
+    new_status = _compute_ern_status({**parent, "items": new_items})
+    await db.extra_received_notes.update_one(
+        {"id": ern_id},
+        {"$set": {"items": new_items, "status": new_status}},
+    )
+    if parent.get("parent_rn_id"):
+        await _recompute_rn_status(parent["parent_rn_id"])
+    return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 
 @api_router.delete("/extra-received-notes/{ern_id}")
