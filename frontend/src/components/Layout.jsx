@@ -5,6 +5,7 @@ import NotificationBell from "./NotificationBell";
 import {
   SquaresFour,
   Package,
+  MagnifyingGlass,
   Buildings,
   ArrowDown,
   ArrowUp,
@@ -22,6 +23,7 @@ import {
 const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, testid: "nav-dashboard" },
   { to: "/stock-master", label: "Stock Master", icon: Package, testid: "nav-stock-master", module: "stock_master" },
+  { to: "/item-details", label: "Item Details", icon: MagnifyingGlass, testid: "nav-item-details", module: "item_details" },
   { to: "/locations", label: "Location Master", icon: Buildings, testid: "nav-locations", module: "locations" },
   { to: "/stock-in", label: "Stock In", icon: ArrowDown, testid: "nav-stock-in", module: "stock_in" },
   { to: "/stock-out", label: "Stock Out", icon: ArrowUp, testid: "nav-stock-out", module: "stock_out" },

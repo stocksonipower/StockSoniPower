@@ -5,6 +5,7 @@ import LoginPage from "./pages/LoginPage";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import StockMasterPage from "./pages/StockMasterPage";
+import ItemDetailsPage from "./pages/ItemDetailsPage";
 import LocationsPage from "./pages/LocationsPage";
 import StockInPage from "./pages/StockInPage";
 import StockOutPage from "./pages/StockOutPage";
@@ -58,6 +59,7 @@ function App() {
           <Route path="/profile" element={<Protected><ProfilePage /></Protected>} />
           <Route path="/users" element={<Protected adminOnly><UsersPage /></Protected>} />
           <Route path="/stock-master" element={<Protected module="stock_master"><StockMasterPage /></Protected>} />
+          <Route path="/item-details" element={<Protected module="item_details"><ItemDetailsPage /></Protected>} />
           <Route path="/locations" element={<Protected module="locations"><LocationsPage /></Protected>} />
           <Route path="/stock-in" element={<Protected module="stock_in"><StockInPage /></Protected>} />
           <Route path="/stock-out" element={<Protected module="stock_out"><StockOutPage /></Protected>} />
