@@ -104,28 +104,28 @@ export default function StockInPage() {
           <TabsTrigger value="receipt-note" className="rounded-sm" data-testid="tab-receipt-note">
             <FileText size={14} weight="bold" className="mr-2" /> Receipt Note
           </TabsTrigger>
-          <TabsTrigger value="racking-note" className="rounded-sm" data-testid="tab-racking-note">
-            <Stack size={14} weight="bold" className="mr-2" /> Racking Note
-          </TabsTrigger>
           <TabsTrigger value="short-received-note" className="rounded-sm" data-testid="tab-short-received-note">
             <Warning size={14} weight="bold" className="mr-2" /> Short Received Note
           </TabsTrigger>
           <TabsTrigger value="extra-received-note" className="rounded-sm" data-testid="tab-extra-received-note">
             <Plus size={14} weight="bold" className="mr-2" /> Extra Received Note
           </TabsTrigger>
+          <TabsTrigger value="racking-note" className="rounded-sm" data-testid="tab-racking-note">
+            <Stack size={14} weight="bold" className="mr-2" /> Racking Note
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="receipt-note">
           <ReceiptNoteTab />
-        </TabsContent>
-        <TabsContent value="racking-note">
-          <RackingNoteTab />
         </TabsContent>
         <TabsContent value="short-received-note">
           <ShortReceivedNoteTab />
         </TabsContent>
         <TabsContent value="extra-received-note">
           <ExtraReceivedNoteTab />
+        </TabsContent>
+        <TabsContent value="racking-note">
+          <RackingNoteTab />
         </TabsContent>
       </Tabs>
     </div>

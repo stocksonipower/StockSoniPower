@@ -3147,6 +3147,256 @@ async def list_racking_notes(
     return rows
 
 
+@api_router.get("/racking-notes/sources")
+async def list_racking_sources(user=Depends(_module_dep("stock_in"))):
+    """Return all rackable sources (RN + SRN-with-fulfilled + ERN-with-accepted),
+    grouped by their ultimate parent RN."""
+    # 1. RNs eligible: FINAL or PARTIALLY_RACKED (DRAFT and FULLY_RACKED are excluded).
+    rn_rows = await db.receipt_notes.find(
+        {"status": {"$in": ["FINAL", "PARTIALLY_RACKED"]}},
+        {"_id": 0, "id": 1, "rn_no": 1, "rn_date": 1, "stock_in_type": 1,
+         "invoice_no": 1, "invoice_date": 1, "status": 1,
+         "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1},
+    ).sort("created_at", -1).to_list(5000)
+
+    # 2. SRNs eligible: any with sum(fulfilled_qty) > 0 AND racking_status != FULLY_RACKED.
+    srn_rows = await db.short_received_notes.find(
+        {"racking_status": {"$ne": "FULLY_RACKED"}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+    eligible_srns = []
+    for s in srn_rows:
+        total_ful = sum(float(it.get("fulfilled_qty") or 0) for it in s.get("items") or [])
+        if total_ful > 0:
+            eligible_srns.append(s)
+
+    # 3. ERNs eligible: any with sum(accepted_qty) > 0 AND racking_status != FULLY_RACKED.
+    ern_rows = await db.extra_received_notes.find(
+        {"racking_status": {"$ne": "FULLY_RACKED"}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+    eligible_erns = []
+    for e in ern_rows:
+        total_acc = sum(float(it.get("accepted_qty") or 0) for it in e.get("items") or [])
+        if total_acc > 0:
+            eligible_erns.append(e)
+
+    # Group everything by parent_rn_id.
+    groups = {}
+    for rn in rn_rows:
+        groups[rn["id"]] = {
+            "parent_rn_id": rn["id"],
+            "parent_rn_no": rn.get("rn_no", ""),
+            "parent_rn_date": rn.get("rn_date", ""),
+            "stock_in_type": rn.get("stock_in_type", "INVOICE"),
+            "invoice_no": rn.get("invoice_no", ""),
+            "invoice_date": rn.get("invoice_date", ""),
+            "sources": [{
+                "source_type": "RN",
+                "source_id": rn["id"],
+                "source_no": rn.get("rn_no", ""),
+                "source_date": rn.get("rn_date", ""),
+                "status": rn.get("status", ""),
+                "assigned_to_user_id": rn.get("assigned_to_user_id"),
+                "assigned_to_name": rn.get("assigned_to_name", ""),
+                "assigned_to_email": rn.get("assigned_to_email", ""),
+            }],
+        }
+    for s in eligible_srns:
+        prn_id = s.get("parent_rn_id")
+        if prn_id not in groups:
+            # Parent RN already fully racked; create a stub group so the SRN/ERN are still selectable.
+            groups[prn_id] = {
+                "parent_rn_id": prn_id,
+                "parent_rn_no": s.get("parent_rn_no", ""),
+                "parent_rn_date": s.get("parent_rn_date", ""),
+                "stock_in_type": "INVOICE",
+                "invoice_no": s.get("invoice_no", ""),
+                "invoice_date": s.get("invoice_date", ""),
+                "sources": [],
+            }
+        groups[prn_id]["sources"].append({
+            "source_type": "SRN",
+            "source_id": s["id"],
+            "source_no": s.get("srn_no", ""),
+            "source_date": s.get("srn_date", ""),
+            "status": s.get("status", ""),
+            "racking_status": s.get("racking_status", ""),
+            "assigned_to_user_id": s.get("assigned_to_user_id"),
+            "assigned_to_name": s.get("assigned_to_name", ""),
+            "assigned_to_email": s.get("assigned_to_email", ""),
+        })
+    for e in eligible_erns:
+        prn_id = e.get("parent_rn_id")
+        if prn_id not in groups:
+            groups[prn_id] = {
+                "parent_rn_id": prn_id,
+                "parent_rn_no": e.get("parent_rn_no", ""),
+                "parent_rn_date": e.get("parent_rn_date", ""),
+                "stock_in_type": "INVOICE",
+                "invoice_no": e.get("invoice_no", ""),
+                "invoice_date": e.get("invoice_date", ""),
+                "sources": [],
+            }
+        groups[prn_id]["sources"].append({
+            "source_type": "ERN",
+            "source_id": e["id"],
+            "source_no": e.get("ern_no", ""),
+            "source_date": e.get("ern_date", ""),
+            "status": e.get("status", ""),
+            "racking_status": e.get("racking_status", ""),
+            "assigned_to_user_id": e.get("assigned_to_user_id"),
+            "assigned_to_name": e.get("assigned_to_name", ""),
+            "assigned_to_email": e.get("assigned_to_email", ""),
+        })
+
+    # Filter out empty groups (parent RN fully racked AND no eligible SRN/ERN under it).
+    return [g for g in groups.values() if g.get("sources")]
+
+
+
+@api_router.get("/racking-notes/prepare-source")
+async def prepare_racking_for_source(
+    source_type: str,
+    source_id: str,
+    exclude_rkn_id: Optional[str] = None,
+    user=Depends(_module_dep("stock_in")),
+):
+    """Polymorphic prepare for racking: builds the items list from RN, SRN, or ERN."""
+    source_type = (source_type or "").upper()
+    if source_type not in ("RN", "SRN", "ERN"):
+        raise HTTPException(status_code=400, detail="source_type must be RN, SRN, or ERN")
+
+    if source_type == "RN":
+        rn = await db.receipt_notes.find_one({"id": source_id}, {"_id": 0})
+        if not rn:
+            raise HTTPException(status_code=404, detail="Receipt note not found")
+        if rn.get("status") == "FULLY_RACKED" and not exclude_rkn_id:
+            raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
+        # The qty available per (part,make) is received_qty.
+        rackable = []
+        for it in rn.get("items", []):
+            rec = it.get("received_qty")
+            if rec is None:
+                rec = it.get("quantity") or 0
+            rackable.append({
+                "part_no": it.get("part_no", ""),
+                "make": it.get("make", ""),
+                "rackable_qty": float(rec or 0),
+            })
+        header = {
+            "id": rn["id"], "no": rn["rn_no"], "date": rn["rn_date"],
+            "type": "RN",
+            "parent_rn_id": rn["id"], "parent_rn_no": rn["rn_no"], "parent_rn_date": rn["rn_date"],
+            "invoice_no": rn.get("invoice_no", ""), "invoice_date": rn.get("invoice_date", ""),
+            "status": rn.get("status"),
+        }
+
+    elif source_type == "SRN":
+        srn = await db.short_received_notes.find_one({"id": source_id}, {"_id": 0})
+        if not srn:
+            raise HTTPException(status_code=404, detail="Short Received Note not found")
+        if srn.get("racking_status") == "FULLY_RACKED" and not exclude_rkn_id:
+            raise HTTPException(status_code=409, detail="This SRN is already fully racked")
+        rackable = []
+        for it in srn.get("items", []):
+            rackable.append({
+                "part_no": it.get("part_no", ""),
+                "make": it.get("make", ""),
+                "rackable_qty": float(it.get("fulfilled_qty") or 0),
+            })
+        header = {
+            "id": srn["id"], "no": srn["srn_no"], "date": srn["srn_date"],
+            "type": "SRN",
+            "parent_rn_id": srn.get("parent_rn_id"),
+            "parent_rn_no": srn.get("parent_rn_no", ""),
+            "parent_rn_date": srn.get("parent_rn_date", ""),
+            "invoice_no": srn.get("invoice_no", ""), "invoice_date": srn.get("invoice_date", ""),
+            "status": srn.get("status"),
+        }
+
+    else:  # ERN
+        ern = await db.extra_received_notes.find_one({"id": source_id}, {"_id": 0})
+        if not ern:
+            raise HTTPException(status_code=404, detail="Extra Received Note not found")
+        if ern.get("racking_status") == "FULLY_RACKED" and not exclude_rkn_id:
+            raise HTTPException(status_code=409, detail="This ERN is already fully racked")
+        rackable = []
+        for it in ern.get("items", []):
+            rackable.append({
+                "part_no": it.get("part_no", ""),
+                "make": it.get("make", ""),
+                "rackable_qty": float(it.get("accepted_qty") or 0),
+            })
+        header = {
+            "id": ern["id"], "no": ern["ern_no"], "date": ern["ern_date"],
+            "type": "ERN",
+            "parent_rn_id": ern.get("parent_rn_id"),
+            "parent_rn_no": ern.get("parent_rn_no", ""),
+            "parent_rn_date": ern.get("parent_rn_date", ""),
+            "invoice_no": ern.get("invoice_no", ""), "invoice_date": ern.get("invoice_date", ""),
+            "status": ern.get("status"),
+        }
+
+    # How much has already been racked from this same source?
+    other_sums = await _aggregate_other_rkn_qty_by_source(source_type, source_id, exclude_rkn_id)
+
+    items_out = []
+    for r in rackable:
+        part_no = r["part_no"]
+        make = r["make"]
+        avail = r["rackable_qty"]
+        if avail <= 0:
+            continue
+        already = other_sums.get(_key(part_no, make), 0)
+        pending = avail - already
+        if pending <= 0:
+            continue
+        master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+        # Existing locations
+        pipeline = [
+            {"$match": {"part_no": part_no, "make": make}},
+            {"$group": {
+                "_id": {
+                    "godown_id": "$godown_id", "godown_name": "$godown_name",
+                    "rack_id": "$rack_id", "rack_no": "$rack_no",
+                    "box_id": "$box_id", "box_no": "$box_no", "box_category": "$box_category",
+                },
+                "quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+            }},
+            {"$match": {"quantity": {"$gt": 0}}},
+            {"$sort": {"_id.godown_name": 1, "_id.rack_no": 1, "_id.box_no": 1}},
+        ]
+        raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
+        existing_locations = [{**rr["_id"], "current_qty": rr["quantity"]} for rr in raw_locs]
+        prefill = existing_locations[0] if len(existing_locations) == 1 else None
+        items_out.append({
+            "part_no": part_no, "make": make,
+            "rackable_qty": avail,
+            "already_racked_qty": already,
+            "pending_qty": pending,
+            "quantity": pending,
+            "model": master.get("model", ""),
+            "old_part_no": master.get("old_part_no", ""),
+            "make_part_no": master.get("make_part_no", ""),
+            "description_1": master.get("description_1", ""),
+            "description_2": master.get("description_2", ""),
+            "remarks_oem": master.get("remarks_oem", ""),
+            "remarks_others": master.get("remarks_others", ""),
+            "item_category": master.get("item_category", ""),
+            "godown_id": prefill["godown_id"] if prefill else "",
+            "godown_name": prefill["godown_name"] if prefill else "",
+            "rack_id": prefill["rack_id"] if prefill else "",
+            "rack_no": prefill["rack_no"] if prefill else "",
+            "box_id": prefill["box_id"] if prefill else "",
+            "box_no": prefill["box_no"] if prefill else "",
+            "box_category": prefill.get("box_category", "") if prefill else "",
+            "existing_locations": existing_locations,
+        })
+
+    return {"source": header, "items": items_out}
+
+
 @api_router.get("/racking-notes/{rkn_id}")
 async def get_racking_note(rkn_id: str, user=Depends(get_current_user)):
     doc = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
@@ -3786,254 +4036,6 @@ async def delete_extra_received_note(ern_id: str, user=Depends(_module_dep("stoc
 
 
 # ===================== RACKING SOURCES (polymorphic) =====================
-@api_router.get("/racking-notes/sources")
-async def list_racking_sources(user=Depends(_module_dep("stock_in"))):
-    """Return all rackable sources (RN + SRN-with-fulfilled + ERN-with-accepted),
-    grouped by their ultimate parent RN."""
-    # 1. RNs eligible: FINAL or PARTIALLY_RACKED (DRAFT and FULLY_RACKED are excluded).
-    rn_rows = await db.receipt_notes.find(
-        {"status": {"$in": ["FINAL", "PARTIALLY_RACKED"]}},
-        {"_id": 0, "id": 1, "rn_no": 1, "rn_date": 1, "stock_in_type": 1,
-         "invoice_no": 1, "invoice_date": 1, "status": 1,
-         "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1},
-    ).sort("created_at", -1).to_list(5000)
-
-    # 2. SRNs eligible: any with sum(fulfilled_qty) > 0 AND racking_status != FULLY_RACKED.
-    srn_rows = await db.short_received_notes.find(
-        {"racking_status": {"$ne": "FULLY_RACKED"}},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(5000)
-    eligible_srns = []
-    for s in srn_rows:
-        total_ful = sum(float(it.get("fulfilled_qty") or 0) for it in s.get("items") or [])
-        if total_ful > 0:
-            eligible_srns.append(s)
-
-    # 3. ERNs eligible: any with sum(accepted_qty) > 0 AND racking_status != FULLY_RACKED.
-    ern_rows = await db.extra_received_notes.find(
-        {"racking_status": {"$ne": "FULLY_RACKED"}},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(5000)
-    eligible_erns = []
-    for e in ern_rows:
-        total_acc = sum(float(it.get("accepted_qty") or 0) for it in e.get("items") or [])
-        if total_acc > 0:
-            eligible_erns.append(e)
-
-    # Group everything by parent_rn_id.
-    groups = {}
-    for rn in rn_rows:
-        groups[rn["id"]] = {
-            "parent_rn_id": rn["id"],
-            "parent_rn_no": rn.get("rn_no", ""),
-            "parent_rn_date": rn.get("rn_date", ""),
-            "stock_in_type": rn.get("stock_in_type", "INVOICE"),
-            "invoice_no": rn.get("invoice_no", ""),
-            "invoice_date": rn.get("invoice_date", ""),
-            "sources": [{
-                "source_type": "RN",
-                "source_id": rn["id"],
-                "source_no": rn.get("rn_no", ""),
-                "source_date": rn.get("rn_date", ""),
-                "status": rn.get("status", ""),
-                "assigned_to_user_id": rn.get("assigned_to_user_id"),
-                "assigned_to_name": rn.get("assigned_to_name", ""),
-                "assigned_to_email": rn.get("assigned_to_email", ""),
-            }],
-        }
-    for s in eligible_srns:
-        prn_id = s.get("parent_rn_id")
-        if prn_id not in groups:
-            # Parent RN already fully racked; create a stub group so the SRN/ERN are still selectable.
-            groups[prn_id] = {
-                "parent_rn_id": prn_id,
-                "parent_rn_no": s.get("parent_rn_no", ""),
-                "parent_rn_date": s.get("parent_rn_date", ""),
-                "stock_in_type": "INVOICE",
-                "invoice_no": s.get("invoice_no", ""),
-                "invoice_date": s.get("invoice_date", ""),
-                "sources": [],
-            }
-        groups[prn_id]["sources"].append({
-            "source_type": "SRN",
-            "source_id": s["id"],
-            "source_no": s.get("srn_no", ""),
-            "source_date": s.get("srn_date", ""),
-            "status": s.get("status", ""),
-            "racking_status": s.get("racking_status", ""),
-            "assigned_to_user_id": s.get("assigned_to_user_id"),
-            "assigned_to_name": s.get("assigned_to_name", ""),
-            "assigned_to_email": s.get("assigned_to_email", ""),
-        })
-    for e in eligible_erns:
-        prn_id = e.get("parent_rn_id")
-        if prn_id not in groups:
-            groups[prn_id] = {
-                "parent_rn_id": prn_id,
-                "parent_rn_no": e.get("parent_rn_no", ""),
-                "parent_rn_date": e.get("parent_rn_date", ""),
-                "stock_in_type": "INVOICE",
-                "invoice_no": e.get("invoice_no", ""),
-                "invoice_date": e.get("invoice_date", ""),
-                "sources": [],
-            }
-        groups[prn_id]["sources"].append({
-            "source_type": "ERN",
-            "source_id": e["id"],
-            "source_no": e.get("ern_no", ""),
-            "source_date": e.get("ern_date", ""),
-            "status": e.get("status", ""),
-            "racking_status": e.get("racking_status", ""),
-            "assigned_to_user_id": e.get("assigned_to_user_id"),
-            "assigned_to_name": e.get("assigned_to_name", ""),
-            "assigned_to_email": e.get("assigned_to_email", ""),
-        })
-
-    # Filter out empty groups (parent RN fully racked AND no eligible SRN/ERN under it).
-    return [g for g in groups.values() if g.get("sources")]
-
-
-@api_router.get("/racking-notes/prepare-source")
-async def prepare_racking_for_source(
-    source_type: str,
-    source_id: str,
-    exclude_rkn_id: Optional[str] = None,
-    user=Depends(_module_dep("stock_in")),
-):
-    """Polymorphic prepare for racking: builds the items list from RN, SRN, or ERN."""
-    source_type = (source_type or "").upper()
-    if source_type not in ("RN", "SRN", "ERN"):
-        raise HTTPException(status_code=400, detail="source_type must be RN, SRN, or ERN")
-
-    if source_type == "RN":
-        rn = await db.receipt_notes.find_one({"id": source_id}, {"_id": 0})
-        if not rn:
-            raise HTTPException(status_code=404, detail="Receipt note not found")
-        if rn.get("status") == "FULLY_RACKED" and not exclude_rkn_id:
-            raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
-        # The qty available per (part,make) is received_qty.
-        rackable = []
-        for it in rn.get("items", []):
-            rec = it.get("received_qty")
-            if rec is None:
-                rec = it.get("quantity") or 0
-            rackable.append({
-                "part_no": it.get("part_no", ""),
-                "make": it.get("make", ""),
-                "rackable_qty": float(rec or 0),
-            })
-        header = {
-            "id": rn["id"], "no": rn["rn_no"], "date": rn["rn_date"],
-            "type": "RN",
-            "parent_rn_id": rn["id"], "parent_rn_no": rn["rn_no"], "parent_rn_date": rn["rn_date"],
-            "invoice_no": rn.get("invoice_no", ""), "invoice_date": rn.get("invoice_date", ""),
-            "status": rn.get("status"),
-        }
-
-    elif source_type == "SRN":
-        srn = await db.short_received_notes.find_one({"id": source_id}, {"_id": 0})
-        if not srn:
-            raise HTTPException(status_code=404, detail="Short Received Note not found")
-        if srn.get("racking_status") == "FULLY_RACKED" and not exclude_rkn_id:
-            raise HTTPException(status_code=409, detail="This SRN is already fully racked")
-        rackable = []
-        for it in srn.get("items", []):
-            rackable.append({
-                "part_no": it.get("part_no", ""),
-                "make": it.get("make", ""),
-                "rackable_qty": float(it.get("fulfilled_qty") or 0),
-            })
-        header = {
-            "id": srn["id"], "no": srn["srn_no"], "date": srn["srn_date"],
-            "type": "SRN",
-            "parent_rn_id": srn.get("parent_rn_id"),
-            "parent_rn_no": srn.get("parent_rn_no", ""),
-            "parent_rn_date": srn.get("parent_rn_date", ""),
-            "invoice_no": srn.get("invoice_no", ""), "invoice_date": srn.get("invoice_date", ""),
-            "status": srn.get("status"),
-        }
-
-    else:  # ERN
-        ern = await db.extra_received_notes.find_one({"id": source_id}, {"_id": 0})
-        if not ern:
-            raise HTTPException(status_code=404, detail="Extra Received Note not found")
-        if ern.get("racking_status") == "FULLY_RACKED" and not exclude_rkn_id:
-            raise HTTPException(status_code=409, detail="This ERN is already fully racked")
-        rackable = []
-        for it in ern.get("items", []):
-            rackable.append({
-                "part_no": it.get("part_no", ""),
-                "make": it.get("make", ""),
-                "rackable_qty": float(it.get("accepted_qty") or 0),
-            })
-        header = {
-            "id": ern["id"], "no": ern["ern_no"], "date": ern["ern_date"],
-            "type": "ERN",
-            "parent_rn_id": ern.get("parent_rn_id"),
-            "parent_rn_no": ern.get("parent_rn_no", ""),
-            "parent_rn_date": ern.get("parent_rn_date", ""),
-            "invoice_no": ern.get("invoice_no", ""), "invoice_date": ern.get("invoice_date", ""),
-            "status": ern.get("status"),
-        }
-
-    # How much has already been racked from this same source?
-    other_sums = await _aggregate_other_rkn_qty_by_source(source_type, source_id, exclude_rkn_id)
-
-    items_out = []
-    for r in rackable:
-        part_no = r["part_no"]
-        make = r["make"]
-        avail = r["rackable_qty"]
-        if avail <= 0:
-            continue
-        already = other_sums.get(_key(part_no, make), 0)
-        pending = avail - already
-        if pending <= 0:
-            continue
-        master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
-        # Existing locations
-        pipeline = [
-            {"$match": {"part_no": part_no, "make": make}},
-            {"$group": {
-                "_id": {
-                    "godown_id": "$godown_id", "godown_name": "$godown_name",
-                    "rack_id": "$rack_id", "rack_no": "$rack_no",
-                    "box_id": "$box_id", "box_no": "$box_no", "box_category": "$box_category",
-                },
-                "quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
-            }},
-            {"$match": {"quantity": {"$gt": 0}}},
-            {"$sort": {"_id.godown_name": 1, "_id.rack_no": 1, "_id.box_no": 1}},
-        ]
-        raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
-        existing_locations = [{**rr["_id"], "current_qty": rr["quantity"]} for rr in raw_locs]
-        prefill = existing_locations[0] if len(existing_locations) == 1 else None
-        items_out.append({
-            "part_no": part_no, "make": make,
-            "rackable_qty": avail,
-            "already_racked_qty": already,
-            "pending_qty": pending,
-            "quantity": pending,
-            "model": master.get("model", ""),
-            "old_part_no": master.get("old_part_no", ""),
-            "make_part_no": master.get("make_part_no", ""),
-            "description_1": master.get("description_1", ""),
-            "description_2": master.get("description_2", ""),
-            "remarks_oem": master.get("remarks_oem", ""),
-            "remarks_others": master.get("remarks_others", ""),
-            "item_category": master.get("item_category", ""),
-            "godown_id": prefill["godown_id"] if prefill else "",
-            "godown_name": prefill["godown_name"] if prefill else "",
-            "rack_id": prefill["rack_id"] if prefill else "",
-            "rack_no": prefill["rack_no"] if prefill else "",
-            "box_id": prefill["box_id"] if prefill else "",
-            "box_no": prefill["box_no"] if prefill else "",
-            "box_category": prefill.get("box_category", "") if prefill else "",
-            "existing_locations": existing_locations,
-        })
-
-    return {"source": header, "items": items_out}
-
 
 # ===================== ISSUE NOTES (Stock Out) =====================
 async def _stock_total_for(part_no: str, make: str) -> float:
@@ -5492,7 +5494,7 @@ async def startup():
     # the switch from `_next_serial`, scan each FY-numbered collection for max(serial) per fy
     # and seed the counter to that value (so subsequent allocations don't collide with existing
     # serials). Idempotent and safe to run on every startup.
-    # Note: `_id` already has a built-in unique index — no need to re-create it.
+    # Note: db.counters uses _id as the key — MongoDB auto-creates a unique index on _id.
     SERIES_TO_COLL = {
         "rn":  db.receipt_notes,
         "rkn": db.racking_notes,

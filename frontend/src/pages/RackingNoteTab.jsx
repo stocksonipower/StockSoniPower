@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
-  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectGroup, SelectLabel,
 } from "../components/ui/select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -27,6 +27,22 @@ function fmtDate(iso) {
   if (!m) return iso;
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
+
+// Phase 2: source-type badge colours (RN=blue, SRN=amber, ERN=purple)
+const SRC_TYPE_STYLES = {
+  RN:  { badge: "bg-blue-100 text-blue-800 border-blue-200",       label: "RN"  },
+  SRN: { badge: "bg-amber-100 text-amber-800 border-amber-200",    label: "SRN" },
+  ERN: { badge: "bg-purple-100 text-purple-800 border-purple-200", label: "ERN" },
+};
+function SourceTypeBadge({ type }) {
+  const s = SRC_TYPE_STYLES[type] || SRC_TYPE_STYLES.RN;
+  return (
+    <span className={`inline-block text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm border ${s.badge}`}>
+      {s.label}
+    </span>
+  );
+}
+
 
 /* ==============================================================
    STOCK IN  ·  Racking Note tab
@@ -273,6 +289,13 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
               <Detail k="Racking Note Date" v={fmtDate(rkn.rkn_date)} />
               <Detail k="Receipt Note No" v={rkn.receipt_note_no || "—"} />
               <Detail k="Receipt Note Date" v={fmtDate(rkn.receipt_note_date)} />
+              <div>
+                <div className="label-sm">Racked Against</div>
+                <div className="font-mono mt-1 text-slate-900 flex items-center gap-2" data-testid="rkn-detail-source">
+                  <SourceTypeBadge type={rkn.source_type || "RN"} />
+                  <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
+                </div>
+              </div>
               <Detail k="Status" v={rkn.status} />
               <Detail k="Created By" v={rkn.created_by || "—"} />
               <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
@@ -336,8 +359,12 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
   const isEdit = !!editing;
   const [rknNo, setRknNo] = useState("");
   const [rknDate, setRknDate] = useState("");
-  const [pendingRns, setPendingRns] = useState([]);
-  const [selectedRnId, setSelectedRnId] = useState("");
+  // Phase 2: polymorphic sources grouped by parent RN.
+  // sourceGroups: [{ parent_rn_no, parent_rn_date, sources: [{source_type, source_id, source_no, ...}] }]
+  const [sourceGroups, setSourceGroups] = useState([]);
+  // Currently-selected source = composite "TYPE:ID" key.
+  const [selectedSourceKey, setSelectedSourceKey] = useState("");
+  const [selectedSource, setSelectedSource] = useState(null); // full object from sources list OR prepare-source response.source
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
 
@@ -353,28 +380,51 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     if (isEdit) {
       setRknNo(editing.rkn_no);
       setRknDate(editing.rkn_date);
-      setSelectedRnId(editing.receipt_note_id);
-      setPendingRns([{ id: editing.receipt_note_id, rn_no: editing.receipt_note_no, rn_date: editing.receipt_note_date }]);
+      // Resolve source identity: prefer Phase 2 fields, fall back to legacy receipt_note_id.
+      const srcType = editing.source_type || "RN";
+      const srcId = editing.source_id || editing.receipt_note_id;
+      const srcNo = editing.source_no || editing.receipt_note_no;
+      const srcDate = editing.source_date || editing.receipt_note_date;
+      const key = `${srcType}:${srcId}`;
+      setSelectedSourceKey(key);
+      setSelectedSource({
+        source_type: srcType, source_id: srcId, source_no: srcNo, source_date: srcDate,
+        parent_rn_id: editing.receipt_note_id, parent_rn_no: editing.receipt_note_no, parent_rn_date: editing.receipt_note_date,
+      });
+      // Seed the dropdown with a single-group entry so the trigger displays something sensible.
+      setSourceGroups([{
+        parent_rn_id: editing.receipt_note_id,
+        parent_rn_no: editing.receipt_note_no,
+        parent_rn_date: editing.receipt_note_date,
+        sources: [{ source_type: srcType, source_id: srcId, source_no: srcNo, source_date: srcDate, status: "" }],
+      }]);
       // Fetch a fresh prepare to learn pending_qty per (part,make) excluding THIS rkn so user can edit safely
-      api.get(`/racking-notes/prepare/${editing.receipt_note_id}`, { params: { exclude_rkn_id: editing.id } })
+      api.get("/racking-notes/prepare-source", { params: { source_type: srcType, source_id: srcId, exclude_rkn_id: editing.id } })
         .then((r) => {
           const pendingMap = {};
           (r.data.items || []).forEach((p) => { pendingMap[`${p.part_no}||${p.make}`] = p; });
           setItems((editing.items || []).map((it) => {
             const p = pendingMap[`${it.part_no}||${it.make}`] || {};
-            return { ...it, existing_locations: p.existing_locations || [], pending_qty: p.pending_qty ?? 0, received_qty: p.received_qty ?? 0 };
+            return {
+              ...it,
+              existing_locations: p.existing_locations || [],
+              pending_qty: p.pending_qty ?? 0,
+              rackable_qty: p.rackable_qty ?? p.received_qty ?? 0,
+              received_qty: p.received_qty ?? p.rackable_qty ?? 0,
+            };
           }));
         }).catch(() => {
-          setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [], pending_qty: 0, received_qty: 0 })));
+          setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [], pending_qty: 0, received_qty: 0, rackable_qty: 0 })));
         });
     } else {
       api.get("/racking-notes/next-no").then((r) => {
         setRknNo(r.data.next_rkn_no);
         setRknDate(r.data.rkn_date);
       }).catch(() => toast.error("Could not preview racking-note number"));
-      // Show RNs that are NOT FULLY_RACKED (pending + partially racked)
-      api.get("/receipt-notes", { params: { not_status: "FULLY_RACKED", page_size: 5000 } })
-        .then((r) => setPendingRns(r.data || []));
+      // Phase 2: fetch polymorphic source groups (RN + SRN + ERN) keyed by parent RN.
+      api.get("/racking-notes/sources")
+        .then((r) => setSourceGroups(r.data || []))
+        .catch((err) => toast.error(formatApiError(err.response?.data?.detail) || "Could not load racking sources"));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEdit, editing]);
@@ -401,11 +451,16 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items.length]);
 
-  const handleRnChange = async (rnId) => {
-    setSelectedRnId(rnId);
-    if (!rnId) { setItems([]); return; }
+  const handleSourceChange = async (compositeKey) => {
+    setSelectedSourceKey(compositeKey);
+    if (!compositeKey) { setItems([]); setSelectedSource(null); return; }
+    const [sourceType, sourceId] = compositeKey.split(":");
+    if (!sourceType || !sourceId) { setItems([]); setSelectedSource(null); return; }
     try {
-      const { data } = await api.get(`/racking-notes/prepare/${rnId}`);
+      const { data } = await api.get("/racking-notes/prepare-source", {
+        params: { source_type: sourceType, source_id: sourceId },
+      });
+      setSelectedSource(data.source || null);
       setItems(data.items || []);
       // Eagerly preload racks/boxes for prefilled rows
       (data.items || []).forEach((it) => {
@@ -482,7 +537,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
   }, [items]);
 
   const save = async () => {
-    if (!selectedRnId) { toast.error("Select a Receipt Note"); return; }
+    if (!selectedSourceKey) { toast.error("Select a racking source (RN / SRN / ERN)"); return; }
+    const [sourceType, sourceId] = selectedSourceKey.split(":");
+    if (!sourceType || !sourceId) { toast.error("Invalid source selection"); return; }
     if (items.length === 0) { toast.error("No items to rack"); return; }
     // Per-row checks
     for (let i = 0; i < items.length; i++) {
@@ -515,7 +572,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     setSaving(true);
     try {
       const payload = {
-        receipt_note_id: selectedRnId,
+        source_type: sourceType,
+        source_id: sourceId,
+        // Legacy back-compat: backend still accepts receipt_note_id; harmless when source_type/id is sent.
+        receipt_note_id: sourceType === "RN" ? sourceId : (selectedSource?.parent_rn_id || undefined),
         items: items.map((it) => ({
           part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
@@ -558,21 +618,58 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
           <Label className="label-sm">Racking Note No</Label>
           <Input value={rknNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rkn-no-input" />
         </div>
-        <div>
-          <Label className="label-sm">Receipt Note *</Label>
-          <Select value={selectedRnId || undefined} onValueChange={handleRnChange} disabled={isEdit}>
-            <SelectTrigger className="mt-2 rounded-sm" data-testid="rkn-rn-select">
-              <SelectValue placeholder={pendingRns.length === 0 ? "No racking-pending receipt notes" : "Select receipt note"} />
+        <div className="col-span-2 lg:col-span-3">
+          <Label className="label-sm">Racking Source *</Label>
+          <Select value={selectedSourceKey || undefined} onValueChange={handleSourceChange} disabled={isEdit}>
+            <SelectTrigger className="mt-2 rounded-sm" data-testid="rkn-source-select">
+              <SelectValue placeholder={sourceGroups.length === 0 ? "No rackable sources available" : "Select a source (RN / SRN / ERN)"} />
             </SelectTrigger>
-            <SelectContent>
-              {pendingRns.map((rn) => (
-                <SelectItem key={rn.id} value={rn.id} data-testid={`rkn-rn-option-${rn.rn_no}`}>
-                  <span className="font-mono">{rn.rn_no}</span><span className="ml-3 text-slate-500 text-xs">{fmtDate(rn.rn_date)}</span>
-                </SelectItem>
+            <SelectContent className="max-h-[420px]">
+              {sourceGroups.map((grp, gi) => (
+                <SelectGroup key={`${grp.parent_rn_id}-${gi}`}>
+                  <SelectLabel className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-50 border-b border-slate-100">
+                    <span className="font-mono text-slate-800">{grp.parent_rn_no}</span>
+                    <span className="ml-2 text-slate-400">·</span>
+                    <span className="ml-2 font-mono text-slate-500">{fmtDate(grp.parent_rn_date)}</span>
+                    {grp.invoice_no ? (
+                      <span className="ml-2 text-slate-400 normal-case tracking-normal">Inv {grp.invoice_no}</span>
+                    ) : null}
+                  </SelectLabel>
+                  {(grp.sources || []).map((s) => {
+                    const key = `${s.source_type}:${s.source_id}`;
+                    return (
+                      <SelectItem
+                        key={key}
+                        value={key}
+                        className="pl-6"
+                        data-testid={`rkn-source-option-${s.source_type}-${s.source_id}`}
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <SourceTypeBadge type={s.source_type} />
+                          <span className="font-mono font-semibold">{s.source_no}</span>
+                          <span className="text-slate-400 text-[11px]">{fmtDate(s.source_date)}</span>
+                          {s.assigned_to_name ? (
+                            <span className="text-[10px] text-slate-500 ml-1">· {s.assigned_to_name}</span>
+                          ) : null}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectGroup>
               ))}
             </SelectContent>
           </Select>
-          {isEdit && <div className="text-[11px] text-slate-500 mt-1">Receipt note cannot be changed in edit mode</div>}
+          {isEdit && <div className="text-[11px] text-slate-500 mt-1">Source cannot be changed in edit mode</div>}
+          {selectedSource && (
+            <div className="text-[11px] text-slate-600 mt-2 flex items-center gap-2" data-testid="rkn-selected-source-hint">
+              Racking against:
+              <SourceTypeBadge type={selectedSource.source_type || selectedSource.type} />
+              <span className="font-mono font-semibold">{selectedSource.source_no || selectedSource.no}</span>
+              {(selectedSource.parent_rn_no && (selectedSource.parent_rn_no !== (selectedSource.source_no || selectedSource.no))) && (
+                <span className="text-slate-500">(parent <span className="font-mono">{selectedSource.parent_rn_no}</span>)</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -707,9 +804,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
           </table>
         </div>
       )}
-      {!selectedRnId && !isEdit && (
+      {!selectedSourceKey && !isEdit && (
         <div className="bg-amber-50 border border-amber-200 rounded-sm p-6 text-sm text-amber-800">
-          Pick a Receipt Note above to load its items for racking.
+          Pick a racking source (RN / SRN / ERN) above to load its items for racking.
         </div>
       )}
     </div>
