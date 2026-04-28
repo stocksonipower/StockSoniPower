@@ -404,6 +404,10 @@ class ShortReceivedNoteItem(BaseModel):
     unit: Optional[str] = ""
     # Legacy alias - mirrors fulfilled_qty so racking flow can read it like any other note.
     quantity: Optional[float] = None
+    # Slice-model: list of fulfilled batches. Each entry references a child SRN
+    # holding the fulfilled portion. {child_srn_id, child_srn_no, fulfilled_qty,
+    # fulfilled_date, created_at}.
+    children: Optional[List[dict]] = []
 
 
 class ShortReceivedNote(BaseModel):
@@ -460,6 +464,10 @@ class ExtraReceivedNoteItem(BaseModel):
     item_category: Optional[str] = ""
     # Legacy alias - mirrors accepted_qty for the racking pipeline.
     quantity: Optional[float] = None
+    # Slice-model: list of accepted batches. Each entry references a child ERN
+    # holding the accepted portion. {child_ern_id, child_ern_no, accepted_qty,
+    # accepted_date, created_at}.
+    children: Optional[List[dict]] = []
 
 
 class ExtraReceivedNote(BaseModel):

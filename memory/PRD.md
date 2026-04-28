@@ -47,7 +47,20 @@ email+password auth, object storage for images.
 - SRN/ERN PUT + finalize now propagate status changes up to parent RN
 - Clickable parent RN links in SRN, ERN, and Racking Note list views
 
-### Stability (iter-19, 2026-04-27)
+### Stock-In Slice Workflow (iter-24, 2026-04-28) ⭐
+- **Major redesign**: SRN/ERN per-batch slice mechanism
+  - Each fulfillment batch (qty + date) creates its OWN child SRN/ERN holding the fulfilled portion (the child IS the rackable artifact)
+  - Parent SRN.items[i].children[] tracks all batches; pending = short_qty - Σ(children.fulfilled_qty)
+  - Status flips to COMPLETE only when all items are fully filled
+- **New endpoints**:
+  - `POST /api/short-received-notes/{id}/fulfill` — save a slice
+  - `PUT /api/short-received-notes/{id}/children/{cid}` — edit slice (blocked if RKN exists against child)
+  - `DELETE /api/short-received-notes/{id}/children/{cid}` — delete slice (blocked if RKN exists)
+  - Mirror endpoints on ERN: `/accept`, `/children/{cid}`, `/reject` (rejection stays at parent)
+- **Frontend rebuilt**: `SrnFinalizeForm` and `ErnFinalizeForm` with row-per-slice + pending-input row UX
+- **Tested**: 10/10 new tests (TC1–TC9 + TC11) pass; visual demo confirms full 2+3+1=6 → COMPLETE flow
+
+
 - Atomic FY-scoped serial counters via `counters` collection
 - Startup self-heal: counter = max(existing_serial) per (series, fy)
 
