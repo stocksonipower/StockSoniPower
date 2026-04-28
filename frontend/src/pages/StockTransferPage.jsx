@@ -18,7 +18,8 @@ import {
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
-import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import ExcelColumnFilter from "../components/ExcelColumnFilter";
+import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
@@ -116,15 +117,17 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
   const statusLabel = (r) => r.status === "FULLY_TRANSFERRED" ? "Fully Transferred" : (r.status === "PARTIALLY_TRANSFERRED" ? "Partially Transferred" : "Pending");
 
   const columns = useMemo(() => [
-    { key: "str_date", label: "Request Date", value: (r) => fmtDate(r.str_date) },
-    { key: "str_no", label: "Request No", value: (r) => r.str_no || "" },
-    { key: "purpose", label: "Purpose", value: (r) => r.purpose || "" },
-    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
-    { key: "qty_total", label: "Total Qty", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
-    { key: "status", label: "Status", value: statusLabel },
+    { key: "str_date", label: "REQUEST DATE", value: (r) => fmtDate(r.str_date) },
+    { key: "str_no", label: "REQUEST NO", value: (r) => r.str_no || "" },
+    { key: "purpose", label: "PURPOSE", value: (r) => r.purpose || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "qty_total", label: "TOTAL QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "status", label: "STATUS", value: statusLabel },
   ], []);
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -159,13 +162,20 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("str_date")} label="REQUEST DATE" testid="str-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("str_no")} label="REQUEST NO" testid="str-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("purpose")} label="PURPOSE" testid="str-col-purpose" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="str-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="TOTAL QTY" testid="str-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="str-col-assigned" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="str-col-status" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
@@ -655,15 +665,17 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
   };
 
   const columns = useMemo(() => [
-    { key: "stn_date", label: "STN Date", value: (r) => fmtDate(r.stn_date) },
-    { key: "stn_no", label: "STN No", value: (r) => r.stn_no || "" },
-    { key: "str_no", label: "Request No", value: (r) => r.transfer_request_no || "" },
-    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
-    { key: "qty_total", label: "Qty", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
-    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+    { key: "stn_date", label: "STN DATE", value: (r) => fmtDate(r.stn_date) },
+    { key: "stn_no", label: "STN NO", value: (r) => r.stn_no || "" },
+    { key: "str_no", label: "REQUEST NO", value: (r) => r.transfer_request_no || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "qty_total", label: "QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
   ], []);
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -698,13 +710,20 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("stn_date")} label="STN DATE" testid="stn-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("stn_no")} label="STN NO" testid="stn-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("str_no")} label="REQUEST NO" testid="stn-col-str-no" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="stn-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QTY" testid="stn-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="stn-col-assigned" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="stn-col-status" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>

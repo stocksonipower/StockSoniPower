@@ -18,7 +18,8 @@ import {
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
-import { useTableSortFilter, ColumnHeader } from "../components/DataTable";
+import ExcelColumnFilter from "../components/ExcelColumnFilter";
+import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
@@ -116,15 +117,17 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   const statusLabel = (r) => r.status === "FULLY_PICKED" ? "Fully Picked" : (r.status === "PARTIALLY_PICKED" ? "Partially Picked" : "Picking Pending");
 
   const columns = useMemo(() => [
-    { key: "in_date", label: "Issue Note Date", value: (r) => fmtDate(r.in_date) },
-    { key: "in_no", label: "Issue Note No", value: (r) => r.in_no || "" },
-    { key: "issued_to", label: "Issued To", value: (r) => r.issued_to || "" },
-    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
-    { key: "qty_total", label: "Total Quantity", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
-    { key: "status", label: "Status", value: statusLabel },
+    { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.in_date) },
+    { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.in_no || "" },
+    { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "status", label: "STATUS", value: statusLabel },
   ], []);
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -159,13 +162,20 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("in_date")} label="ISSUE NOTE DATE" testid="in-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("in_no")} label="ISSUE NOTE NO" testid="in-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("issued_to")} label="ISSUED TO" testid="in-col-issued-to" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="in-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="TOTAL QUANTITY" testid="in-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="in-col-assigned" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="in-col-status" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
@@ -568,17 +578,19 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
   };
 
   const columns = useMemo(() => [
-    { key: "pn_date", label: "Picking Note Date", value: (r) => fmtDate(r.pn_date) },
-    { key: "pn_no", label: "Picking Note No", value: (r) => r.pn_no || "" },
-    { key: "in_date", label: "Issue Note Date", value: (r) => fmtDate(r.issue_note_date) },
-    { key: "in_no", label: "Issue Note No", value: (r) => r.issue_note_no || "" },
-    { key: "issued_to", label: "Issued To", value: (r) => r.issued_to || "" },
-    { key: "items_count", label: "Items", value: (r) => (r.items || []).length },
-    { key: "qty_total", label: "Quantity", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0) },
-    { key: "assigned_to", label: "Assigned To", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
-    { key: "status", label: "Status", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+    { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
+    { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
+    { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.issue_note_date) },
+    { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
+    { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
+    { key: "qty_total", label: "QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
+    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
   ], []);
-  const { filteredRows, getColumnHeaderProps } = useTableSortFilter(rows, columns);
+  const {
+    filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
+  } = useExcelTableFilter(rows, columns);
 
   const handleExport = () => {
     if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
@@ -613,15 +625,20 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
           <thead>
             <tr>
               <th className="w-14">SL NO</th>
-              <ColumnHeader {...getColumnHeaderProps("pn_date")} label="PICKING NOTE DATE" testid="pn-col-date" />
-              <ColumnHeader {...getColumnHeaderProps("pn_no")} label="PICKING NOTE NO" testid="pn-col-no" />
-              <ColumnHeader {...getColumnHeaderProps("in_date")} label="ISSUE NOTE DATE" testid="pn-col-in-date" />
-              <ColumnHeader {...getColumnHeaderProps("in_no")} label="ISSUE NOTE NO" testid="pn-col-in-no" />
-              <ColumnHeader {...getColumnHeaderProps("issued_to")} label="ISSUED TO" testid="pn-col-issued-to" />
-              <ColumnHeader {...getColumnHeaderProps("items_count")} align="right" label="ITEMS" testid="pn-col-items" />
-              <ColumnHeader {...getColumnHeaderProps("qty_total")} align="right" label="QUANTITY" testid="pn-col-qty" />
-              <ColumnHeader {...getColumnHeaderProps("assigned_to")} label="ASSIGNED TO" testid="pn-col-assigned" />
-              <ColumnHeader {...getColumnHeaderProps("status")} label="STATUS" testid="pn-col-status" />
+              {columns.map((c) => (
+                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                  <ExcelColumnFilter
+                    label={c.label}
+                    values={uniqueValues[c.key] || []}
+                    selected={colFilters[c.key]}
+                    onChange={(s) => setColFilter(c.key, s)}
+                    sortDir={sort?.key === c.key ? sort.dir : null}
+                    onSort={(dir) => setColumnSort(c.key, dir)}
+                    isQty={c.isQty}
+                    isNumeric={c.isNumeric}
+                  />
+                </th>
+              ))}
               <th className="text-right">ACTIONS</th>
             </tr>
           </thead>
