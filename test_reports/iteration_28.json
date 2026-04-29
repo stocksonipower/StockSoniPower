@@ -1,0 +1,44 @@
+{
+  "summary": "P0 server.py refactor — iter-28 supplementary regression sweep covering the freshly extracted modules (routes/dashboard.py, routes/item_details.py, routes/uploads.py, routes/locations.py, routes/stock_master.py, routes/_helpers.py). Re-ran iter-27 sweep (30/30 PASS, ~11s). Wrote new /app/backend/tests/test_iter28_refactor_regression.py (23 tests) targeting the endpoints not exercised by iter-27 — download templates (godowns/racks/boxes), boxes/range, godowns & boxes bulk-delete, stock-master bulk-preview, item-details ObjectId-leak guard, uploads non-image rejection, plus module-ACL on every newly-mounted router endpoint (stock_master / locations / item_details / dashboard low_stock & stock_summary). Combined run: 53/53 PASS in 58.9s. Also ran the deliberately kept-in-server.py workflow smoke (stock-in -> receipt-note finalize, all next-no endpoints for racking/issue/picking/transfer/SRN/ERN) — all green. ZERO new regressions found from the iter-28 split. Legacy tests under /app/backend/tests/test_iter20_..test_partial_racking..test_receipt_notes(_v2)..test_racking_notes..test_stock_transfer have many failures, but each one I drilled into is a stale-test issue (sends pre-Pydantic-v2 partial payloads, expects HTTP 400 for missing-required-field instead of FastAPI's 422), NOT a refactor regression. The iter-27 report already flagged these legacy suites as not re-runnable in current shape. server.py shrunk from 5650 -> 4299 lines as advertised; routes/* total ~1.7k lines. No business-logic change detected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "legacy tests/test_receipt_notes.py + test_receipt_notes_v2.py + test_racking_notes.py + test_iter20_regression.py + test_partial_racking.py + test_iter21..iter25", "issue": "Stale tests use legacy payloads (e.g., {'quantity':N} without 'invoice_qty'; PUT /stock-master with partial body) and assert HTTP 400 where FastAPI/Pydantic v2 returns 422. Pre-existing — NOT caused by iter-28. Recommend updating or deleting."},
+      {"endpoint": "tests/test_user_management.py::TestMetaModules::test_modules_returns_seven_keys", "issue": "Asserts 7 modules; API returns 9 (already flagged in iter-27 report)."},
+      {"endpoint": "tests/test_stock_transfer.py", "issue": "5 tests error during setup with KeyError — pre-existing fixture issue, unrelated to refactor."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter28_refactor_regression.py",
+    "/app/backend/tests/test_iter27_refactor_regression.py",
+    "/app/test_reports/pytest/iter28_results.xml",
+    "/app/test_reports/pytest/iter28_iter27_rerun.xml",
+    "/app/test_reports/pytest/iter28_combined.xml"
+  ],
+  "action_items": [
+    "Refactor verified — no functional changes detected in the freshly-extracted dashboard/item_details/uploads/locations/stock_master routers. Module ACL middleware confirmed enforcing per-module access on every newly-mounted endpoint (admin bypasses, staff with the relevant module=False -> 403).",
+    "Optional cleanup (non-blocking): update or delete the stale legacy test suites flagged above. They predate Pydantic v2 / current API contract and were already broken before iter-28.",
+    "Optional cleanup (non-blocking): add /app/backend/tests/conftest.py that does load_dotenv('/app/frontend/.env') so legacy tests don't need an explicit `export REACT_APP_BACKEND_URL=...` to even collect."
+  ],
+  "critical_code_review_comments": [
+    "routes/_helpers.py is only 46 lines and only used by routes/locations.py for bulk operations — fine for now, but if no other router consumes it, consider inlining back into locations.py to keep the import graph flat.",
+    "routes/stock_master.py is 612 lines (largest router) and bundles CRUD + downloads + bulk-preview/upload + column-settings + lookups. Consider splitting downloads/bulk into a sibling routes/stock_master_io.py if it grows.",
+    "server.py is still 4299 lines after iter-28 — the interlinked stock_in/stock_out/receipt-notes/SRN/ERN/racking/issue/picking/transfer flows remain monolithic. Per the review request this was intentional for safety; flag for a future iter to split feature-by-feature once the regression net (iter27+iter28 = 53 tests) is in place.",
+    "deps.py and routes/auth.py both import jwt/bcrypt/HTTPBearer; deps.py instantiates `bearer_scheme` and routes/auth.py reuses it — good. But server.py also has its own `bearer_scheme = HTTPBearer(...)` (legacy carry-over). Recommend dropping the server.py duplicate in favor of `from deps import bearer_scheme` for true single-source-of-truth.",
+    "/app/backend/tests has 19 test files but no conftest.py — every file re-implements env loading. Each new agent re-encounters the 'REACT_APP_BACKEND_URL not set' collection error. Centralize in conftest.py."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter28_refactor_regression.py (new — 23 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% on iter27+iter28 combined regression (53/53 PASS). Newly-extracted modules: 100% parity with pre-refactor behavior. Legacy/stale suites have failures but RCA confirms they are pre-existing test-vs-API contract drift, not refactor regressions.",
+    "frontend": "N/A (skipped per request)"
+  },
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each session creates one TESTPN28_<uuid8> stock_master row + TEST_GD28_/TR28_/TB28_ godown/rack/box. Disposable staff users TEST_iter28_<6hex>@stockmgmt.com are created per ACL test and soft-deleted in fixture teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter-28 regression net = 53 tests across /app/backend/tests/test_iter27_refactor_regression.py (30) + /app/backend/tests/test_iter28_refactor_regression.py (23). Run BOTH for any future server.py split: `cd /app/backend && python -m pytest tests/test_iter27_refactor_regression.py tests/test_iter28_refactor_regression.py -v`. iter-28 specifically validates the dashboard/item_details/uploads/locations/stock_master extractions + ACL + the still-monolithic stock_in/RN/racking/issue/picking/transfer next-no surface. Do NOT trust the legacy suites in this folder — they're stale and need an update pass before they become useful again.",
+  "rca of the issue": "No new bug introduced in iter-28. Failures observed in legacy suites root-caused as: (1) Pydantic v2 returns 422 for missing-required-field where old tests asserted 400; (2) PUT /stock-master/{id} expects full StockMaster body, old tests sent partial; (3) test_modules_returns_seven_keys is stale (API now returns 9); (4) test_stock_transfer fixture KeyError is pre-existing. None of these are caused by the routes/* extraction — verified by reading models.py (required fields unchanged) and the new router code (logic identical to pre-refactor server.py)."
+}

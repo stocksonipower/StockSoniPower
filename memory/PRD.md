@@ -65,8 +65,20 @@ email+password auth, object storage for images.
 - Startup self-heal: counter = max(existing_serial) per (series, fy)
 
 ## Active Backlog
-### P0 — Refactor
-- Split `server.py` (~6100 lines) into `/app/backend/routes/` modules
+### P0 — Refactor (IN PROGRESS, 2026-04-29)
+- ✅ **Phase 1 done**: Pydantic models extracted to `/app/backend/models.py`
+- ✅ **Phase 2 done**: Shared infra (db, JWT, auth deps, _notify, helpers) extracted to `/app/backend/deps.py`
+- ✅ **Phase 3 done**: 8 route groups extracted to `/app/backend/routes/`:
+  - `auth.py`, `users.py`, `notifications.py` (~360 lines)
+  - `dashboard.py` (stock-balance, low-stock, dashboard/stats — 162 lines)
+  - `item_details.py` (search + 360° detail — 143 lines)
+  - `uploads.py` (image upload + serve — 93 lines)
+  - `locations.py` (Godown/Rack/Box CRUD + bulk + range — 372 lines)
+  - `stock_master.py` (Stock Master CRUD + bulk + column-settings — 612 lines)
+  - `_helpers.py` (shared CSV/upload helpers — 46 lines)
+- 📊 **Result**: server.py 6646 → 4299 lines (35% reduction, 2347 lines extracted)
+- 📋 **Remaining in server.py**: stock_in/out, RN, SRN/ERN, Racking, Issue, Picking, Transfer (the deeply interlinked core workflows). Left intact for safety.
+- ✅ **Regression**: 30/30 tests pass via `tests/test_iter27_refactor_regression.py`
 
 ### P1 — UX Polish
 - StockMasterPage audit fixes:
