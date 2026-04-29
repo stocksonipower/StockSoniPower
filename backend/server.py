@@ -2941,14 +2941,22 @@ async def _recompute_rn_status(rn_id: str):
 
     # Build the set of (source_type, source_id) pairs that count toward this RN's racking.
     source_pairs = [("RN", rn_id)] + [("SRN", sid) for sid in srn_ids] + [("ERN", eid) for eid in ern_ids]
-
-    # Check for any DRAFT racking note against any of these sources -> RACKING_NOTE_DRAFT
     or_clauses = [{"source_type": st, "source_id": sid} for (st, sid) in source_pairs]
-    has_draft_rkn = await db.racking_notes.find_one(
-        {"status": "DRAFT", "$or": or_clauses}, {"_id": 0, "id": 1}
+
+    # First check: any RECORDED RKN exists? If yes -> PARTIALLY_RACKED / FULLY_RACKED.
+    # Once any qty is recorded, status NEVER goes back to RACKING_NOTE_DRAFT
+    # (even if a later draft RKN is added on top).
+    has_recorded_rkn = await db.racking_notes.find_one(
+        {"status": "RECORDED", "$or": or_clauses}, {"_id": 0, "id": 1}
     )
-    if has_draft_rkn:
-        new_status = "RACKING_NOTE_DRAFT"
+
+    if not has_recorded_rkn:
+        # No recorded RKNs yet — if ANY draft exists, RN is RACKING_NOTE_DRAFT;
+        # otherwise FINAL (a.k.a. RACKING_PENDING).
+        has_draft_rkn = await db.racking_notes.find_one(
+            {"status": "DRAFT", "$or": or_clauses}, {"_id": 0, "id": 1}
+        )
+        new_status = "RACKING_NOTE_DRAFT" if has_draft_rkn else "FINAL"
         update: dict = {"status": new_status}
         if rn.get("racked_at"):
             await db.receipt_notes.update_one({"id": rn_id}, {"$unset": {"racked_at": ""}})
@@ -2995,8 +3003,10 @@ async def _recompute_rn_status(rn_id: str):
             k = _key(it.get("part_no"), it.get("make"))
             racked[k] = racked.get(k, 0) + (it.get("quantity") or 0)
 
-    if not rackable or sum(rackable.values()) == 0 or sum(racked.values()) == 0:
-        new_status = "FINAL"
+    # We already confirmed at least one RECORDED RKN exists, so status is
+    # PARTIALLY_RACKED unless every rackable qty is fully covered.
+    if not rackable or sum(rackable.values()) == 0:
+        new_status = "PARTIALLY_RACKED"
     else:
         all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in rackable.items() if q > 0)
         new_status = "FULLY_RACKED" if all_full else "PARTIALLY_RACKED"
