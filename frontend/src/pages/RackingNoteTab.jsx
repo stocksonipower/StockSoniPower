@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -19,7 +19,7 @@ import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
-import { ReceiptNoteDetailDialog } from "./StockInPage";
+import { ReceiptNoteDetailDialog, stockInTypeMeta, stockInTypeLabel } from "./StockInPage";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 5000;
@@ -100,17 +100,32 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [recordingId, setRecordingId] = useState(null);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/racking-notes", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/racking-notes", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
-  useEffect(() => { load(); }, [load, reloadKey]);
+  }, [page, search]);
+  useEffect(() => { load(); }, [load, reloadKey, search]);
+
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -145,11 +160,11 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   };
 
   const columns = useMemo(() => [
+    { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
     { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
     { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
   ], []);
   const {
@@ -172,6 +187,14 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           {total === 0 ? "No racking notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> racking notes</>}
         </div>
         <div className="flex items-center gap-2">
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search RKN No · Receipt Note No · Part No …"
+            className="rounded-sm font-mono h-9 w-80"
+            data-testid="rkn-search-input"
+          />
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rkn-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>
@@ -224,6 +247,14 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td>
+                    {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
+                            data-testid={`rkn-stock-in-type-${r.rkn_no}`}>
+                        {sit.label}
+                      </span>
+                    ); })()}
+                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
                   <td>
                     <button
@@ -233,15 +264,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                     >
                       {r.rkn_no}
                     </button>
-                    {r.auto_created && (
-                      <span
-                        className="ml-1.5 inline-block text-[9px] font-bold uppercase tracking-wide bg-purple-100 text-purple-700 border border-purple-300 rounded px-1 py-0.5 align-middle"
-                        title={`Auto-created on ${(r.auto_source || "").replace(/-/g, " ")}`}
-                        data-testid={`rkn-auto-badge-${r.rkn_no}`}
-                      >
-                        AUTO
-                      </span>
-                    )}
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
                   <td>
@@ -254,9 +276,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                         {r.receipt_note_no}
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
-                  </td>
-                  <td>
-                    <AssigneeBadge name={assigneeName} email={assigneeEmail} testid={`rkn-assignee-${r.rkn_no}`} />
                   </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}

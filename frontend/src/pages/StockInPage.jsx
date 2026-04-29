@@ -62,12 +62,12 @@ function qtyDiff(it) {
 }
 
 /** Status pill metadata used in list view AND detail dialog. */
-function stockInTypeMeta(type) {
+export function stockInTypeMeta(type) {
   const t = (type || "INVOICE").toUpperCase();
   if (t === "GENERAL") return { label: "General", cls: "bg-indigo-50 text-indigo-800 border border-indigo-200" };
   return { label: "Invoice", cls: "bg-blue-50 text-blue-800 border border-blue-200" };
 }
-function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
+export function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
 
 
 // Status metadata. The backend emits exactly 12 active values across all 4
@@ -1630,17 +1630,32 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get(path);
+      const res = await api.get(path, { params: { search: search || undefined } });
       setRows(res.data || []);
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || `Could not load ${noun}s`);
     } finally { setLoading(false); }
-  }, [path, noun]);
+  }, [path, noun, search]);
   useEffect(() => { load(); }, [load, reloadKey]);
+
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleDelete = async (r) => {
     if (!window.confirm(`Delete ${r[idField]}? This cannot be undone.`)) return;
@@ -1663,8 +1678,9 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const columns = useMemo(() => {
     const cols = [
-      { key: "rn_date", label: "RN DATE", value: (r) => fmtDate(r.parent_rn_date) },
-      { key: "rn_no", label: "RN NO", value: (r) => r.parent_rn_no || "" },
+      { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
+      { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.parent_rn_date) },
+      { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.parent_rn_no || "" },
       { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
       { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
@@ -1691,6 +1707,17 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
           <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
         </Button>
       </div>
+      <div className="flex items-center gap-2 mb-3">
+        <Input
+          ref={searchInputRef}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={`Search ${noun} No · Parent RN No · Part No …`}
+          className="rounded-sm font-mono h-9 w-80"
+          data-testid={`${kind}-search-input`}
+        />
+        <span className="text-xs text-slate-500">Press Ctrl+F to focus search</span>
+      </div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
         <table className="data-table w-full">
           <thead>
@@ -1710,7 +1737,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                   />
                 </th>
               ))}
-              <th className="w-28">ACTIONS</th>
+              <th className="w-28 text-right">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -1719,7 +1746,15 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
               const canEdit = r.status !== "COMPLETE";
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
-                                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td>
+                    {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
+                            data-testid={`${kind}-stock-in-type-${r[idField]}`}>
+                        {sit.label}
+                      </span>
+                    ); })()}
+                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
                   <td>
                     {r.parent_rn_no ? (
@@ -1748,8 +1783,8 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                     </span>
                   </td>
 
-                  <td>
-                    <div className="flex items-center gap-1">
+                  <td className="text-right">
+                    <div className="flex items-center gap-1 justify-end">
                       <button
                         onClick={() => onEdit(r)}
                         disabled={!canEdit}
@@ -1773,7 +1808,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.` : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.` : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

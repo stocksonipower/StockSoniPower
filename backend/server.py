@@ -780,7 +780,8 @@ async def _enrich_note_items(notes: list):
 
 
 async def _enrich_with_parent_assignee(rows: list, parent_collection: str, parent_id_field: str):
-    """Add parent_assigned_to_user_id / _name / _email onto each row by joining against a parent collection."""
+    """Add parent_assigned_to_user_id / _name / _email + parent_stock_in_type onto each row
+    by joining against a parent collection."""
     if not rows:
         return rows
     parent_ids = list({r.get(parent_id_field) for r in rows if r.get(parent_id_field)})
@@ -790,7 +791,8 @@ async def _enrich_with_parent_assignee(rows: list, parent_collection: str, paren
     pmap = {}
     async for p in coll.find(
         {"id": {"$in": parent_ids}},
-        {"_id": 0, "id": 1, "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1},
+        {"_id": 0, "id": 1, "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1,
+         "stock_in_type": 1},
     ):
         pmap[p["id"]] = p
     for r in rows:
@@ -798,6 +800,9 @@ async def _enrich_with_parent_assignee(rows: list, parent_collection: str, paren
         r["parent_assigned_to_user_id"] = p.get("assigned_to_user_id")
         r["parent_assigned_to_name"] = p.get("assigned_to_name", "") or ""
         r["parent_assigned_to_email"] = p.get("assigned_to_email", "") or ""
+        # Only set stock_in_type if parent collection supplies it (RN/IssueNote do; ERN/SRN don't)
+        if "stock_in_type" in p:
+            r["parent_stock_in_type"] = p.get("stock_in_type", "") or ""
     return rows
 
 
@@ -1072,6 +1077,7 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
             "parent_rn_id": rn["id"],
             "parent_rn_no": rn.get("rn_no", ""),
             "parent_rn_date": rn.get("rn_date", ""),
+            "parent_stock_in_type": rn.get("stock_in_type", ""),
             "parent_srn_id": parent_srn_id,
             "parent_srn_no": parent_srn_no,
             "chain_remarks": chain,
@@ -1172,6 +1178,7 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
             "parent_rn_id": rn["id"],
             "parent_rn_no": rn.get("rn_no", ""),
             "parent_rn_date": rn.get("rn_date", ""),
+            "parent_stock_in_type": rn.get("stock_in_type", ""),
             "parent_ern_id": parent_ern_id,
             "parent_ern_no": parent_ern_no,
             "chain_remarks": chain,
@@ -1549,9 +1556,17 @@ async def list_racking_notes(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"rkn_no": {"$regex": s, "$options": "i"}},
+            {"receipt_note_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
@@ -1618,6 +1633,7 @@ async def list_racking_sources(user=Depends(_module_dep("stock_in"))):
             "parent_rn_id": rn["id"],
             "parent_rn_no": rn.get("rn_no", ""),
             "parent_rn_date": rn.get("rn_date", ""),
+            "parent_stock_in_type": rn.get("stock_in_type", ""),
             "stock_in_type": rn.get("stock_in_type", "INVOICE"),
             "invoice_no": rn.get("invoice_no", ""),
             "invoice_date": rn.get("invoice_date", ""),
@@ -2142,11 +2158,19 @@ async def list_short_received_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     parent_rn_id: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(_module_dep("stock_in")),
 ):
     query = {}
     if parent_rn_id:
         query["parent_rn_id"] = parent_rn_id
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"srn_no": {"$regex": s, "$options": "i"}},
+            {"parent_rn_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
@@ -2604,11 +2628,19 @@ async def list_extra_received_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     parent_rn_id: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(_module_dep("stock_in")),
 ):
     query = {}
     if parent_rn_id:
         query["parent_rn_id"] = parent_rn_id
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"ern_no": {"$regex": s, "$options": "i"}},
+            {"parent_rn_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
@@ -4359,6 +4391,14 @@ async def startup():
             pass
 
     # ---- SRN/ERN status migration to active 12-status set ----
+    # Backfill parent_stock_in_type for legacy SRN/ERN documents (new docs get it on insert)
+    for coll_name in ("short_received_notes", "extra_received_notes"):
+        coll = getattr(db, coll_name)
+        cursor = coll.find({"parent_stock_in_type": {"$exists": False}}, {"_id": 0, "id": 1, "parent_rn_id": 1})
+        async for doc in cursor:
+            rn = await db.receipt_notes.find_one({"id": doc.get("parent_rn_id")}, {"_id": 0, "stock_in_type": 1})
+            sit = (rn or {}).get("stock_in_type", "") or ""
+            await coll.update_one({"id": doc["id"]}, {"$set": {"parent_stock_in_type": sit}})
     # New active values:
     #   SRN: PENDING / PARTIALLY_RECEIVED / COMPLETE
     #   ERN: PENDING / PARTIALLY_ACCEPTED / COMPLETE
