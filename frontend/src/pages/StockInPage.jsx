@@ -270,7 +270,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
             ref={searchInputRef}     
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search RN no, invoice, dates, part no..."
+            placeholder="Search"
             className="rounded-sm font-mono h-9 w-80"
             data-testid="rn-search-input"
           />
@@ -1590,22 +1590,13 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const columns = useMemo(() => {
     const cols = [
-      { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
-      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "rn_date", label: "RN DATE", value: (r) => fmtDate(r.parent_rn_date) },
       { key: "rn_no", label: "RN NO", value: (r) => r.parent_rn_no || "" },
-      { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-      { key: "qty_total", label: isSrn ? "TOTAL SHORT QTY" : "TOTAL EXTRA QTY", value: sumQty, isQty: true, isNumeric: true },
-    ];
-    if (isSrn) {
-      cols.push({ key: "fulfillment_date", label: "FULFILMENT DATE", value: (r) => r.fulfillment_date ? fmtDate(r.fulfillment_date) : "" });
-    }
-    cols.push(
-      { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+      { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
+      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
-    );
+    ];
     return cols;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSrn, noun, dateField, idField]);
 
   const {
@@ -1657,17 +1648,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                 : r.status !== "COMPLETE";
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
-                  <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
-                  <td>
-                    <button
-                      onClick={() => onOpen(r)}
-                      className="font-mono font-semibold text-blue-700 hover:underline"
-                      data-testid={`${kind}-open-${r[idField]}`}
-                    >
-                      {r[idField]}
-                    </button>
-                  </td>
+                                    <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
                   <td>
                     {r.parent_rn_no ? (
@@ -1680,17 +1661,22 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
                   </td>
-                  <td className="text-right font-mono">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-semibold">{sumQty(r).toFixed(2)}</td>
-                  {isSrn && <td className="font-mono text-slate-700">{r.fulfillment_date ? fmtDate(r.fulfillment_date) : "—"}</td>}
-                  <td className="text-slate-700">
-                    {r.assigned_to_name ? <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} /> : <span className="text-slate-400">—</span>}
+                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`${kind}-open-${r[idField]}`}
+                    >
+                      {r[idField]}
+                    </button>
                   </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>
                       {meta.label}
                     </span>
                   </td>
+
                   <td>
                     <div className="flex items-center gap-1">
                       <button
@@ -1716,7 +1702,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={isSrn ? 11 : 10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.` : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={7} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? `No ${noun}s yet. They appear automatically when a Receipt Note is finalized with ${isSrn ? "a shortfall" : "an overage"}.` : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

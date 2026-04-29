@@ -392,9 +392,6 @@ async def list_receipt_notes(
         query["$or"] = [
             {"rn_no": {"$regex": s, "$options": "i"}},
             {"invoice_no": {"$regex": s, "$options": "i"}},
-            {"rn_date": {"$regex": s, "$options": "i"}},
-            {"invoice_date": {"$regex": s, "$options": "i"}},
-            {"goods_received_date": {"$regex": s, "$options": "i"}},
             {"items.part_no": {"$regex": s, "$options": "i"}},
         ]
     # Allow comma-separated lists for both filters
