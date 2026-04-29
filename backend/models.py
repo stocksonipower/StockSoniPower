@@ -356,6 +356,10 @@ class RackingNote(BaseModel):
     recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
+    # Auto-creation provenance (NEW — Rule 1/2/3 of RN→SRN→RKN auto-workflow)
+    auto_created: bool = False
+    # one of: "rn-finalize" | "rkn-record-balance" | "srn-child-save" | "ern-child-save"
+    auto_source: Optional[str] = None
 
 
 class IssueNoteItem(BaseModel):

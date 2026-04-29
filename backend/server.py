@@ -504,7 +504,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     return doc
 
 @api_router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
-async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
+async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get_current_user)):
     """Promote a DRAFT receipt note to FINAL.
 
     Requires: received_qty is a non-negative number for every row (0 is allowed
@@ -579,6 +579,11 @@ async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
         msg += f" Auto-created {srn_no} for shortfall."
     if ern_no:
         msg += f" Auto-created {ern_no} for overage."
+
+    # Rule 1: auto-create DRAFT RKN for the received qty against the parent RN.
+    rkn_no = await _auto_create_rkn_for_source("RN", rn_id, user, auto_source="rn-finalize")
+    if rkn_no:
+        msg += f" Auto-created {rkn_no} for racking."
     await _notify(
         actor=user, type="receipt_note.finalized", module="stock_in",
         title=f"Receipt Note finalized — {rn['rn_no']}",
@@ -587,6 +592,10 @@ async def finalize_receipt_note(rn_id: str, user=Depends(get_current_user)):
     )
 
     doc = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
+    if rkn_no:
+        # Surface auto-RKN to frontend so it can show a toast
+        response.headers["X-Auto-RKN-No"] = rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
     return doc
 
 @api_router.delete("/receipt-notes/{rn_id}")
@@ -943,13 +952,36 @@ async def _recompute_rn_status(rn_id: str):
             k = _key(it.get("part_no"), it.get("make"))
             racked[k] = racked.get(k, 0) + (it.get("quantity") or 0)
 
+    # New spec rule: RN cannot be FULLY_RACKED while ANY descendant SRN/ERN is
+    # still in a non-terminal state (PENDING / PARTIALLY_*). Even if all current
+    # rackable qty is racked, the user may still fulfill the shortfall later.
+    has_open_descendant = False
+    if srn_ids:
+        async for srn in db.short_received_notes.find(
+            {"id": {"$in": srn_ids}}, {"_id": 0, "status": 1}
+        ):
+            if (srn.get("status") or "PENDING").upper() != "COMPLETE":
+                has_open_descendant = True
+                break
+    if not has_open_descendant and ern_ids:
+        async for ern in db.extra_received_notes.find(
+            {"id": {"$in": ern_ids}}, {"_id": 0, "status": 1}
+        ):
+            if (ern.get("status") or "PENDING").upper() != "COMPLETE":
+                has_open_descendant = True
+                break
+
     # We already confirmed at least one RECORDED RKN exists, so status is
-    # PARTIALLY_RACKED unless every rackable qty is fully covered.
+    # PARTIALLY_RACKED unless every rackable qty is fully covered AND no SRN/ERN
+    # descendant is still pending.
     if not rackable or sum(rackable.values()) == 0:
         new_status = "PARTIALLY_RACKED"
     else:
         all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in rackable.items() if q > 0)
-        new_status = "FULLY_RACKED" if all_full else "PARTIALLY_RACKED"
+        if all_full and not has_open_descendant:
+            new_status = "FULLY_RACKED"
+        else:
+            new_status = "PARTIALLY_RACKED"
 
     update = {"status": new_status}
     if new_status == "FULLY_RACKED":
@@ -1178,6 +1210,138 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
             continue
     logger.warning("Could not allocate ERN number after 5 attempts")
     return ""
+
+
+# --- Auto-create RKN against any source (RN | SRN | ERN) --------------------
+async def _auto_create_rkn_for_source(
+    source_type: str,
+    source_id: str,
+    actor: dict,
+    *,
+    auto_source: str,
+) -> Optional[str]:
+    """Auto-create a DRAFT Racking Note for whatever rackable qty is still pending
+    against (source_type, source_id). Returns the new rkn_no, or None when there's
+    nothing to rack (avoids creating empty RKNs).
+
+    Reuses the same prepare-rackable logic so qty + locations exactly match what the
+    user would have seen in /racking-notes/prepare-source. Inherits assignee from the
+    source's parent doc so the workflow keeps the same owner.
+
+    `auto_source` is a free-form tag persisted on the doc:
+        "rn-finalize" | "rkn-record-balance" | "srn-child-save" | "ern-child-save"
+    """
+    source_type = (source_type or "").upper()
+    if source_type not in ("RN", "SRN", "ERN"):
+        return None
+
+    # Resolve the parent doc + ultimate RN (re-uses existing helper, avoids drift)
+    try:
+        _, _, parent_doc, ultimate_rn = await _resolve_racking_source(
+            {"source_type": source_type, "source_id": source_id}
+        )
+    except HTTPException:
+        return None
+
+    # Use the existing prepare logic to compute pending qty + prefilled locations.
+    # Pass user=actor; prepare_racking_for_source ignores user (it's only there for
+    # the FastAPI dependency contract).
+    try:
+        prepared = await prepare_racking_for_source(
+            source_type=source_type,
+            source_id=source_id,
+            exclude_rkn_id=None,
+            user=actor,
+        )
+    except HTTPException as e:
+        # 409 if source is already FULLY_RACKED — nothing to do
+        if e.status_code == 409:
+            return None
+        raise
+    items = prepared.get("items") or []
+    if not items:
+        return None
+
+    # Strip helper-only fields the model doesn't accept
+    rkn_items = []
+    for it in items:
+        rkn_items.append({
+            "part_no": it.get("part_no", ""),
+            "make":    it.get("make", ""),
+            "quantity": float(it.get("pending_qty") or 0),
+            "model":          it.get("model", ""),
+            "old_part_no":    it.get("old_part_no", ""),
+            "make_part_no":   it.get("make_part_no", ""),
+            "description_1":  it.get("description_1", ""),
+            "description_2":  it.get("description_2", ""),
+            "remarks_oem":    it.get("remarks_oem", ""),
+            "remarks_others": it.get("remarks_others", ""),
+            "item_category":  it.get("item_category", ""),
+            "godown_id":   it.get("godown_id", ""),
+            "godown_name": it.get("godown_name", ""),
+            "rack_id":     it.get("rack_id", ""),
+            "rack_no":     it.get("rack_no", ""),
+            "box_id":      it.get("box_id", ""),
+            "box_no":      it.get("box_no", ""),
+            "box_category":it.get("box_category", ""),
+        })
+    rkn_items = [it for it in rkn_items if it["quantity"] > 0]
+    if not rkn_items:
+        return None
+
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+
+    # Display strings for the source
+    if source_type == "RN":
+        source_no = parent_doc.get("rn_no", "")
+        source_date = parent_doc.get("rn_date", "")
+    elif source_type == "SRN":
+        source_no = parent_doc.get("srn_no", "")
+        source_date = parent_doc.get("srn_date", "")
+    else:  # ERN
+        source_no = parent_doc.get("ern_no", "")
+        source_date = parent_doc.get("ern_date", "")
+
+    ult_rn_id = (ultimate_rn or {}).get("id", "")
+    ult_rn_no = (ultimate_rn or {}).get("rn_no", "")
+    ult_rn_date = (ultimate_rn or {}).get("rn_date", "")
+
+    from pymongo.errors import DuplicateKeyError
+    last_err = None
+    for _ in range(5):
+        serial = await _alloc_serial("rkn", fy)
+        rkn_no = f"RKN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "rkn_no": rkn_no,
+            "rkn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_no": source_no,
+            "source_date": source_date,
+            "receipt_note_id": ult_rn_id,
+            "receipt_note_no": ult_rn_no,
+            "receipt_note_date": ult_rn_date,
+            "items": rkn_items,
+            "status": "DRAFT",
+            "auto_created": True,
+            "auto_source": auto_source,
+            "created_at": now_iso(),
+            "created_by": actor.get("email", "system"),
+        }
+        try:
+            await db.racking_notes.insert_one(doc)
+            await _recompute_source_status_after_rkn(source_type, source_id, ult_rn_id)
+            return rkn_no
+        except DuplicateKeyError as e:
+            last_err = e
+            continue
+    logger.warning(f"Could not allocate auto-RKN number after 5 attempts: {last_err}")
+    return None
+
 
 # ===================== RACKING NOTES — polymorphic source (Phase 2) =====================
 
@@ -1732,7 +1896,7 @@ async def delete_racking_note(rkn_id: str, user=Depends(_module_dep("stock_in"))
 
 
 @api_router.post("/racking-notes/{rkn_id}/record")
-async def record_racking_note(rkn_id: str, user=Depends(_module_dep("stock_in"))):
+async def record_racking_note(rkn_id: str, response: Response, user=Depends(_module_dep("stock_in"))):
     rkn = await db.racking_notes.find_one({"id": rkn_id}, {"_id": 0})
     if not rkn:
         raise HTTPException(status_code=404, detail="Racking note not found")
@@ -1796,14 +1960,24 @@ async def record_racking_note(rkn_id: str, user=Depends(_module_dep("stock_in"))
         {"$set": {"status": "RECORDED", "recorded_at": now}},
     )
     await _recompute_source_status_after_rkn(src_type, src_id, (ultimate_rn or {}).get("id"))
+
+    # Rule 2: if the same source still has unracked qty, auto-create a balance RKN.
+    balance_rkn_no = await _auto_create_rkn_for_source(
+        src_type, src_id, user, auto_source="rkn-record-balance"
+    )
+
     total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    extra_msg = f" Auto-created {balance_rkn_no} for remaining qty." if balance_rkn_no else ""
     await _notify(
         actor=user, type="stock_in.recorded", module="stock_in",
         title=f"Stock In recorded ({rkn['rkn_no']})",
-        message=f"{user.get('email')} recorded {len(tx_docs)} item(s), total qty {total_qty} into stock from {rkn.get('source_no') or rkn.get('receipt_note_no') or 'source'}.",
+        message=f"{user.get('email')} recorded {len(tx_docs)} item(s), total qty {total_qty} into stock from {rkn.get('source_no') or rkn.get('receipt_note_no') or 'source'}.{extra_msg}",
         audience="module", ref_collection="racking_notes", ref_id=rkn_id,
     )
-    return {"ok": True, "transactions_created": len(tx_docs)}
+    if balance_rkn_no:
+        response.headers["X-Auto-RKN-No"] = balance_rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
+    return {"ok": True, "transactions_created": len(tx_docs), "auto_rkn_no": balance_rkn_no}
 
 # ===================== SHORT RECEIVED NOTES — read-only endpoints (Phase 1) =====================
 
@@ -2178,7 +2352,7 @@ def _next_letter_suffix(used: set[str]) -> str:
 
 
 @api_router.post("/short-received-notes/{srn_id}/children", response_model=ShortReceivedNote)
-async def add_srn_child_row(srn_id: str, body: SrnChildBody,
+async def add_srn_child_row(srn_id: str, body: SrnChildBody, response: Response,
                             user=Depends(_module_dep("stock_in"))):
     """Append a new fulfillment row to the matching parent SRN item. Auto-allocates
     a letter-suffixed child_srn_no (PARENT-A, PARENT-B, ...). Recomputes status."""
@@ -2237,11 +2411,23 @@ async def add_srn_child_row(srn_id: str, body: SrnChildBody,
     await _recompute_srn_racking_status(srn_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
+
+    # Rule 3: if the new child added rackable qty, auto-create a DRAFT RKN
+    # against this SRN (covers only the newly-pending qty thanks to
+    # prepare_racking_for_source's already_racked subtraction).
+    auto_rkn_no = None
+    if rcv > 0:
+        auto_rkn_no = await _auto_create_rkn_for_source(
+            "SRN", srn_id, user, auto_source="srn-child-save"
+        )
+    if auto_rkn_no:
+        response.headers["X-Auto-RKN-No"] = auto_rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
     return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
 
 
 @api_router.put("/short-received-notes/{srn_id}/children/{child_srn_no:path}", response_model=ShortReceivedNote)
-async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
+async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody, response: Response,
                              user=Depends(_module_dep("stock_in"))):
     """Edit a child row (received_qty / not_receivable_qty). Allowed only if the
     parent SRN's racking_status isn't FULLY_RACKED AND the new totals don't drop
@@ -2316,6 +2502,15 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
     await _recompute_srn_racking_status(srn_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
+    # Rule 3: edit may have raised received_qty → auto-create RKN if newly pending.
+    auto_rkn_no = None
+    if rcv > 0:
+        auto_rkn_no = await _auto_create_rkn_for_source(
+            "SRN", srn_id, user, auto_source="srn-child-save"
+        )
+    if auto_rkn_no:
+        response.headers["X-Auto-RKN-No"] = auto_rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
     return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
 
 
@@ -2583,7 +2778,7 @@ class ErnChildBody(BaseModel):
 
 
 @api_router.post("/extra-received-notes/{ern_id}/children", response_model=ExtraReceivedNote)
-async def add_ern_child_row(ern_id: str, body: ErnChildBody,
+async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
                             user=Depends(_module_dep("stock_in"))):
     """Append a decision row (accepted + rejected) to a parent ERN item.
     Auto-allocates a letter-suffixed child_ern_no (PARENT-A, PARENT-B, ...)."""
@@ -2638,11 +2833,20 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody,
     await _recompute_ern_racking_status(ern_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
+    # Rule 3 (parallel for ERN): if accepted_qty was added, auto-create RKN.
+    auto_rkn_no = None
+    if acc > 0:
+        auto_rkn_no = await _auto_create_rkn_for_source(
+            "ERN", ern_id, user, auto_source="ern-child-save"
+        )
+    if auto_rkn_no:
+        response.headers["X-Auto-RKN-No"] = auto_rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
     return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 
 @api_router.put("/extra-received-notes/{ern_id}/children/{child_ern_no:path}", response_model=ExtraReceivedNote)
-async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
+async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody, response: Response,
                              user=Depends(_module_dep("stock_in"))):
     parent = await db.extra_received_notes.find_one({"id": ern_id})
     if not parent:
@@ -2701,6 +2905,15 @@ async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
     await _recompute_ern_racking_status(ern_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
+    # Rule 3 parallel: edit may have raised accepted_qty → auto-create RKN.
+    auto_rkn_no = None
+    if acc > 0:
+        auto_rkn_no = await _auto_create_rkn_for_source(
+            "ERN", ern_id, user, auto_source="ern-child-save"
+        )
+    if auto_rkn_no:
+        response.headers["X-Auto-RKN-No"] = auto_rkn_no
+        response.headers["Access-Control-Expose-Headers"] = "X-Auto-RKN-No"
     return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 

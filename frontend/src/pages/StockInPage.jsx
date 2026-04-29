@@ -945,9 +945,16 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       }
       const fresh = await api.get(`/receipt-notes/${rnId}`);
       if (fresh.data.status === "DRAFT") {
-        await api.post(`/receipt-notes/${rnId}/finalize`);
+        const finRes = await api.post(`/receipt-notes/${rnId}/finalize`);
+        const autoRkn = finRes.headers?.["x-auto-rkn-no"];
+        if (autoRkn) {
+          toast.success(`Receipt Note ${rnNoDisplay} finalized — ${autoRkn} auto-created for racking`);
+        } else {
+          toast.success(`Receipt Note ${rnNoDisplay} finalized`);
+        }
+      } else {
+        toast.success(`Receipt Note ${rnNoDisplay} finalized`);
       }
-      toast.success(`Receipt Note ${rnNoDisplay} finalized`);
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize receipt note");
@@ -1909,11 +1916,13 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     }
     setBusy(true);
     try {
-      await api.post(`/short-received-notes/${parent.id}/children`, {
+      const res = await api.post(`/short-received-notes/${parent.id}/children`, {
         part_no: it.part_no, make: it.make,
         received_qty: rcv, not_receivable_qty: nrcv,
       });
-      toast.success("Child row added");
+      const autoRkn = res.headers?.["x-auto-rkn-no"];
+      if (autoRkn) toast.success(`Child row added — ${autoRkn} auto-created for racking`);
+      else toast.success("Child row added");
       cancelAddChild(idx);
       await reload();
     } catch (err) {
@@ -1930,11 +1939,13 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     if (!rcv && !nrcv) { toast.error("Enter Received or Not Receivable Qty"); return; }
     setBusy(true);
     try {
-      await api.put(
+      const res = await api.put(
         `/short-received-notes/${parent.id}/children/${encodeURIComponent(child_srn_no)}`,
         { part_no: it.part_no, make: it.make, received_qty: rcv, not_receivable_qty: nrcv },
       );
-      toast.success("Row updated");
+      const autoRkn = res.headers?.["x-auto-rkn-no"];
+      if (autoRkn) toast.success(`Row updated — ${autoRkn} auto-created for racking`);
+      else toast.success("Row updated");
       setEditing(null);
       await reload();
     } catch (err) {
@@ -2181,10 +2192,12 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     if (acc + rej > pending + 1e-6) { toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return; }
     setBusy(true);
     try {
-      await api.post(`/extra-received-notes/${parent.id}/children`, {
+      const res = await api.post(`/extra-received-notes/${parent.id}/children`, {
         part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej,
       });
-      toast.success("Child row added");
+      const autoRkn = res.headers?.["x-auto-rkn-no"];
+      if (autoRkn) toast.success(`Child row added — ${autoRkn} auto-created for racking`);
+      else toast.success("Child row added");
       cancelAdd(idx);
       await reload();
     } catch (err) {
@@ -2201,11 +2214,13 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     if (!acc && !rej) { toast.error("Enter Accepted or Rejected Qty"); return; }
     setBusy(true);
     try {
-      await api.put(
+      const res = await api.put(
         `/extra-received-notes/${parent.id}/children/${encodeURIComponent(child_ern_no)}`,
         { part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej },
       );
-      toast.success("Row updated");
+      const autoRkn = res.headers?.["x-auto-rkn-no"];
+      if (autoRkn) toast.success(`Row updated — ${autoRkn} auto-created for racking`);
+      else toast.success("Row updated");
       setEditing(null);
       await reload();
     } catch (err) {

@@ -1,0 +1,32 @@
+{
+  "summary": "Iter-29 RN→SRN→RKN auto-creation workflow regression. (1) Re-ran the full backend regression net: tests/test_iter27_refactor_regression.py + tests/test_iter28_refactor_regression.py + tests/test_iter29_auto_rkn_workflow.py = 61/61 PASS in ~31s. (2) Authored a NEW supplementary suite tests/test_iter29_edge_cases.py covering the gaps explicitly called out by main agent: GENERAL stock_in_type finalize→auto-RKN, invoice<received finalize→auto-ERN+auto-RKN, invoice>received finalize→auto-SRN+auto-RKN(received only), multi-item RN with mixed qty (per-part RKN rows + SRN for shortfall part only), PUT /api/short-received-notes/{id}/children/{child_no} increasing received_qty→auto-RKN, ERN parallel: POST and PUT /api/extra-received-notes/{id}/children with accepted_qty>0→auto-RKN auto_source='ern-child-save'. 8/8 NEW edge cases PASS. Combined: 69/69 backend PASS in 42.95s. (3) Frontend smoke: login → Stock In → Racking Note tab. Confirmed 74 AUTO badges render with data-testid='rkn-auto-badge-<rkn_no>', purple styling (bg-purple-100/text-purple-700), tooltips reading 'Auto-created on rn finalize', 'Auto-created on srn child save', 'Auto-created on ern child save', 'Auto-created on rkn record balance' — covering all 4 auto_source variants. RN list shows healthy mix of statuses (DRAFT, RACKING_NOTE_DRAFT, RACKING_PENDING, PARTIALLY_RACKED, FULLY_RACKED), confirming the new status logic is live in production data. NO regressions introduced. NO bugs found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter29_auto_rkn_workflow.py",
+    "/app/backend/tests/test_iter29_edge_cases.py",
+    "/app/backend/tests/test_iter27_refactor_regression.py",
+    "/app/backend/tests/test_iter28_refactor_regression.py",
+    "/app/test_reports/pytest/iter29_full.xml",
+    "/app/test_reports/pytest/iter29_combined.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: extend frontend smoke with an end-to-end UI flow that creates an RN with shortfall via the form, finalizes, and sticky-asserts the toast text 'RKN/<no> auto-created for racking'. This required exercising part_no/make autocomplete dropdowns; not done here because the underlying API + AUTO badge are both already verified."
+  ],
+  "critical_code_review_comments": [
+    "_auto_create_rkn_for_source helper (server.py ~L1192) is a clean choke-point. All 4 callers (RN finalize, RKN record-balance, SRN child save/edit, ERN child save/edit) tag with distinct auto_source values — easy to filter in UI. No hidden coupling.",
+    "X-Auto-RKN-No response header exposure works correctly across all 5 endpoints. Backend sets Access-Control-Expose-Headers properly so frontend can read it (verified in network during smoke).",
+    "RN status logic (PARTIALLY_RACKED while ANY descendant SRN/ERN non-COMPLETE) is correctly enforced — verified by the test_step_1_thru_5_ends_with_fully_racked end-to-end test which only flips to FULLY_RACKED after the SRN child is added AND its RKN is recorded.",
+    "Minor: SrnChildBody / ErnChildBody validators reject (received_qty=0 AND not_receivable_qty=0) with HTTP 400 — good guardrail but the test_iter29_edge_cases.py test for 'PUT increases received_qty' has to seed the child with non_receivable_qty=2 first because of this, which is fine and documented in the test."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter29_edge_cases.py (NEW — 8 supplementary edge cases)"
+  ],
+  "success_rate": {"backend": "100% (69/69 PASS)", "frontend": "100% on smoke (login + RKN list AUTO-badge rendering verified across all 4 auto_source variants)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "iter29_edge_cases creates 2 stock_master rows + 1 godown/rack/box per session, all prefixed AUTO29E_<6hex> and torn down in fixture finalizer. iter29_auto_rkn_workflow creates AUTO29_<6hex> equivalents. Each fully cleans up.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter-29 backend regression net = 69 tests across test_iter27_refactor_regression.py (30) + test_iter28_refactor_regression.py (23) + test_iter29_auto_rkn_workflow.py (8) + test_iter29_edge_cases.py (8). Run all four with: cd /app/backend && python -m pytest tests/test_iter27_refactor_regression.py tests/test_iter28_refactor_regression.py tests/test_iter29_auto_rkn_workflow.py tests/test_iter29_edge_cases.py -v. The auto-RKN workflow is the most invasive iter-29 change — exercises 5 hooks. Frontend AUTO badge selector: [data-testid^=\"rkn-auto-badge-\"]. Toast text format: 'RKN/<no> auto-created for racking'. The new iter29_edge_cases suite covers GENERAL stock_in, invoice>received, invoice<received, multi-item RN, PUT-child-increase, ERN parallel — none of which are covered by the original iter29 suite.",
+  "rca of the issue": "No bugs. All 5 auto-RKN hooks behave per spec. 3 initial test-script bugs in iter29_edge_cases.py were author errors (passed invoice_qty=0 to GENERAL — backend validates >0; assumed wrong response shape for SRN/ERN add-child — endpoints return the full parent doc with .items[].children[] not a top-level children[]). All fixed in commit; no backend code changed."
+}

@@ -374,7 +374,7 @@ class TestReceiptNotes:
         # finalize
         f = requests.post(API(f"/receipt-notes/{rn_id}/finalize"), headers=H, timeout=20)
         assert f.status_code == 200, f.text
-        assert f.json()["status"] in ("FINAL", "PARTIALLY_RACKED", "FULLY_RACKED")
+        assert f.json()["status"] in ("FINAL", "RACKING_NOTE_DRAFT", "PARTIALLY_RACKED", "FULLY_RACKED")
 
 
 # ===================== Various next-no / lookup endpoints =====================

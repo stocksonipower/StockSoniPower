@@ -300,7 +300,7 @@ class TestKeptInServerWorkflow:
         f = requests.post(API(f"/receipt-notes/{rn['id']}/finalize"),
                           headers=H, timeout=30)
         assert f.status_code == 200, f.text
-        assert f.json()["status"] in ("FINAL", "PARTIALLY_RACKED", "FULLY_RACKED")
+        assert f.json()["status"] in ("FINAL", "RACKING_NOTE_DRAFT", "PARTIALLY_RACKED", "FULLY_RACKED")
 
     def test_racking_picking_transfer_next_no_endpoints(self, H):
         # All these stay in server.py — verify they still answer 200

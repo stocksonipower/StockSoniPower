@@ -129,8 +129,14 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
     if (!window.confirm(`Record ${rkn.rkn_no} as Stock In?\n\nThis will add ${rkn.items.length} stock-in transaction(s) and mark the linked Receipt Note (${rkn.receipt_note_no}) as RACKED. This cannot be undone.`)) return;
     setRecordingId(rkn.id);
     try {
-      const { data } = await api.post(`/racking-notes/${rkn.id}/record`);
-      toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) created`);
+      const res = await api.post(`/racking-notes/${rkn.id}/record`);
+      const data = res.data || {};
+      const autoRkn = res.headers?.["x-auto-rkn-no"] || data.auto_rkn_no;
+      if (autoRkn) {
+        toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) · ${autoRkn} auto-created for remaining qty`);
+      } else {
+        toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) created`);
+      }
       load();
       onRecorded?.();
     } catch (err) {
@@ -229,6 +235,15 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                     >
                       {r.rkn_no}
                     </button>
+                    {r.auto_created && (
+                      <span
+                        className="ml-1.5 inline-block text-[9px] font-bold uppercase tracking-wide bg-purple-100 text-purple-700 border border-purple-300 rounded px-1 py-0.5 align-middle"
+                        title={`Auto-created on ${(r.auto_source || "").replace(/-/g, " ")}`}
+                        data-testid={`rkn-auto-badge-${r.rkn_no}`}
+                      >
+                        AUTO
+                      </span>
+                    )}
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
                   <td>
