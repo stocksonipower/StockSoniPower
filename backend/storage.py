@@ -11,10 +11,15 @@ import requests
 logger = logging.getLogger(__name__)
 
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 APP_NAME = "stock-management"
 
 _storage_key = None
+
+
+def _emergent_key() -> str | None:
+    """Read EMERGENT_LLM_KEY at call time so we don't get bitten by import-order
+    issues with load_dotenv (server.py imports `storage` before `deps` calls load_dotenv)."""
+    return os.environ.get("EMERGENT_LLM_KEY")
 
 
 def init_storage() -> str:
@@ -22,11 +27,12 @@ def init_storage() -> str:
     global _storage_key
     if _storage_key:
         return _storage_key
-    if not EMERGENT_KEY:
+    key = _emergent_key()
+    if not key:
         raise RuntimeError("EMERGENT_LLM_KEY is not set in environment")
     resp = requests.post(
         f"{STORAGE_URL}/init",
-        json={"emergent_key": EMERGENT_KEY},
+        json={"emergent_key": key},
         timeout=30,
     )
     resp.raise_for_status()

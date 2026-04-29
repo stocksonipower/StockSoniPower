@@ -3,8 +3,10 @@
 Extracted from server.py during the routes refactor (no logic changes).
 All models are imported back into server.py via `from models import *`.
 """
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
+import uuid
 
 # -------------------- MODELS --------------------
 class UserRegister(BaseModel):
