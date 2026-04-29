@@ -92,6 +92,21 @@ Implemented per detailed user spec — adds 5 hooks to existing pipeline:
 - Frontend toasts on all 5 endpoints + purple "AUTO" badge in RKN list (data-testid=`rkn-auto-badge-<rkn_no>`)
 - ✅ Tests: **69/69 backend PASS** (iter27+iter28+iter29+iter29_edge_cases) + frontend smoke (74 AUTO badges rendered correctly across all 4 auto_source tooltips)
 
+### Status cleanup — active 12-status set (DONE 2026-04-29, iter-30)
+User-driven cleanup. Removed legacy values **FINAL, RACKING_PENDING, FULLY_RECEIVED, RACKED, PARTIALLY_REJECTED**. Active set:
+- Receipt Note: DRAFT · RACKING_NOTE_DRAFT · PARTIALLY_RACKED · FULLY_RACKED
+- SRN: PENDING · PARTIALLY_RECEIVED · COMPLETE
+- ERN: PENDING · PARTIALLY_ACCEPTED · COMPLETE
+- Racking Note: DRAFT · RECORDED
+
+Backend: `_recompute_rn_status` now returns RACKING_NOTE_DRAFT (never FINAL); `_compute_ern_status` collapses rejected-only → PARTIALLY_ACCEPTED. New helper `_is_source_fully_racked()` replaces the cached `racking_status` field on SRN/ERN — field & index are dropped at startup. Startup migrations remap any legacy data: FINAL/RACKED/RACKING_PENDING → RACKING_NOTE_DRAFT/FULLY_RACKED/RACKING_NOTE_DRAFT; FULLY_RECEIVED → COMPLETE; PARTIALLY_REJECTED → PARTIALLY_ACCEPTED. Models cleaned: SRN/ERN no longer expose `racking_status`/`racked_at`.
+
+Frontend: `statusMeta()` (StockInPage.jsx) and `STATUS_CLS` (ItemDetailsPage.jsx) reduced to active set. All legacy cases fall through to default chip if ever returned.
+
+DB wiped to fresh slate: 0 transactions, counters reset to 1. Stock master + users + locations preserved.
+
+✅ **78/78 backend tests PASS** (iter27 + iter28 + iter29 + iter29_edge_cases + iter30_status_cleanup).
+
 ### P1 — UX Polish
 - StockMasterPage audit fixes:
   1. Search "Enter" key auto-scroll to matches

@@ -226,13 +226,13 @@ class ShortReceivedNote(BaseModel):
     invoice_date: str = ""
     fulfillment_date: str = ""                 # ISO "YYYY-MM-DD" — set on Final Save when shortfall arrives
     items: List[ShortReceivedNoteItem] = []
-    # Status semantics (computed off items):
-    #   PENDING            : sum(fulfilled_qty) == 0
-    #   PARTIALLY_RECEIVED : 0 < sum(fulfilled_qty) < sum(short_qty)
-    #   FULLY_RECEIVED     : sum(fulfilled_qty) == sum(short_qty)
-    # Racking visibility: as soon as any fulfilled_qty > 0 is recorded, the SRN is rackable
-    # (the partially-received qty is physically in hand). The SRN does NOT need to be in
-    # FULLY_RECEIVED state for racking to consume it.
+    # Status semantics (active 3-status set after iter-30 cleanup):
+    #   PENDING            : no children, or all children with zero received+not_receivable
+    #   PARTIALLY_RECEIVED : received_qty + not_receivable_qty across children > 0 and < short
+    #   COMPLETE           : received_qty + not_receivable_qty across children >= short
+    # Racking visibility: as soon as any received_qty > 0 is recorded on a child slice,
+    # the SRN is rackable (the partially-received qty is physically in hand). The SRN
+    # does NOT need to be COMPLETE for racking to consume it.
     status: str = "PENDING"
     finalized_at: Optional[str] = None         # the LAST time the user clicked Save Final
     created_at: str

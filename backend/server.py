@@ -505,7 +505,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
 
 @api_router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
 async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get_current_user)):
-    """Promote a DRAFT receipt note to FINAL.
+    """Promote a DRAFT receipt note to RACKING_NOTE_DRAFT.
 
     Requires: received_qty is a non-negative number for every row (0 is allowed
     and means "nothing received against this row yet"). invoice_date and
@@ -844,14 +844,15 @@ async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[s
 async def _recompute_rn_status(rn_id: str):
     """Recompute racking-progress status. DRAFT receipts stay at DRAFT.
 
-    Status precedence (highest to lowest):
+    Status precedence (highest to lowest), active 4-status set only:
       DRAFT                : manual; never auto-promoted
-      RACKING_NOTE_DRAFT   : at least one DRAFT racking note exists against the RN OR
-                             any of its SRN / ERN descendants
+      RACKING_NOTE_DRAFT   : finalized RN with at most DRAFT racking notes (or none yet —
+                             SRN/ERN tree may still emit auto-RKNs later)
       FULLY_RACKED         : all rackable qty (RN.received + SRN.fulfilled + ERN.accepted
                              across descendants) is covered by RECORDED racking notes
+                             AND every descendant SRN/ERN is COMPLETE
       PARTIALLY_RACKED     : some RECORDED racking exists but not yet fully covered
-      FINAL                : finalized RN with no racking activity yet
+                             OR a descendant SRN/ERN is still non-COMPLETE
     """
     rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not rn:
@@ -2003,8 +2004,9 @@ def _compute_ern_status(ern: dict) -> str:
          total_decided = sum(accepted+rejected) across all children
          no children                            -> PENDING
          total_decided >= sum(extra_qty)        -> COMPLETE
-         any accepted > 0 AND pending > 0       -> PARTIALLY_ACCEPTED
-         only rejected > 0 AND pending > 0      -> PARTIALLY_REJECTED
+         any decided activity but not complete  -> PARTIALLY_ACCEPTED
+                                                   (legacy PARTIALLY_REJECTED collapsed
+                                                    into PARTIALLY_ACCEPTED in iter-30)
     """
     items = ern.get("items") or []
     total_extra = 0.0
