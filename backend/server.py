@@ -4443,14 +4443,9 @@ async def startup():
 async def shutdown():
     client.close()
 
+# -------------------- SECURITY & MIDDLEWARE --------------------
 
-
-
-app.include_router(api_router)
-
-
-# Module access middleware (URL-prefix based) — enforces staff per-module ACL.
-# Admin always passes. Auth/profile/users routes bypass since their dep already enforces auth/admin.
+# The Rulebook: Maps URL prefixes to module permissions
 PATH_TO_MODULE = [
     ("/api/stock-master", "stock_master"),
     ("/api/godowns", "locations"),
@@ -4472,7 +4467,6 @@ PATH_TO_MODULE = [
     ("/api/extra-received-notes", "stock_in"),
 ]
 
-
 @app.middleware("http")
 async def module_access_middleware(request, call_next):
     path = request.url.path
@@ -4489,7 +4483,7 @@ async def module_access_middleware(request, call_next):
                         from starlette.responses import JSONResponse as _JSON
                         return _JSON(status_code=403, content={"detail": f"Access denied: '{matched}' module is disabled for your account"})
             except Exception:
-                pass  # let the route's own auth dep return the appropriate error
+                pass
     return await call_next(request)
 
 app.add_middleware(
@@ -4499,3 +4493,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# CRITICAL: This MUST be the very last line of the file
+app.include_router(api_router)

@@ -35,11 +35,16 @@ export default function LoginPage() {
       <div className="flex items-center justify-center px-6 sm:px-12 py-12">
         <div className="w-full max-w-md">
 
+           {/* WELCOME TO HEADER - Increased size & centered */}
+          <p className="text-2xl md:text-3xl font-bold tracking-wide text-blue-600 uppercase text-center mb-2">
+            Welcome to
+          </p>
+
           <div className="mb-6">
             <img src="/logo.png" alt="Soni Power" className="h-40 w-auto" />
           </div>
 
-          <h1 className="text-4xl font-black tracking-tight text-slate-900 mb-2">Sign In</h1>
+          <h1 className="text-4xl font-black tracking-tight text-slate-900 mb-2 text-center">Sign In</h1>
 
           <form onSubmit={submit} className="space-y-5">
             <div>
