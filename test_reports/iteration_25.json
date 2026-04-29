@@ -1,0 +1,44 @@
+{
+  "summary": "Iter-25 verified the new inline-child SRN/ERN model (children as sub-rows on parent items[]). Created /app/backend/tests/test_iter25_inline_child_workflow.py covering TC1-TC12 (14 test methods). 10/14 PASS. CRITICAL FINDING: PUT and DELETE /api/short-received-notes/{srn_id}/children/{child_srn_no} (and ERN equivalents) ALL return 404 because child_srn_no contains '/' (e.g. 'SRN/26-27/001-A') — Starlette/uvicorn decodes %2F before path-routing, so the single-segment path param doesn't match. This breaks TC4, TC5, TC6, TC9 entirely. POST /children, status workflow, alphabet suffix (A/B/C), pending overflow guard, racking-sources rackable_qty=8 (received-only / accepted-only), RN→FULLY_RACKED end-to-end, and removal of legacy /fulfill/accept/reject endpoints all VERIFIED.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/short-received-notes/{srn_id}/children/{child_srn_no}, DELETE /api/short-received-notes/{srn_id}/children/{child_srn_no}, PUT /api/extra-received-notes/{ern_id}/children/{child_ern_no}, DELETE /api/extra-received-notes/{ern_id}/children/{child_ern_no}",
+        "issue": "All four endpoints return 404 Not Found whenever the child id contains '/' (which it ALWAYS does — child ids look like 'SRN/26-27/001-A' or 'ERN/26-27/001-A'). Root cause: FastAPI route '/children/{child_srn_no}' uses default str converter that matches only ONE path segment, but Starlette/uvicorn decodes %2F to '/' BEFORE route matching, so the request path becomes /api/.../children/SRN/26-27/001-A (4 extra segments) — no route matches. Tested with both URL-encoded (quote(child_srn_no, safe='')) and raw forms — both 404. Backend log confirms decoded path 'PUT /api/extra-received-notes/31dff6fb.../children/ERN/26-27/006-A HTTP/1.1 404 Not Found'. Fix: change path param to `{child_srn_no:path}` (and `{child_ern_no:path}`) on lines 4293, 4372, 4694, 4757 of server.py — this enables matching paths that include '/'.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter25_inline_child_workflow.py",
+    "/app/test_reports/pytest/iter25_inline_child.xml"
+  ],
+  "action_items": [
+    "Change FastAPI route path params from '{child_srn_no}' / '{child_ern_no}' to '{child_srn_no:path}' / '{child_ern_no:path}' on PUT and DELETE child endpoints (server.py lines 4293, 4372, 4694, 4757). This is the only currently-broken contract; POST /children, GET, racking flow, status helpers, RN→FULLY_RACKED all work correctly.",
+    "Once route is fixed, re-run pytest backend/tests/test_iter25_inline_child_workflow.py — TC4/TC5/TC6/TC9 should pass with no test changes needed. The tests already URL-encode (urllib.parse.quote(child_id, safe=''))."
+  ],
+  "critical_code_review_comments": [
+    "BUG: Path params '{child_srn_no}' and '{child_ern_no}' on PUT/DELETE /children/ endpoints (server.py lines 4293, 4372, 4694, 4757) cannot match values containing '/' — must be '{child_srn_no:path}' / '{child_ern_no:path}'. Without this fix the entire edit/delete child contract is unreachable.",
+    "POST /children correctly auto-allocates A/B/C suffixes, validates against pending qty (short_qty - sum(used)), and recomputes parent status. Verified by TC1, TC2, TC3.",
+    "_compute_srn_status / _compute_ern_status correctly derive parent status from sum(children received+not_receivable) vs short_qty / sum(accepted+rejected) vs extra_qty. Verified by TC2 (SRN COMPLETE at 8+12=20=short) and TC8 (ERN COMPLETE at 8+2=10=extra).",
+    "/racking-notes/sources groups by parent_rn_id and surfaces parent SRN/ERN as sources entries. /racking-notes/prepare-source returns rackable_qty derived from sum(children.received_qty) for SRN and sum(children.accepted_qty) for ERN — rejected/not_receivable correctly excluded. Verified by TC10.",
+    "RN status correctly transitions to FULLY_RACKED when RN.received_qty + Σ(SRN children.received_qty) + Σ(ERN children.accepted_qty) all racked. Verified by TC11 (inv=10/rcvd=4, SRN child rcvd=6, both racked → RN.status=FULLY_RACKED).",
+    "Legacy POST /fulfill returns 404 confirming it has been removed. Verified by TC12.",
+    "ShortReceivedNoteItem and ExtraReceivedNoteItem now declare `children: Optional[List[dict]] = []` (lines 410, 470) — children are correctly returned in POST /children responses. Iter-24's response_model stripping bug is resolved."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter25_inline_child_workflow.py (NEW — 14 tests covering TC1-TC12)"
+  ],
+  "success_rate": {
+    "backend": "71% (10/14). 4 failures all stem from one route-definition bug (PUT/DELETE child endpoints don't match slashes). Once {child_srn_no:path} fix is applied → expected 100%.",
+    "frontend": "N/A (skipped per request)"
+  },
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each test creates fresh TESTPN_<uuid8> stock_master rows + one TEST_GD/TR/TB godown/rack/box per session. No reliance on pre-seeded data.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `export REACT_APP_BACKEND_URL=https://inventory-ops-dash.preview.emergentagent.com && pytest /app/backend/tests/test_iter25_inline_child_workflow.py -v`. The 4 failing tests (TC4 TestTC4EditChild, TC5 TestTC5EditDeleteBlockedByRkn, TC6 TestTC6DeleteChild, TC9 TestTC9ErnEditDeleteBlocked) all hit the SAME bug: 404 on PUT/DELETE because child id contains '/'. Backend route definitions need `:path` converter on the child_srn_no/child_ern_no path params. Once fixed, all 14 tests should pass without test code changes.",
+  "rca of the issue": "ROOT CAUSE: FastAPI/Starlette path parameter '{child_srn_no}' uses the default str converter which matches a single URL path segment ([^/]+). Children IDs in this app are formatted as 'SRN/26-27/001-A' — they contain TWO forward slashes. Even when the client URL-encodes them as 'SRN%2F26-27%2F001-A', uvicorn/Starlette decodes the %2F BEFORE route matching (per WSGI/ASGI conventions), so the router sees '/api/short-received-notes/{srn_id}/children/SRN/26-27/001-A' and there is no matching route → 404. Reproduction: PUT to either encoded or raw URL — both return 404. Backend log confirms decoded path. MITIGATION: change path param converter to `:path` in server.py lines 4293, 4372, 4694, 4757 — `:path` permits embedded slashes by greedy-matching to the end of the URL. This is a one-character change per route (`{child_srn_no}` → `{child_srn_no:path}` and `{child_ern_no}` → `{child_ern_no:path}`) and requires no test changes."
+}
