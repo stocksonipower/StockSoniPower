@@ -21,17 +21,16 @@ const fmtDate = (s) => {
 const num = (v) => (v == null || v === "" ? "—" : (typeof v === "number" ? v : Number(v)));
 
 const STATUS_CLS = {
+  // Active 12-status set only
   DRAFT: "bg-slate-100 text-slate-700",
-  FINAL: "bg-amber-50 text-amber-800",
-  RACKING_PENDING: "bg-amber-50 text-amber-800",
+  RACKING_NOTE_DRAFT: "bg-orange-50 text-orange-800 border border-orange-200",
   PARTIALLY_RACKED: "bg-blue-50 text-blue-800",
   FULLY_RACKED: "bg-green-100 text-green-800",
   RECORDED: "bg-green-100 text-green-800",
   PENDING: "bg-amber-50 text-amber-800",
   PARTIALLY_RECEIVED: "bg-blue-50 text-blue-800",
-  FULLY_RECEIVED: "bg-green-100 text-green-800",
-  ACCEPTED: "bg-green-100 text-green-800",
-  REJECTED: "bg-red-50 text-red-700",
+  PARTIALLY_ACCEPTED: "bg-blue-50 text-blue-800",
+  COMPLETE: "bg-green-100 text-green-800",
 };
 function StatusPill({ s }) {
   if (!s) return null;

@@ -168,8 +168,8 @@ class ReceiptNote(BaseModel):
     invoice_date: str = ""
     goods_received_date: str = ""
     items: List[ReceiptNoteItem] = []
-    # New flow: DRAFT -> FINAL -> PARTIALLY_RACKED -> FULLY_RACKED
-    # Legacy "RACKING_PENDING" is migrated to "FINAL" on startup.
+    # Active 4-status flow: DRAFT -> RACKING_NOTE_DRAFT -> PARTIALLY_RACKED -> FULLY_RACKED
+    # Legacy FINAL / RACKING_PENDING / RACKED are migrated on startup.
     status: str = "DRAFT"
     finalized_at: Optional[str] = None
     racked_at: Optional[str] = None
@@ -235,8 +235,6 @@ class ShortReceivedNote(BaseModel):
     # FULLY_RECEIVED state for racking to consume it.
     status: str = "PENDING"
     finalized_at: Optional[str] = None         # the LAST time the user clicked Save Final
-    racking_status: str = "RACKING_PENDING"    # RACKING_PENDING | PARTIALLY_RACKED | FULLY_RACKED
-    racked_at: Optional[str] = None
     created_at: str
     created_by: str = ""                       # email or "system" when auto-generated
     assigned_to_user_id: Optional[str] = None
@@ -286,17 +284,14 @@ class ExtraReceivedNote(BaseModel):
     invoice_date: str = ""
     goods_received_date: str = ""              # carried from parent at create time
     items: List[ExtraReceivedNoteItem] = []
-    # Status semantics (computed off items):
-    #   PENDING             : accepted == 0 AND rejected == 0
-    #   PARTIALLY_ACCEPTED  : accepted > 0 AND rejected == 0 AND accepted < extra
-    #   PARTIALLY_REJECTED  : accepted == 0 AND rejected > 0 AND rejected < extra
-    #   COMPLETE            : accepted + rejected == extra
+    # Status values (active set after iter-30 cleanup):
+    #   PENDING             : no children, or all children with zero accepted+rejected
+    #   PARTIALLY_ACCEPTED  : accepted_qty + rejected_qty > 0 and < extra
+    #   COMPLETE            : accepted + rejected >= extra
     # When the user finalizes an ERN with accepted+rejected < extra, a CHILD ERN is auto-created
     # for the residual undecided qty.
     status: str = "PENDING"
     finalized_at: Optional[str] = None
-    racking_status: str = "RACKING_PENDING"
-    racked_at: Optional[str] = None
     created_at: str
     created_by: str = ""
     assigned_to_user_id: Optional[str] = None

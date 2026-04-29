@@ -70,32 +70,32 @@ function stockInTypeMeta(type) {
 function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
 
 
+// Status metadata. The backend emits exactly 12 active values across all 4
+// note types — anything else falls through to the default chip.
+//   Receipt Note:  DRAFT, RACKING_NOTE_DRAFT, PARTIALLY_RACKED, FULLY_RACKED
+//   SRN:           PENDING, PARTIALLY_RECEIVED, COMPLETE
+//   ERN:           PENDING, PARTIALLY_ACCEPTED, COMPLETE
+//   Racking Note:  DRAFT, RECORDED
 function statusMeta(status) {
   switch (status) {
     case "DRAFT":
       return { label: "Draft", cls: "bg-slate-100 text-slate-700" };
-    case "FINAL":
-    case "RACKING_PENDING":
-      return { label: "Racking Pending", cls: "bg-amber-50 text-amber-700" };
     case "RACKING_NOTE_DRAFT":
       return { label: "Racking Note Draft", cls: "bg-orange-50 text-orange-800 border border-orange-200" };
     case "PARTIALLY_RACKED":
       return { label: "Partially Racked", cls: "bg-blue-50 text-blue-800" };
     case "FULLY_RACKED":
       return { label: "Fully Racked", cls: "bg-green-100 text-green-800" };
-    // SRN Phase 2 statuses
     case "PENDING":
       return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
     case "PARTIALLY_RECEIVED":
       return { label: "Partially Received", cls: "bg-blue-50 text-blue-800" };
-    case "FULLY_RECEIVED":  // legacy — backend now emits COMPLETE
-    case "COMPLETE":
-      return { label: "Complete", cls: "bg-green-100 text-green-800" };
-    // ERN Phase 2 statuses
     case "PARTIALLY_ACCEPTED":
       return { label: "Partially Accepted", cls: "bg-blue-50 text-blue-800" };
-    case "PARTIALLY_REJECTED":
-      return { label: "Partially Rejected", cls: "bg-purple-50 text-purple-800" };
+    case "COMPLETE":
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
+    case "RECORDED":
+      return { label: "Fully Racked", cls: "bg-green-100 text-green-800" };
     default:
       return { label: status || "—", cls: "bg-slate-100 text-slate-700" };
   }
@@ -1650,9 +1650,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
           <tbody>
             {filteredRows.map((r, idx) => {
               const meta = statusMeta(r.status);
-              const canEdit = isSrn
-                ? !["COMPLETE", "FULLY_RECEIVED"].includes(r.status)
-                : r.status !== "COMPLETE";
+              const canEdit = r.status !== "COMPLETE";
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                                     <td className="font-mono text-slate-500">{idx + 1}</td>
