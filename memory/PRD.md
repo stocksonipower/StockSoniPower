@@ -80,6 +80,18 @@ email+password auth, object storage for images.
 - 📋 **Remaining in server.py**: stock_in/out, RN, SRN/ERN, Racking, Issue, Picking, Transfer (the deeply interlinked core workflows). Left intact for safety.
 - ✅ **Regression**: 30/30 tests pass via `tests/test_iter27_refactor_regression.py`
 
+### Auto-creation workflow — RN → SRN → RKN (DONE 2026-04-29, iter-29)
+Implemented per detailed user spec — adds 5 hooks to existing pipeline:
+- **Rule 1**: RN finalize → DRAFT RKN auto-created for received qty (per item)
+- **Rule 2**: RKN record → balance DRAFT RKN auto-created if any item still has unracked qty
+- **Rule 3**: SRN child save (POST + PUT) → DRAFT RKN against the SRN for the new received qty
+- **Rule 3 ERN parallel**: ERN child save (POST + PUT) → DRAFT RKN against the ERN for accepted qty
+- **Status rule**: RN now stays PARTIALLY_RACKED while any descendant SRN/ERN is non-COMPLETE; FULLY_RACKED only when both rackable racked AND all descendants COMPLETE
+- New helper: `_auto_create_rkn_for_source(source_type, source_id, actor, *, auto_source)` (server.py)
+- DB columns: `racking_notes.auto_created` (bool), `racking_notes.auto_source` (str)
+- Frontend toasts on all 5 endpoints + purple "AUTO" badge in RKN list (data-testid=`rkn-auto-badge-<rkn_no>`)
+- ✅ Tests: **69/69 backend PASS** (iter27+iter28+iter29+iter29_edge_cases) + frontend smoke (74 AUTO badges rendered correctly across all 4 auto_source tooltips)
+
 ### P1 — UX Polish
 - StockMasterPage audit fixes:
   1. Search "Enter" key auto-scroll to matches
