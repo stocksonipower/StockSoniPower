@@ -670,10 +670,14 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   }, [stockInType]);
 
   const addItem = () => {
-    const n = Math.max(1, Math.min(500, parseInt(addCount, 10) || 1));
-    setItems((p) => [...p, ...Array.from({ length: n }, emptyItem)]);
-    setAddCount("");
-  };
+  let n = Math.max(1, Math.min(500, parseInt(addCount, 10) || 1));
+  // If user entered a number, subtract 1 because one row already exists
+  if (addCount && parseInt(addCount, 10) > 0) {
+    n = Math.max(1, n - 1);
+  }
+  setItems((p) => [...p, ...Array.from({ length: n }, emptyItem)]);
+  setAddCount("");
+};
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
@@ -847,55 +851,89 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   };
 
   /* ---- Validation ---- */
-  const validateBaseRows = () => {
-    if (items.length === 0) { toast.error("Add at least one item"); return false; }
-    for (let idx = 0; idx < items.length; idx++) {
-      const it = items[idx];
-      if (!it.part_no.trim()) { toast.error(`Row ${idx + 1}: Part No is required`); return false; }
-      if (!it.make.trim()) { toast.error(`Row ${idx + 1}: Make is required`); return false; }
-      if (!isGeneral) {
-        const inv = toNum(it.invoice_qty);
-        if (inv == null || inv <= 0) { toast.error(`Row ${idx + 1}: Invoice Qty must be > 0`); return false; }
-      }
-      const rec = toNum(it.received_qty);
-      if (rec != null && rec < 0) { toast.error(`Row ${idx + 1}: Received Qty cannot be negative`); return false; }
-    }
-    return true;
-  };
-
-  const validateDates = () => {
-    if (invoiceDate && invoiceDate > todayISO()) { toast.error("Invoice Date cannot be in the future"); return false; }
-    if (goodsReceivedDate && goodsReceivedDate > todayISO()) { toast.error("Goods Received Date cannot be in the future"); return false; }
-    return true;
-  };
-
-  // Received Qty may be 0 (treated as "nothing received yet"). We only require
-  // it to be a non-negative number (null/empty is treated as 0 server-side).
-  const allReceivedValid = useMemo(
-    () => items.length > 0 && items.every((it) => {
-      if (it.received_qty === "" || it.received_qty === null || it.received_qty === undefined) return true;
-      const r = toNum(it.received_qty);
-      return r !== null && r >= 0;
-    }),
-    [items]
-  );
-
-  const allMakesFilled = useMemo(
-    () => items.length > 0 && items.every((it) => it.part_no.trim() && it.make.trim()),
-    [items]
-  );
-
-  // Final Save is enabled when: every row has part_no/make and received_qty is a non-negative number
-  // (or empty, treated as 0). Dates + invoice_no are all optional.
-  const canFinalize = useMemo(() => {
-    if (!allMakesFilled || !allReceivedValid) return false;
+  /* ---- Validation ---- */
+const validateBaseRows = () => {
+  if (items.length === 0) { toast.error("Add at least one item"); return false; }
+  for (let idx = 0; idx < items.length; idx++) {
+    const it = items[idx];
+    if (!it.part_no.trim()) { toast.error(`Row ${idx + 1}: Part No is required`); return false; }
+    if (!it.make.trim()) { toast.error(`Row ${idx + 1}: Make is required`); return false; }
     if (!isGeneral) {
-      if (!items.every((it) => (toNum(it.invoice_qty) || 0) > 0)) return false;
+      const inv = toNum(it.invoice_qty);
+      if (inv == null || inv <= 0) { toast.error(`Row ${idx + 1}: Invoice Qty must be > 0`); return false; }
     }
-    if (invoiceDate && invoiceDate > todayISO()) return false;
-    if (goodsReceivedDate && goodsReceivedDate > todayISO()) return false;
-    return true;
-  }, [items, allMakesFilled, allReceivedValid, invoiceDate, goodsReceivedDate, isGeneral]);
+    const rec = toNum(it.received_qty);
+    if (rec != null && rec < 0) { toast.error(`Row ${idx + 1}: Received Qty cannot be negative`); return false; }
+  }
+  return true;
+};
+
+const validateDates = () => {
+  // Convert to Date objects for proper comparison
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Set to start of day
+  
+  if (invoiceDate) {
+    const invoiceDateObj = new Date(invoiceDate);
+    invoiceDateObj.setHours(0, 0, 0, 0);
+    if (invoiceDateObj > today) {
+      toast.error("Invoice Date cannot be in the future");
+      return false;
+    }
+  }
+  
+  if (goodsReceivedDate) {
+    const goodsReceivedDateObj = new Date(goodsReceivedDate);
+    goodsReceivedDateObj.setHours(0, 0, 0, 0);
+    if (goodsReceivedDateObj > today) {
+      toast.error("Goods Received Date cannot be in the future");
+      return false;
+    }
+  }
+  return true;
+};
+ // Received Qty may be 0 (treated as "nothing received yet"). We only require
+// it to be a non-negative number (null/empty is treated as 0 server-side).
+const allReceivedValid = useMemo(
+  () => items.length > 0 && items.every((it) => {
+    if (it.received_qty === "" || it.received_qty === null || it.received_qty === undefined) return true;
+    const r = toNum(it.received_qty);
+    return r !== null && r >= 0;
+  }),
+  [items]
+);
+
+const allMakesFilled = useMemo(
+  () => items.length > 0 && items.every((it) => it.part_no.trim() && it.make.trim()),
+  [items]
+);
+
+// Final Save is enabled when: every row has part_no/make and received_qty is a non-negative number
+// (or empty, treated as 0). Dates + invoice_no are all optional.
+const canFinalize = useMemo(() => {
+  if (!allMakesFilled || !allReceivedValid) return false;
+  if (!isGeneral) {
+    if (!items.every((it) => (toNum(it.invoice_qty) || 0) > 0)) return false;
+  }
+  
+  // Use Date objects for future date check (same as validateDates)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  if (invoiceDate) {
+    const invoiceDateObj = new Date(invoiceDate);
+    invoiceDateObj.setHours(0, 0, 0, 0);
+    if (invoiceDateObj > today) return false;
+  }
+  
+  if (goodsReceivedDate) {
+    const goodsReceivedDateObj = new Date(goodsReceivedDate);
+    goodsReceivedDateObj.setHours(0, 0, 0, 0);
+    if (goodsReceivedDateObj > today) return false;
+  }
+  
+  return true;
+}, [items, allMakesFilled, allReceivedValid, invoiceDate, goodsReceivedDate, isGeneral]);
 
   const buildPayload = () => ({
     stock_in_type: stockInType,
@@ -959,16 +997,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize receipt note");
     } finally { setSavingFinal(false); }
-  };
-
-  // Last-row Tab → focus first save button. Save Final takes priority if available.
-  const handleLastRowKey = (e, isLastRow) => {
-    if (!isLastRow) return;
-    if (e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      const target = canFinalize ? finalBtnRef.current : draftBtnRef.current;
-      if (target) target.focus();
-    }
   };
 
   return (
@@ -1106,15 +1134,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
               data-testid="rn-excel-input"
             />
             <Button
-              onClick={() => fileInputRef.current?.click()}
-              variant="outline"
-              className="rounded-sm"
-              data-testid="rn-excel-import-button"
-              title={isGeneral ? "Columns: Part No, Make, Received Qty" : "Columns: Part No, Invoice Qty, Make, Received Qty"}
-            >
-              <UploadSimple size={14} weight="bold" className="mr-1" /> Import Excel
-            </Button>
-            <Button
               onClick={handleDownloadTemplate}
               variant="outline"
               className="rounded-sm"
@@ -1123,6 +1142,16 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             >
               <DownloadSimple size={14} weight="bold" className="mr-1" /> Download Template
             </Button>
+            <Button
+              onClick={() => fileInputRef.current?.click()}
+              variant="outline"
+              className="rounded-sm"
+              data-testid="rn-excel-import-button"
+              title={isGeneral ? "Columns: Part No, Make, Received Qty" : "Columns: Part No, Invoice Qty, Make, Received Qty"}
+            >
+              <UploadSimple size={14} weight="bold" className="mr-1" /> Import Excel
+            </Button>
+            
             <Input
               type="number"
               min="1"
@@ -1233,39 +1262,76 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                     </td>
                     <td className="w-56">
                       <MakeDropdown
-                        value={it.make}
-                        makes={it.makes}
-                        partLooked={it.partLooked}
-                        onChange={(v) => handleMakeChange(idx, v)}
-                        onKeyDown={(e) => handleLastRowKey(e, isLastRow)}
-                        testid={`rn-make-${idx}`}
-                      />
+  value={it.make}
+  makes={it.makes}
+  partLooked={it.partLooked}
+  onChange={(v) => handleMakeChange(idx, v)}
+  onKeyDown={(e) => {
+    if (isLastRow && e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      const addBtn = document.querySelector(`[data-testid="rn-add-row-${idx}"]`);
+      if (addBtn) addBtn.focus();
+    }
+  }}
+  testid={`rn-make-${idx}`}
+/>
                     </td>
                                         <td>
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => {
-                            const newRow = emptyItem();
-                            setItems((prev) => {
-                              const next = [...prev];
-                              next.splice(idx + 1, 0, newRow);
-                              return next;
-                            });
-                          }}
-                          className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700"
-                          title="Add row below"
-                          data-testid={`rn-add-row-${idx}`}
-                        >
-                          <Plus size={14} />
-                        </button>
-                        <button
-                          onClick={() => removeItem(idx)}
-                          disabled={items.length === 1}
-                          className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                          data-testid={`rn-remove-row-${idx}`}
-                        >
-                          <Trash size={14} />
-                        </button>
+  onClick={() => {
+    const newRow = emptyItem();
+    setItems((prev) => {
+      const next = [...prev];
+      next.splice(idx + 1, 0, newRow);
+      return next;
+    });
+  }}
+  onKeyDown={(e) => {
+    if (e.key === "Tab" && !e.shiftKey && isLastRow) {
+      e.preventDefault();
+      // Check if delete button is enabled (more than 1 row)
+      if (items.length > 1) {
+        const deleteBtn = document.querySelector(`[data-testid="rn-remove-row-${idx}"]`);
+        if (deleteBtn && !deleteBtn.disabled) deleteBtn.focus();
+      } else {
+        // Skip to save buttons when only 1 row
+        const draftBtn = document.querySelector('[data-testid="rn-save-draft-button"]');
+        if (draftBtn && !draftBtn.disabled) {
+          draftBtn.focus();
+        } else {
+          const finalBtn = document.querySelector('[data-testid="rn-save-final-button"]');
+          if (finalBtn) finalBtn.focus();
+        }
+      }
+    }
+  }}
+  className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700"
+  title="Add row below"
+  data-testid={`rn-add-row-${idx}`}
+>
+  <Plus size={14} />
+</button>
+<button
+  onClick={() => removeItem(idx)}
+  disabled={items.length === 1}
+  onKeyDown={(e) => {
+    if (e.key === "Tab" && !e.shiftKey && isLastRow && items.length > 1) {
+      e.preventDefault();
+      const draftBtn = document.querySelector('[data-testid="rn-save-draft-button"]');
+      if (draftBtn && !draftBtn.disabled) {
+        draftBtn.focus();
+      } else {
+        const finalBtn = document.querySelector('[data-testid="rn-save-final-button"]');
+        if (finalBtn) finalBtn.focus();
+      }
+    }
+  }}
+  className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+  data-testid={`rn-remove-row-${idx}`}
+>
+  <Trash size={14} />
+</button>
                       </div>
                     </td>
                   </tr>
