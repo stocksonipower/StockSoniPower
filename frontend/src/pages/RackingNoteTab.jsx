@@ -149,8 +149,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
     { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
-    { key: "items_count", label: "ITEMS TOTAL", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "qty_total", label: "QUANTITY TOTAL", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
     { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
   ], []);
@@ -257,8 +255,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
                   </td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
                     <AssigneeBadge name={assigneeName} email={assigneeEmail} testid={`rkn-assignee-${r.rkn_no}`} />
                   </td>
@@ -303,7 +299,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -651,9 +647,6 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="rkn-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="rkn-save-button">
-          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
-        </Button>
       </div>
 
       {/* HEADER */}
@@ -792,7 +785,6 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                         </SelectContent>
                       </Select>
                     </td>
-                    <td className="font-mono text-slate-600 text-[11px]">{it.box_category || "—"}</td>
                     <td>
                       {(it.existing_locations || []).length === 0 ? (
                         <span className="text-[11px] text-slate-400 italic">New part — pick any location</span>
@@ -814,23 +806,25 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                       )}
                     </td>
                     <td className="whitespace-nowrap">
-                      <button
-                        onClick={() => splitRow(idx)}
-                        className="p-1 hover:bg-blue-50 text-blue-700 rounded-sm mr-1"
-                        title="Split into another row (same part, different location)"
-                        data-testid={`rkn-split-${idx}`}
-                      >
-                        <ArrowsSplit size={14} weight="bold" />
-                      </button>
-                      <button
-                        onClick={() => removeRow(idx)}
-                        disabled={items.length === 1}
-                        className={`p-1 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                        title="Remove row"
-                        data-testid={`rkn-remove-${idx}`}
-                      >
-                        <Trash size={14} />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => splitRow(idx)}
+                          className="p-1 hover:bg-blue-50 text-blue-700 rounded-sm"
+                          title="Split into another row (same part, different location)"
+                          data-testid={`rkn-split-${idx}`}
+                        >
+                          <ArrowsSplit size={14} weight="bold" />
+                        </button>
+                        <button
+                          onClick={() => removeRow(idx)}
+                          disabled={items.length === 1}
+                          className={`p-1 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                          title="Remove row"
+                          data-testid={`rkn-remove-${idx}`}
+                        >
+                          <Trash size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -839,6 +833,17 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
           </table>
         </div>
       )}
+      
+      {/* Save button at bottom right */}
+      {selectedSourceKey && items.length > 0 && (
+        <div className="flex justify-end pt-4">
+          <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-6" data-testid="rkn-save-button">
+            <FloppyDisk size={14} weight="bold" className="mr-2" />
+            {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
+          </Button>
+        </div>
+      )}
+
       {!selectedSourceKey && !isEdit && (
         <div className="bg-amber-50 border border-amber-200 rounded-sm p-6 text-sm text-amber-800">
           Pick a racking source (RN / SRN / ERN) above to load its items for racking.

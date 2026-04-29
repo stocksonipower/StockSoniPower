@@ -535,3 +535,4 @@ credentials.json
 *.key
 .credentials
 frontend/node_modules/.cache/default-development/35.pack
+frontend/node_modules/.cache/default-development/46.pack
