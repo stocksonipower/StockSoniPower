@@ -242,10 +242,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     { key: "goods_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "invoice_date", label: "INVOICE DATE", value: (r) => fmtDate(r.invoice_date) },
     { key: "invoice_no", label: "INVOICE NO", value: (r) => r.invoice_no || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "total_qty", label: "TOTAL QUANTITY", value: totalQtyOf, isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
   ], []);
 
   // colFilters: { [colKey]: Set<string of allowed values> } | sort: { key, dir } | null
@@ -353,16 +350,11 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
 <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
 <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
 <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sm.cls}`}
                       data-testid={`rn-status-${r.rn_no}`}>
                       {sm.label}
                     </span>
-                  </td>
-                  <td>
-                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`rn-assignee-${r.rn_no}`} />
                   </td>
                   <td className="text-right whitespace-nowrap">
                     <button
@@ -388,7 +380,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={12} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
