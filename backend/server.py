@@ -4290,7 +4290,7 @@ async def add_srn_child_row(srn_id: str, body: SrnChildBody,
     return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
 
 
-@api_router.put("/short-received-notes/{srn_id}/children/{child_srn_no}", response_model=ShortReceivedNote)
+@api_router.put("/short-received-notes/{srn_id}/children/{child_srn_no:path}", response_model=ShortReceivedNote)
 async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
                              user=Depends(_module_dep("stock_in"))):
     """Edit a child row (received_qty / not_receivable_qty). Allowed only if the
@@ -4369,7 +4369,7 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
     return await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
 
 
-@api_router.delete("/short-received-notes/{srn_id}/children/{child_srn_no}")
+@api_router.delete("/short-received-notes/{srn_id}/children/{child_srn_no:path}")
 async def delete_srn_child_row(srn_id: str, child_srn_no: str,
                                user=Depends(_module_dep("stock_in"))):
     parent = await db.short_received_notes.find_one({"id": srn_id})
@@ -4691,7 +4691,7 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody,
     return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 
-@api_router.put("/extra-received-notes/{ern_id}/children/{child_ern_no}", response_model=ExtraReceivedNote)
+@api_router.put("/extra-received-notes/{ern_id}/children/{child_ern_no:path}", response_model=ExtraReceivedNote)
 async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
                              user=Depends(_module_dep("stock_in"))):
     parent = await db.extra_received_notes.find_one({"id": ern_id})
@@ -4754,7 +4754,7 @@ async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
     return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 
-@api_router.delete("/extra-received-notes/{ern_id}/children/{child_ern_no}")
+@api_router.delete("/extra-received-notes/{ern_id}/children/{child_ern_no:path}")
 async def delete_ern_child_row(ern_id: str, child_ern_no: str,
                                user=Depends(_module_dep("stock_in"))):
     parent = await db.extra_received_notes.find_one({"id": ern_id})
