@@ -161,10 +161,10 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 
   const columns = useMemo(() => [
     { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
-    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
-    { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
+    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
+    { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
   ], []);
   const {
@@ -255,16 +255,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </span>
                     ); })()}
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
-                  <td>
-                    <button
-                      onClick={() => onOpen(r)}
-                      className="font-mono font-semibold text-blue-700 hover:underline"
-                      data-testid={`rkn-open-${r.rkn_no}`}
-                    >
-                      {r.rkn_no}
-                    </button>
-                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
                   <td>
                     {r.receipt_note_no ? (
@@ -277,6 +267,16 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
                   </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`rkn-open-${r.rkn_no}`}
+                    >
+                      {r.rkn_no}
+                    </button>
+                  </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
@@ -284,35 +284,37 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                     </span>
                   </td>
                   <td className="text-right whitespace-nowrap">
-                    <button
-                      onClick={() => onEdit(r)}
-                      disabled={lock}
-                      title={editTitle}
-                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
-                      data-testid={`rkn-edit-${r.rkn_no}`}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(r)}
-                      disabled={lock}
-                      title={deleteTitle}
-                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                      data-testid={`rkn-delete-${r.rkn_no}`}
-                    >
-                      <Trash size={14} />
-                    </button>
-                    <Button
-                      onClick={() => handleRecord(r)}
-                      disabled={lock || recordingId === r.id}
-                      size="sm"
-                      title={recordTitle}
-                      className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
-                      data-testid={`rkn-record-${r.rkn_no}`}
-                    >
-                      <CheckCircle size={12} weight="bold" className="mr-1" />
-                      {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock In")}
-                    </Button>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => onEdit(r)}
+                        disabled={lock}
+                        title={editTitle}
+                        className={`p-1.5 rounded-sm ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                        data-testid={`rkn-edit-${r.rkn_no}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(r)}
+                        disabled={lock}
+                        title={deleteTitle}
+                        className={`p-1.5 rounded-sm ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                        data-testid={`rkn-delete-${r.rkn_no}`}
+                      >
+                        <Trash size={14} />
+                      </button>
+                      <Button
+                        onClick={() => handleRecord(r)}
+                        disabled={lock || recordingId === r.id}
+                        size="sm"
+                        title={recordTitle}
+                        className={`rounded-sm h-7 text-xs ml-1 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                        data-testid={`rkn-record-${r.rkn_no}`}
+                      >
+                        <CheckCircle size={12} weight="bold" className="mr-1" />
+                        {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock In")}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               );

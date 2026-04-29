@@ -1631,18 +1631,24 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get(path, { params: { search: search || undefined } });
+      const res = await api.get(path, { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data || []);
+      const t = parseInt(res.headers["x-total-count"], 10);
+      setTotal(isNaN(t) ? (res.data || []).length : t);
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || `Could not load ${noun}s`);
     } finally { setLoading(false); }
-  }, [path, noun, search]);
+  }, [path, noun, search, page]);
   useEffect(() => { load(); }, [load, reloadKey]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // Ctrl+F focusses the search input
   useEffect(() => {
@@ -1711,7 +1717,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
         <Input
           ref={searchInputRef}
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           placeholder={`Search ${noun} No · Parent RN No · Part No …`}
           className="rounded-sm font-mono h-9 w-80"
           data-testid={`${kind}-search-input`}
@@ -1812,6 +1818,18 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
+        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-prev`}>
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-next`}>
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+        </div>
       </div>
     </div>
   );
