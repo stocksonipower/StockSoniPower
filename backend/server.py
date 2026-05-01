@@ -1581,6 +1581,15 @@ async def list_racking_notes(
     rows = await db.racking_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
     await _enrich_with_parent_assignee(rows, "receipt_notes", "receipt_note_id")
+        # Attach goods_received_date from parent receipt note
+    if rows:
+        rn_ids = list({r.get("receipt_note_id") for r in rows if r.get("receipt_note_id")})
+        if rn_ids:
+            rn_map = {}
+            async for rn in db.receipt_notes.find({"id": {"$in": rn_ids}}, {"_id": 0, "id": 1, "goods_received_date": 1}):
+                rn_map[rn["id"]] = rn.get("goods_received_date", "")
+            for r in rows:
+                r["goods_received_date"] = rn_map.get(r.get("receipt_note_id"), "")
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -1861,6 +1870,10 @@ async def get_racking_note(rkn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Racking note not found")
     await _enrich_note_items([doc])
     await _enrich_with_parent_assignee([doc], "receipt_notes", "receipt_note_id")
+    # Attach goods_received_date from parent receipt note
+    if doc.get("receipt_note_id"):
+        rn = await db.receipt_notes.find_one({"id": doc["receipt_note_id"]}, {"_id": 0, "goods_received_date": 1})
+        doc["goods_received_date"] = rn.get("goods_received_date", "") if rn else ""
     return doc
 
 

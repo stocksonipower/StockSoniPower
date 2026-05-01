@@ -22,7 +22,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import { ReceiptNoteDetailDialog, stockInTypeMeta, stockInTypeLabel } from "./StockInPage";
 import { exportToExcel } from "../lib/exportExcel";
 
-const PAGE_SIZE = 5000;
+const PAGE_SIZE = 100;
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -165,6 +165,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
     { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
     { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
+    { key: "material_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
   ], []);
   const {
@@ -183,15 +184,13 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   return (
     <div className="mt-4" data-testid="rkn-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
-          {total === 0 ? "No racking notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> racking notes</>}
-        </div>
+        <div />
         <div className="flex items-center gap-2">
           <Input
             ref={searchInputRef}
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search RKN No · Receipt Note No · Part No …"
+            placeholder="Search"
             className="rounded-sm font-mono h-9 w-80"
             data-testid="rkn-search-input"
           />
@@ -277,6 +276,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       {r.rkn_no}
                     </button>
                   </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
@@ -327,16 +327,25 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
       </div>
 
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-          </Button>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-            Next <CaretRight size={12} weight="bold" className="ml-1" />
-          </Button>
-        </div>
-      </div>
+  <div>
+    {total === 0 ? "No racking notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
     </div>
   );
 }

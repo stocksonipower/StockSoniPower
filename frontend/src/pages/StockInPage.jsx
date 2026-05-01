@@ -182,7 +182,7 @@ function ReceiptNoteTab() {
 /* --------------------------------------------------------------
    List view — Receipt Notes
    -------------------------------------------------------------- */
-const PAGE_SIZE = 5000;
+const PAGE_SIZE = 100;
 
 function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const { user: me, isAdmin } = useAuth();
@@ -239,9 +239,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.stock_in_type) },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.rn_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.rn_no || "" },
-    { key: "goods_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "invoice_date", label: "INVOICE DATE", value: (r) => fmtDate(r.invoice_date) },
     { key: "invoice_no", label: "INVOICE NO", value: (r) => r.invoice_no || "" },
+    { key: "goods_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
   ], []);
 
@@ -345,9 +345,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     {r.rn_no}
   </button>
 </td>
-<td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
 <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
 <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
+<td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sm.cls}`}
                       data-testid={`rn-status-${r.rn_no}`}>
@@ -1724,29 +1724,21 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
   return (
     <div className="mt-4" data-testid={`${kind}-list-view`}>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div>
-          <div className="label-sm">{labelTitle}</div>
-          <div className="text-xs text-slate-500 mt-0.5">
-            {isSrn
-              ? "Auto-created from a Receipt Note's shortfall. Enter Fulfilled Qty when material arrives, then Save Final. Partial fulfilment auto-creates a child SRN for the residual."
-              : "Auto-created from a Receipt Note's overage. Enter Accepted Qty (and optionally Rejected Qty) per row, then Save Final. Residual extra creates a child ERN."}
-          </div>
-        </div>
-        <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
-          <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
-        </Button>
-      </div>
-      <div className="flex items-center gap-2 mb-3">
-        <Input
-          ref={searchInputRef}
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-          placeholder={`Search ${noun} No · Parent RN No · Part No …`}
-          className="rounded-sm font-mono h-9 w-80"
-          data-testid={`${kind}-search-input`}
-        />
-        <span className="text-xs text-slate-500">Press Ctrl+F to focus search</span>
-      </div>
+  <div />
+  <div className="flex items-center gap-2">
+    <Input
+      ref={searchInputRef}
+      value={search}
+      onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+      placeholder={`Search`}
+      className="rounded-sm font-mono h-9 w-80"
+      data-testid={`${kind}-search-input`}
+    />
+    <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
+      <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+    </Button>
+  </div>
+</div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
         <table className="data-table w-full">
           <thead>
@@ -1844,14 +1836,23 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
       </div>
 
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
+        <div>
+  {total === 0 ? "No short received notes" : (
+    <>
+      Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+      {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+    </>
+  )}
+</div>
         <div className="flex items-center gap-2">
           <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-prev`}>
             <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
           </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
           <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-next`}>
             Next <CaretRight size={12} weight="bold" className="ml-1" />
           </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
         </div>
       </div>
     </div>
