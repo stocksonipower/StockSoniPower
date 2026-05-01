@@ -349,6 +349,7 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "goods_received_date": (payload.goods_received_date or "").strip(),
             "items": items_out,
             "status": "DRAFT",
+            "narration": (payload.narration or "").strip(),
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
             **assignee,
@@ -485,6 +486,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
         "invoice_date": (payload.invoice_date or "").strip(),
         "goods_received_date": (payload.goods_received_date or "").strip(),
         "items": items_out,
+        "narration": (payload.narration or "").strip(),
         "updated_at": now_iso(),
         **assignee,
     }
@@ -1535,6 +1537,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
             "receipt_note_date": ult_rn_date,
             "items": [it.model_dump() for it in payload.items],
             "status": "DRAFT",
+            "narration": (payload.narration or "").strip(),
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
         }
@@ -1882,6 +1885,7 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, payload.items, exclude_rkn_id=rkn_id)
     update = {
         "items": [it.model_dump() for it in payload.items],
+        "narration": (payload.narration or "").strip(),
         "updated_at": now_iso(),
     }
     await db.racking_notes.update_one({"id": rkn_id}, {"$set": update})
@@ -2135,6 +2139,9 @@ class ShortReceivedNoteUpdate(BaseModel):
     fulfillment_date: Optional[str] = ""
     items: List[dict] = []   # accept dicts so frontend can send {part_no, make, fulfilled_qty}
 
+class NarrationUpdate(BaseModel):
+    narration: str = ""
+
 
 @api_router.get("/short-received-notes/next-no")
 async def next_srn_no(user=Depends(_module_dep("stock_in"))):
@@ -2253,6 +2260,16 @@ async def update_short_received_note(srn_id: str, payload: ShortReceivedNoteUpda
     # Bubble up to the ultimate RN: its FULLY_RACKED check considers SRN fulfilled qty.
     if existing.get("parent_rn_id"):
         await _recompute_rn_status(existing["parent_rn_id"])
+    doc = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
+    return doc
+
+
+@api_router.patch("/short-received-notes/{srn_id}/narration", response_model=ShortReceivedNote)
+async def patch_srn_narration(srn_id: str, payload: NarrationUpdate, user=Depends(_module_dep("stock_in"))):
+    existing = await db.short_received_notes.find_one({"id": srn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Short Received Note not found")
+    await db.short_received_notes.update_one({"id": srn_id}, {"$set": {"narration": payload.narration.strip(), "updated_at": now_iso()}})
     doc = await db.short_received_notes.find_one({"id": srn_id}, {"_id": 0})
     return doc
 
@@ -2717,6 +2734,16 @@ async def update_extra_received_note(ern_id: str, payload: ExtraReceivedNoteUpda
     await _recompute_ern_racking_status(ern_id)
     if existing.get("parent_rn_id"):
         await _recompute_rn_status(existing["parent_rn_id"])
+    doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
+    return doc
+
+
+@api_router.patch("/extra-received-notes/{ern_id}/narration", response_model=ExtraReceivedNote)
+async def patch_ern_narration(ern_id: str, payload: NarrationUpdate, user=Depends(_module_dep("stock_in"))):
+    existing = await db.extra_received_notes.find_one({"id": ern_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Extra Received Note not found")
+    await db.extra_received_notes.update_one({"id": ern_id}, {"$set": {"narration": payload.narration.strip(), "updated_at": now_iso()}})
     doc = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
     return doc
 

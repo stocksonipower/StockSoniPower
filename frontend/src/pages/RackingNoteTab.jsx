@@ -431,6 +431,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
   const [selectedSourceKey, setSelectedSourceKey] = useState("");
   const [selectedSource, setSelectedSource] = useState(null); // full object from sources list OR prepare-source response.source
   const [items, setItems] = useState([]);
+  const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
 
   // Cascading dropdown caches
@@ -445,6 +446,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     if (isEdit) {
       setRknNo(editing.rkn_no);
       setRknDate(editing.rkn_date);
+      setNarration(editing.narration || "");
       // Resolve source identity: prefer Phase 2 fields, fall back to legacy receipt_note_id.
       const srcType = editing.source_type || "RN";
       const srcId = editing.source_id || editing.receipt_note_id;
@@ -641,6 +643,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         source_id: sourceId,
         // Legacy back-compat: backend still accepts receipt_note_id; harmless when source_type/id is sent.
         receipt_note_id: sourceType === "RN" ? sourceId : (selectedSource?.parent_rn_id || undefined),
+        narration: narration.trim(),
         items: items.map((it) => ({
           part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
@@ -855,13 +858,28 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         </div>
       )}
       
-      {/* Save button at bottom right */}
+      {/* NARRATION + SAVE BAR */}
       {selectedSourceKey && items.length > 0 && (
-        <div className="flex justify-end pt-4">
-          <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-6" data-testid="rkn-save-button">
-            <FloppyDisk size={14} weight="bold" className="mr-2" />
-            {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
-          </Button>
+        <div className="bg-white border border-slate-200 rounded-sm">
+          <div className="flex items-start justify-between gap-4 p-4">
+            <div className="flex-1 max-w-sm">
+              <label className="label-sm block mb-1.5">Narration</label>
+              <textarea
+                value={narration}
+                onChange={(e) => setNarration(e.target.value)}
+                placeholder="Optional narration…"
+                rows={2}
+                className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
+                data-testid="rkn-narration"
+              />
+            </div>
+            <div className="flex items-center gap-2 pt-7">
+              <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-6" data-testid="rkn-save-button">
+                <FloppyDisk size={14} weight="bold" className="mr-2" />
+                {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

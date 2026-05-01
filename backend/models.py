@@ -155,6 +155,7 @@ class ReceiptNoteCreate(BaseModel):
     goods_received_date: Optional[str] = ""    # ISO "YYYY-MM-DD"
     items: List[ReceiptNoteItem] = []
     assigned_to_user_id: Optional[str] = None  # null = unassigned (anyone with module access can rack)
+    narration: Optional[str] = ""
 
 
 class ReceiptNote(BaseModel):
@@ -181,6 +182,7 @@ class ReceiptNote(BaseModel):
     # Derived on read: True iff at least one Racking Note (DRAFT or RECORDED) references this RN.
     # Frontend uses this to lock edit/delete, overriding the status-based heuristic.
     has_racking_note: Optional[bool] = False
+    narration: Optional[str] = ""
 
 # ===================== SHORT RECEIVED NOTES (Phase 1: auto-created stubs) =====================
 
@@ -240,6 +242,7 @@ class ShortReceivedNote(BaseModel):
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
+    narration: Optional[str] = ""
 
 
 # ===================== EXTRA RECEIVED NOTES (Phase 1: auto-created stubs) =====================
@@ -297,6 +300,7 @@ class ExtraReceivedNote(BaseModel):
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
+    narration: Optional[str] = ""
 
 class RackingNoteItem(BaseModel):
     part_no: str
@@ -328,6 +332,7 @@ class RackingNoteCreate(BaseModel):
     source_id: Optional[str] = None
     receipt_note_id: Optional[str] = None  # legacy field, ignored if source_id given
     items: List[RackingNoteItem] = []
+    narration: Optional[str] = ""
 
 
 class RackingNote(BaseModel):
@@ -355,6 +360,7 @@ class RackingNote(BaseModel):
     auto_created: bool = False
     # one of: "rn-finalize" | "rkn-record-balance" | "srn-child-save" | "ern-child-save"
     auto_source: Optional[str] = None
+    narration: Optional[str] = ""
 
 
 class IssueNoteItem(BaseModel):

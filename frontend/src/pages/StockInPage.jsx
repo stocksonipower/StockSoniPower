@@ -609,6 +609,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [goodsReceivedDate, setGoodsReceivedDate] = useState("");
   const [items, setItems] = useState([emptyItem()]);
   const [addCount, setAddCount] = useState("");
+  const [narration, setNarration] = useState("");
   const [savingDraft, setSavingDraft] = useState(false);
   const [savingFinal, setSavingFinal] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
@@ -630,6 +631,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       setInvoiceDate(editing.invoice_date || "");
       setGoodsReceivedDate(editing.goods_received_date || "");
       setAssignedToUserId(editing.assigned_to_user_id || "");
+      setNarration(editing.narration || "");
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "",
         make: it.make || "",
@@ -941,6 +943,7 @@ const canFinalize = useMemo(() => {
     invoice_date: isGeneral ? "" : (invoiceDate || ""),
     goods_received_date: goodsReceivedDate || "",
     assigned_to_user_id: assignedToUserId || null,
+    narration: narration.trim(),
     items: items.map((it) => ({
       part_no: it.part_no.trim(),
       make: it.make.trim(),
@@ -1290,19 +1293,12 @@ const canFinalize = useMemo(() => {
   onKeyDown={(e) => {
     if (e.key === "Tab" && !e.shiftKey && isLastRow) {
       e.preventDefault();
-      // Check if delete button is enabled (more than 1 row)
       if (items.length > 1) {
         const deleteBtn = document.querySelector(`[data-testid="rn-remove-row-${idx}"]`);
         if (deleteBtn && !deleteBtn.disabled) deleteBtn.focus();
       } else {
-        // Skip to save buttons when only 1 row
-        const draftBtn = document.querySelector('[data-testid="rn-save-draft-button"]');
-        if (draftBtn && !draftBtn.disabled) {
-          draftBtn.focus();
-        } else {
-          const finalBtn = document.querySelector('[data-testid="rn-save-final-button"]');
-          if (finalBtn) finalBtn.focus();
-        }
+        const narrationField = document.querySelector('[data-testid="rn-narration"]');
+        if (narrationField) narrationField.focus();
       }
     }
   }}
@@ -1318,13 +1314,8 @@ const canFinalize = useMemo(() => {
   onKeyDown={(e) => {
     if (e.key === "Tab" && !e.shiftKey && isLastRow && items.length > 1) {
       e.preventDefault();
-      const draftBtn = document.querySelector('[data-testid="rn-save-draft-button"]');
-      if (draftBtn && !draftBtn.disabled) {
-        draftBtn.focus();
-      } else {
-        const finalBtn = document.querySelector('[data-testid="rn-save-final-button"]');
-        if (finalBtn) finalBtn.focus();
-      }
+      const narrationField = document.querySelector('[data-testid="rn-narration"]');
+      if (narrationField) narrationField.focus();
     }
   }}
   className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
@@ -1354,32 +1345,57 @@ const canFinalize = useMemo(() => {
           </div>
         )}
 
-        {/* SAVE BUTTONS — placed below items, right-aligned. Tab from last-row Make lands here. */}
-        <div className="flex items-center justify-end gap-2 p-4 border-t border-slate-200 bg-slate-50">
-          {!isFinalEdit && (
+        {/* SAVE BAR — narration on left, action buttons on right */}
+        <div className="flex items-start justify-between gap-4 p-4 border-t border-slate-200 bg-slate-50">
+          <div className="flex-1 max-w-sm">
+            <label className="label-sm block mb-1.5">Narration</label>
+            <textarea
+              value={narration}
+              onChange={(e) => setNarration(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Tab" && !e.shiftKey) {
+                  e.preventDefault();
+                  const draftBtn = document.querySelector('[data-testid="rn-save-draft-button"]');
+                  if (draftBtn && !draftBtn.disabled) {
+                    draftBtn.focus();
+                  } else {
+                    const finalBtn = document.querySelector('[data-testid="rn-save-final-button"]');
+                    if (finalBtn) finalBtn.focus();
+                  }
+                }
+              }}
+              placeholder="Optional narration…"
+              rows={2}
+              className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
+              data-testid="rn-narration"
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-7">
+            {!isFinalEdit && (
+              <Button
+                ref={draftBtnRef}
+                onClick={saveDraft}
+                disabled={savingDraft || savingFinal}
+                variant="outline"
+                className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+                data-testid="rn-save-draft-button"
+              >
+                <FloppyDisk size={14} weight="bold" className="mr-2" />
+                {savingDraft ? "Saving…" : "Save as Draft"}
+              </Button>
+            )}
             <Button
-              ref={draftBtnRef}
-              onClick={saveDraft}
-              disabled={savingDraft || savingFinal}
-              variant="outline"
-              className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
-              data-testid="rn-save-draft-button"
+              ref={finalBtnRef}
+              onClick={saveFinal}
+              disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
+              className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+              data-testid="rn-save-final-button"
+              title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
             >
-              <FloppyDisk size={14} weight="bold" className="mr-2" />
-              {savingDraft ? "Saving…" : "Save as Draft"}
+              <CheckCircle size={14} weight="bold" className="mr-2" />
+              {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}
             </Button>
-          )}
-          <Button
-            ref={finalBtnRef}
-            onClick={saveFinal}
-            disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
-            className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
-            data-testid="rn-save-final-button"
-            title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
-          >
-            <CheckCircle size={14} weight="bold" className="mr-2" />
-            {savingFinal ? "Saving…" : (isFinalEdit ? "Update Receipt Note" : "Save Final")}
-          </Button>
+          </div>
         </div>
       </div>
 
@@ -1995,6 +2011,8 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
   const [drafts, setDrafts] = useState({});
   const [editing, setEditing] = useState(null); // { itemIdx, child_srn_no, received_qty, not_receivable_qty }
   const [busy, setBusy] = useState(false);
+  const [narration, setNarration] = useState(initialSrn.narration || "");
+  const [savingNarration, setSavingNarration] = useState(false);
 
   const reload = async () => {
     try {
@@ -2080,6 +2098,16 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
     } finally { setBusy(false); }
+  };
+
+  const saveNarration = async () => {
+    setSavingNarration(true);
+    try {
+      await api.patch(`/short-received-notes/${parent.id}/narration`, { narration: narration.trim() });
+      toast.success("Narration saved");
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save narration");
+    } finally { setSavingNarration(false); }
   };
 
   const meta = statusMeta(parent.status);
@@ -2268,6 +2296,29 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
           <strong> COMPLETE</strong> when Total Received + Total Not Receivable = Short Qty.
         </div>
       </div>
+
+      {/* NARRATION + SAVE BAR */}
+      <div className="bg-white border border-slate-200 rounded-sm">
+        <div className="flex items-start justify-between gap-4 p-4">
+          <div className="flex-1 max-w-sm">
+            <label className="label-sm block mb-1.5">Narration</label>
+            <textarea
+              value={narration}
+              onChange={(e) => setNarration(e.target.value)}
+              placeholder="Optional narration…"
+              rows={2}
+              className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
+              data-testid="srn-narration"
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-7">
+            <Button onClick={saveNarration} disabled={savingNarration || busy} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="srn-save-narration">
+              <FloppyDisk size={14} weight="bold" className="mr-2" />
+              {savingNarration ? "Saving…" : "Save SRN"}
+            </Button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2276,6 +2327,8 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
   const [drafts, setDrafts] = useState({});
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [narration, setNarration] = useState(initialErn.narration || "");
+  const [savingNarration, setSavingNarration] = useState(false);
 
   const reload = async () => {
     try {
@@ -2355,6 +2408,16 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
     } finally { setBusy(false); }
+  };
+
+  const saveNarration = async () => {
+    setSavingNarration(true);
+    try {
+      await api.patch(`/extra-received-notes/${parent.id}/narration`, { narration: narration.trim() });
+      toast.success("Narration saved");
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save narration");
+    } finally { setSavingNarration(false); }
   };
 
   const meta = statusMeta(parent.status);
@@ -2535,6 +2598,29 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
           Each batch becomes a Child ERN ({parent.ern_no}-A, -B…). <em>Accepted Qty</em> is rackable;
           <em> Rejected Qty</em> is recorded but won't count toward racking. Status auto-flips to
           <strong> COMPLETE</strong> when Total Accepted + Total Rejected = Extra Qty.
+        </div>
+      </div>
+
+      {/* NARRATION + SAVE BAR */}
+      <div className="bg-white border border-slate-200 rounded-sm">
+        <div className="flex items-start justify-between gap-4 p-4">
+          <div className="flex-1 max-w-sm">
+            <label className="label-sm block mb-1.5">Narration</label>
+            <textarea
+              value={narration}
+              onChange={(e) => setNarration(e.target.value)}
+              placeholder="Optional narration…"
+              rows={2}
+              className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
+              data-testid="ern-narration"
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-7">
+            <Button onClick={saveNarration} disabled={savingNarration || busy} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="ern-save-narration">
+              <FloppyDisk size={14} weight="bold" className="mr-2" />
+              {savingNarration ? "Saving…" : "Save ERN"}
+            </Button>
+          </div>
         </div>
       </div>
     </div>
