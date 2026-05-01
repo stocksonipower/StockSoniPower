@@ -225,7 +225,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className="text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -283,8 +283,8 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       {recorded ? "Fully Racked" : "Draft"}
                     </span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
-                    <div className="flex items-center justify-end gap-1">
+                  <td className="text-left whitespace-nowrap">
+                    <div className="flex items-center gap-1">
                       <button
                         onClick={() => onEdit(r)}
                         disabled={lock}
