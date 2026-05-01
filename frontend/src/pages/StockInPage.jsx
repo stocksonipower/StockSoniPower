@@ -386,7 +386,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
         </table>
       </div>
 
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
+      <div className="flex items-center justify-end mt-3 text-xs text-slate-600 gap-4">
         <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
         <div className="flex items-center gap-2">
           <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
