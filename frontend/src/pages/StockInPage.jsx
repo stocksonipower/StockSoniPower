@@ -262,9 +262,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   return (
     <div className="mt-4" data-testid="rn-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
-          {total === 0 ? "No receipt notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> receipt notes</>}
-        </div>
+        <div />
         <div className="flex items-center gap-2">
 <Input
             ref={searchInputRef}     
@@ -386,15 +384,24 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
         </table>
       </div>
 
-      <div className="flex items-center justify-end mt-3 text-xs text-slate-600 gap-4">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
+      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
+        <div>
+          {total === 0 ? "No racking notes" : (
+            <>
+              Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+              {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+            </>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
             <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
           </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
           <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
             Next <CaretRight size={12} weight="bold" className="ml-1" />
           </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
         </div>
       </div>
     </div>
