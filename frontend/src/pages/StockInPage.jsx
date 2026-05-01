@@ -303,7 +303,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className="text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -354,7 +354,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
                       {sm.label}
                     </span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
+                  <td className="text-left whitespace-nowrap">
                     <button
                       onClick={() => onEdit(r)}
                       disabled={lockEdit}
@@ -1758,7 +1758,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                   />
                 </th>
               ))}
-              <th className="w-28 text-right">ACTIONS</th>
+              <th className="w-28 text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -1804,8 +1804,8 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                     </span>
                   </td>
 
-                  <td className="text-right">
-                    <div className="flex items-center gap-1 justify-end">
+                  <td className="text-left">
+                    <div className="flex items-center gap-1">
                       <button
                         onClick={() => onEdit(r)}
                         disabled={!canEdit}

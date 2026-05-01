@@ -23,7 +23,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
-const PAGE_SIZE = 5000;
+const PAGE_SIZE = 100;
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -120,9 +120,8 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.in_date) },
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.in_no || "" },
     { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
+    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -143,7 +142,6 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
     <div className="mt-4" data-testid="in-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No issue notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> issue notes</>}
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="in-export-button">
@@ -176,7 +174,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className="!text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -203,15 +201,12 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                     </button>
                   </td>
                   <td className="text-slate-700">{r.issued_to || "—"}</td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
-                  <td>
-                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`in-assignee-${r.in_no}`} />
-                  </td>
+                                    <td className="font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`in-status-${r.in_no}`}>{label}</span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
+                  <td className="text-left whitespace-nowrap">
                     <button onClick={() => onEdit(r)} disabled={lock}
                       title={editTitle}
                       className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
@@ -229,18 +224,31 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No issue notes. Click 'Create New Issue Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No issue notes. Click 'Create New Issue Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7"><CaretLeft size={12} weight="bold" className="mr-1" /> Prev</Button>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">Next <CaretRight size={12} weight="bold" className="ml-1" /></Button>
-        </div>
-      </div>
+  <div>
+    {total === 0 ? "No issue notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
     </div>
   );
 }
@@ -578,14 +586,13 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
   };
 
   const columns = useMemo(() => [
-    { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
-    { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.issue_note_date) },
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
+    { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
+    { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
     { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "qty_total", label: "QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length,},
+    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
   ], []);
   const {
@@ -606,7 +613,6 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     <div className="mt-4" data-testid="pn-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No picking notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> picking notes</>}
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="pn-export-button">
@@ -639,7 +645,7 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className="text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -660,24 +666,21 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               return (
                 <tr key={r.id} data-testid={`pn-row-${r.pn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
+                  <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`pn-open-${r.pn_no}`}>{r.pn_no}</button>
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
-                  <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="text-slate-700">{r.issued_to || "—"}</td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
-                  <td>
-                    <AssigneeBadge name={aName} email={aEmail} testid={`pn-assignee-${r.pn_no}`} />
-                  </td>
+                  <td className="font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`} data-testid={`pn-status-${r.pn_no}`}>
                       {recorded ? "Recorded" : "Draft"}
                     </span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
+                  <td className="text-left whitespace-nowrap">
                     <button onClick={() => onEdit(r)} disabled={lock}
                       title={editTitle}
                       className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
@@ -702,18 +705,31 @@ function PickingNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No picking notes. Click 'Create New Picking Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No picking notes. Click 'Create New Picking Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7"><CaretLeft size={12} weight="bold" className="mr-1" /> Prev</Button>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">Next <CaretRight size={12} weight="bold" className="ml-1" /></Button>
-        </div>
-      </div>
+  <div>
+    {total === 0 ? "No picking notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
     </div>
   );
 }
@@ -801,7 +817,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     } else {
       api.get("/picking-notes/next-no").then((r) => { setPnNo(r.data.next_pn_no); setPnDate(r.data.pn_date); })
         .catch(() => toast.error("Could not preview picking-note number"));
-      api.get("/issue-notes", { params: { not_status: "FULLY_PICKED", page_size: 5000 } })
+      api.get("/issue-notes", { params: { not_status: "FULLY_PICKED", page_size: 100 } })
         .then((r) => setPendingIns(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
