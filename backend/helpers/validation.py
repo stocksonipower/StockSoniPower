@@ -81,10 +81,13 @@ async def _validate_cumulative_qty_polymorphic(source_type: str, source_id: str,
     if source_type == "RN":
         for it in parent_doc.get("items", []):
             k = _key(it.get("part_no"), it.get("make"))
-            q = it.get("received_qty")
-            if q is None:
-                q = it.get("quantity") or 0
-            rackable[k] = rackable.get(k, 0) + (q or 0)
+            rec = it.get("received_qty")
+            if rec is None:
+                rec = it.get("quantity") or 0
+            rec = float(rec or 0)
+            inv = float(it.get("invoice_qty") or 0)
+            # Cap at invoice qty: extra qty (received > invoice) is tracked via ERN
+            rackable[k] = rackable.get(k, 0) + (min(rec, inv) if inv > 0 else rec)
     elif source_type == "SRN":
         for it in parent_doc.get("items", []):
             k = _key(it.get("part_no"), it.get("make"))

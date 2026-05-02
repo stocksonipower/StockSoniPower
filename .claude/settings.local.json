@@ -4,7 +4,16 @@
       "Bash(grep -n \"^# .*-\\\\+$\" \"d:/GitHubRepo/01-STOCK-APP-SS1/backend/server.py\")",
       "Bash(python3)",
       "Bash(dir \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\helpers\")",
-      "Bash(dir \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\routes\")"
+      "Bash(dir \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\routes\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Recurse -Force)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(cd /d d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1)",
+      "Bash(Get-ChildItem -Recurse -Directory)",
+      "Bash(Select-Object -First 20)",
+      "PowerShell(head -50)",
+      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Recurse -Directory)",
+      "Bash(Format-Table FullName)",
+      "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")"
     ]
   }
 }

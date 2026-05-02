@@ -137,14 +137,18 @@ async def _recompute_rn_status(rn_id: str):
         await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
         return
 
-    # Total rackable qty = RN.received + each SRN.fulfilled + each ERN.accepted
+    # Total rackable qty = RN.invoice (capped) + each SRN.fulfilled + each ERN.accepted.
+    # RN contribution is capped at invoice_qty so extra qty (tracked via ERN) is not
+    # double-counted here.
     rackable: dict = {}
     for it in rn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
-        q = it.get("received_qty")
-        if q is None:
-            q = it.get("quantity") or 0
-        rackable[k] = rackable.get(k, 0) + (q or 0)
+        rec = it.get("received_qty")
+        if rec is None:
+            rec = it.get("quantity") or 0
+        rec = float(rec or 0)
+        inv = float(it.get("invoice_qty") or 0)
+        rackable[k] = rackable.get(k, 0) + (min(rec, inv) if inv > 0 else rec)
     if srn_ids:
         async for srn in db.short_received_notes.find({"id": {"$in": srn_ids}}, {"_id": 0, "items": 1}):
             for it in srn.get("items") or []:

@@ -660,9 +660,12 @@ async def list_racking_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     search: Optional[str] = None,
+    receipt_note_id: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    if receipt_note_id:
+        query["receipt_note_id"] = receipt_note_id
     if search:
         s = search.strip()
         query["$or"] = [
@@ -828,16 +831,20 @@ async def prepare_racking_for_source(
             raise HTTPException(status_code=404, detail="Receipt note not found")
         if rn.get("status") == "FULLY_RACKED" and not exclude_rkn_id:
             raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
-        # The qty available per (part,make) is received_qty.
+        # The qty available per (part,make) is invoice_qty (capped at invoice to exclude
+        # extra qty, which goes to ERN and must be racked separately after ERN acceptance).
         rackable = []
         for it in rn.get("items", []):
             rec = it.get("received_qty")
             if rec is None:
                 rec = it.get("quantity") or 0
+            rec = float(rec or 0)
+            inv = float(it.get("invoice_qty") or 0)
+            rq = min(rec, inv) if inv > 0 else rec
             rackable.append({
                 "part_no": it.get("part_no", ""),
                 "make": it.get("make", ""),
-                "rackable_qty": float(rec or 0),
+                "rackable_qty": rq,
             })
         header = {
             "id": rn["id"], "no": rn["rn_no"], "date": rn["rn_date"],

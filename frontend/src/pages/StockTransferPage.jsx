@@ -23,7 +23,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 
-const PAGE_SIZE = 5000;
+const PAGE_SIZE = 100;
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -117,12 +117,11 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
   const statusLabel = (r) => r.status === "FULLY_TRANSFERRED" ? "Fully Transferred" : (r.status === "PARTIALLY_TRANSFERRED" ? "Partially Transferred" : "Pending");
 
   const columns = useMemo(() => [
-    { key: "str_date", label: "REQUEST DATE", value: (r) => fmtDate(r.str_date) },
-    { key: "str_no", label: "REQUEST NO", value: (r) => r.str_no || "" },
+    { key: "str_date", label: "TRANSFER REQUEST DATE", value: (r) => fmtDate(r.str_date) },
+    { key: "str_no", label: "TRANSFER REQUEST NO", value: (r) => r.str_no || "" },
     { key: "purpose", label: "PURPOSE", value: (r) => r.purpose || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "qty_total", label: "TOTAL QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
+    { key: "qty_total", label: "TOTAL QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -143,8 +142,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     <div className="mt-4" data-testid="str-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No transfer requests yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer requests</>}
-        </div>
+          </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="str-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
@@ -203,15 +201,12 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                     </button>
                   </td>
                   <td className="text-slate-700 max-w-[280px] truncate">{r.purpose || "—"}</td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
-                  <td>
-                    <AssigneeBadge name={r.assigned_to_name} email={r.assigned_to_email} testid={`str-assignee-${r.str_no}`} />
-                  </td>
+                  <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-status-${r.str_no}`}>{label}</span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
+                  <td className="text-left whitespace-nowrap">
                     <button onClick={() => onEdit(r)} disabled={lock}
                       title={editTitle}
                       className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
@@ -229,18 +224,31 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7"><CaretLeft size={12} weight="bold" className="mr-1" /> Prev</Button>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">Next <CaretRight size={12} weight="bold" className="ml-1" /></Button>
-        </div>
-      </div>
+        <div>
+        {total === 0 ? "No transfer requests" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
     </div>
   );
 }
@@ -668,9 +676,8 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     { key: "stn_date", label: "STN DATE", value: (r) => fmtDate(r.stn_date) },
     { key: "stn_no", label: "STN NO", value: (r) => r.stn_no || "" },
     { key: "str_no", label: "REQUEST NO", value: (r) => r.transfer_request_no || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length, isQty: true, isNumeric: true },
-    { key: "qty_total", label: "QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0), isQty: true, isNumeric: true },
-    { key: "assigned_to", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || r.parent_assigned_to_email || "" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
+    { key: "qty_total", label: "QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
   ], []);
   const {
@@ -691,7 +698,6 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     <div className="mt-4" data-testid="stn-list-view">
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600">
-          {total === 0 ? "No transfer notes yet." : <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{total}</span> transfer notes</>}
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-export-button">
@@ -747,17 +753,16 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`stn-open-${r.stn_no}`}>{r.stn_no}</button>
                   </td>
                   <td className="font-mono text-slate-700">{r.transfer_request_no || "—"}</td>
-                  <td className="text-right font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-right font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
+                  <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
-                    <AssigneeBadge name={aName} email={aEmail} testid={`stn-assignee-${r.stn_no}`} />
                   </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`} data-testid={`stn-status-${r.stn_no}`}>
                       {recorded ? "Recorded" : "Draft"}
                     </span>
                   </td>
-                  <td className="text-right whitespace-nowrap">
+                  <td className="text-left whitespace-nowrap">
                     <button onClick={() => onEdit(r)} disabled={lock} title={editTitle}
                       className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`stn-edit-${r.stn_no}`}>
@@ -780,18 +785,31 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <span>{total > 0 && <>Page {page} of {totalPages}</>}</span>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7"><CaretLeft size={12} weight="bold" className="mr-1" /> Prev</Button>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">Next <CaretRight size={12} weight="bold" className="ml-1" /></Button>
-        </div>
-      </div>
+        <div>
+    {total === 0 ? "No transfer notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
     </div>
   );
 }
@@ -879,7 +897,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     } else {
       api.get("/transfer-notes/next-no").then((r) => { setStnNo(r.data.next_stn_no); setStnDate(r.data.stn_date); })
         .catch(() => toast.error("Could not preview transfer-note number"));
-      api.get("/transfer-requests", { params: { not_status: "FULLY_TRANSFERRED", page_size: 5000 } })
+      api.get("/transfer-requests", { params: { not_status: "FULLY_TRANSFERRED", page_size: 100 } })
         .then((r) => setPendingStrs(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
