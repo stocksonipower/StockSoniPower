@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"^# .*-\\\\+$\" \"d:/GitHubRepo/01-STOCK-APP-SS1/backend/server.py\")",
+      "Bash(python3)",
+      "Bash(dir \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\helpers\")",
+      "Bash(dir \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\routes\")"
+    ]
+  }
+}
