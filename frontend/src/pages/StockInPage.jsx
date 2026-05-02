@@ -21,6 +21,7 @@ import {
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import PartNoLink from "../components/PartNoLink";
+import DocumentDetailDialog from "../components/DocumentDetailDialog";
 import { useAuth } from "../lib/auth";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
@@ -60,6 +61,14 @@ function qtyDiff(it) {
   if (inv == null || rec == null) return 0;
   return rec - inv;
 }
+
+function sumSrnQty(srn)           { return (srn.items||[]).reduce((s,it) => s + (+it.short_qty||0), 0); }
+function sumSrnReceived(srn)      { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.received_qty||0), 0), 0); }
+function sumSrnNotReceivable(srn) { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.not_receivable_qty||0), 0), 0); }
+function sumErnQty(ern)           { return (ern.items||[]).reduce((s,it) => s + (+it.extra_qty||0), 0); }
+function sumErnAccepted(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.accepted_qty||0), 0); }
+function sumErnRejected(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.rejected_qty||0), 0); }
+function sumRknQty(rkn)           { return (rkn.items||[]).reduce((s,it) => s + (+it.quantity||0), 0); }
 
 /** Status pill metadata used in list view AND detail dialog. */
 export function stockInTypeMeta(type) {
@@ -409,85 +418,314 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
 }
 
 /* --------------------------------------------------------------
-   Detail dialog (read-only) — shows new schema and a Print button
+   Detail dialog (read-only) — redesigned with live SRN/ERN/RKN data
    -------------------------------------------------------------- */
 export function ReceiptNoteDetailDialog({ rn, onClose }) {
-  const handlePrint = () => printReceiptNote(rn);
+  const [srns, setSrns] = useState([]);
+  const [erns, setErns] = useState([]);
+  const [rkns, setRkns] = useState([]);
+  const [masterData, setMasterData] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
+  const [openSrn, setOpenSrn] = useState(null);
+  const [openErn, setOpenErn] = useState(null);
+  const [openRkn, setOpenRkn] = useState(null);
+
+  useEffect(() => {
+    if (!rn) { setSrns([]); setErns([]); setRkns([]); setMasterData({}); return; }
+    setLoading(true);
+    Promise.all([
+      api.get("/short-received-notes", { params: { parent_rn_id: rn.id, page_size: 100 } }),
+      api.get("/extra-received-notes", { params: { parent_rn_id: rn.id, page_size: 100 } }),
+      api.get("/racking-notes",        { params: { receipt_note_id: rn.id, page_size: 100 } }),
+    ]).then(([s, e, r]) => {
+      setSrns(s.data || []);
+      setErns(e.data || []);
+      setRkns([...(r.data || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
+    }).catch(() => {}).finally(() => setLoading(false));
+
+    setMasterData({});
+    const seen = new Set();
+    (rn.items || []).forEach(it => {
+      const key = `${it.part_no}||${it.make}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      api.get("/stock-master/lookup/item", { params: { part_no: it.part_no, make: it.make } })
+        .then(({ data }) => setMasterData(prev => ({ ...prev, [key]: data })))
+        .catch(() => {});
+    });
+  }, [rn?.id, reloadTick]);
+
+  const srnTree = useMemo(() => {
+    const parents = srns.filter(s => !s.parent_srn_id);
+    return parents.map(p => ({ parent: p, children: srns.filter(c => c.parent_srn_id === p.id) }));
+  }, [srns]);
+
+  const ernTree = useMemo(() => {
+    const parents = erns.filter(e => !e.parent_ern_id);
+    return parents.map(p => ({ parent: p, children: erns.filter(c => c.parent_ern_id === p.id) }));
+  }, [erns]);
+
+  const handlePrint = () => printReceiptNote(rn, srns, erns, rkns, masterData, srnTree, ernTree);
+
   return (
     <Dialog open={!!rn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-4xl rounded-sm" data-testid="rn-detail-dialog">
+      <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="rn-detail-dialog">
         {rn && (
           <>
-            <DialogHeader>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <DialogTitle className="text-2xl font-black font-mono">{rn.rn_no}</DialogTitle>
-                  {(() => { const sit = stockInTypeMeta(rn.stock_in_type); return (
+            {/* ── HEADING ── */}
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              RECEIPT NOTE
+            </div>
+
+            {/* ── HEADER: LEFT / RIGHT ── */}
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              {/* Left */}
+              <div className="space-y-2">
+                {(() => { const sit = stockInTypeMeta(rn.stock_in_type); return (
+                  <div>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-sm ${sit.cls}`}
                       data-testid="rn-detail-stock-in-type">
                       {sit.label} Stock In
                     </span>
-                  ); })()}
-                </div>
-                <div className="flex items-center gap-2 mr-6">
-                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-sm ${statusMeta(rn.status).cls}`}>
+                  </div>
+                ); })()}
+                <Detail k="RECEIPT NOTE DATE" v={fmtDate(rn.rn_date)} />
+                <Detail k="RECEIPT NOTE NO" v={rn.rn_no} />
+                <Detail k="INVOICE DATE" v={fmtDate(rn.invoice_date)} />
+                <Detail k="INVOICE NO" v={rn.invoice_no || "—"} />
+                <Detail k="MATERIAL RECEIVED DATE" v={fmtDate(rn.goods_received_date)} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${statusMeta(rn.status).cls}`}>
                     {statusMeta(rn.status).label}
                   </span>
-                  <Button onClick={handlePrint} variant="outline" size="sm" className="rounded-sm" data-testid="rn-detail-print">
-                    <Printer size={14} weight="bold" className="mr-1.5" /> Print
-                  </Button>
+                } />
+              </div>
+              {/* Right */}
+              <div className="space-y-2">
+                <Detail k="CREATED BY" v={rn.created_by || "—"} />
+                <Detail k="CREATED AT" v={rn.created_at ? new Date(rn.created_at).toLocaleString() : "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO</div>
+                  <div className="mt-1"><AssigneeBadge name={rn.assigned_to_name} email={rn.assigned_to_email} /></div>
                 </div>
               </div>
-            </DialogHeader>
-            <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Receipt Note Date" v={fmtDate(rn.rn_date)} />
-              <Detail k="Financial Year" v={rn.fy ? `FY ${rn.fy}` : "—"} />
-              <Detail k="Invoice Date" v={fmtDate(rn.invoice_date)} />
-              <Detail k="Invoice No" v={rn.invoice_no || "—"} />
-              <Detail k="Goods Received Date" v={fmtDate(rn.goods_received_date)} />
-              <Detail k="Created By" v={rn.created_by || "—"} />
-              <Detail k="Created At" v={rn.created_at ? new Date(rn.created_at).toLocaleString() : "—"} />
-              <Detail k="Finalized At" v={rn.finalized_at ? new Date(rn.finalized_at).toLocaleString() : "—"} />
-              <div className="col-span-2">
-                <div className="label-sm">Assigned To</div>
-                <div className="mt-1"><AssigneeBadge name={rn.assigned_to_name} email={rn.assigned_to_email} /></div>
+            </div>
+
+            {/* ── ITEMS TABLE ── */}
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({(rn.items || []).length}){loading && <span className="ml-2 text-slate-400 font-normal normal-case">Loading live data…</span>}</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full">
+                  <thead>
+                    <tr>
+                      <th className="w-12">SL NO</th>
+                      <th>MODEL</th>
+                      <th>PART NO</th>
+                      <th>DESCRIPTION 1</th>
+                      <th>MAKE</th>
+                      <th className="text-right">INVOICE QTY</th>
+                      <th className="text-right">RECEIVED QTY</th>
+                      <th className="text-right">DIFFERENCE QTY</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(rn.items || []).map((it, idx) => {
+                      const key = `${it.part_no}||${it.make}`;
+                      const sm = masterData[key];
+                      const diff = qtyDiff(it);
+                      const diffCls = diff < 0 ? "text-red-700" : diff > 0 ? "text-amber-700" : "text-slate-500";
+                      return (
+                        <tr key={idx}>
+                          <td className="font-mono text-slate-500">{idx + 1}</td>
+                          <td className="font-mono text-slate-700">{sm ? (sm.model || "—") : <span className="text-slate-300">—</span>}</td>
+                          <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                          <td className="text-slate-700">{sm ? (sm.description_1 || it.description_1 || "—") : (it.description_1 || "—")}</td>
+                          <td>{it.make}</td>
+                          <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
+                          <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
+                          <td className={`text-right font-mono font-bold ${diffCls}`}>
+                            {toNum(it.received_qty) == null ? "—" : (diff > 0 ? `+${diff}` : diff)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
-            <div>
-              <div className="label-sm mb-2">Items ({(rn.items || []).length})</div>
-              <table className="data-table w-full">
-                <thead>
-                  <tr>
-                    <th className="w-14">SL NO</th>
-                    <th>PART NO</th>
-                    <th>DESCRIPTION 1</th>
-                    <th className="text-right">INVOICE QTY</th>
-                    <th className="text-right">RECEIVED QTY</th>
-                    <th className="text-right">QTY DIFF</th>
-                    <th>MAKE</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(rn.items || []).map((it, idx) => {
-                    const diff = qtyDiff(it);
-                    const diffCls = diff < 0 ? "text-red-700" : diff > 0 ? "text-amber-700" : "text-slate-500";
+
+            {/* ── SRN / ERN / RKN 3-COLUMN SECTION ── */}
+            <div className="mt-6 border-t border-slate-200 pt-4">
+              <div className="grid grid-cols-3 gap-4">
+
+                {/* ── Column 1: SRN ── */}
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">
+                    SRN Details
+                  </div>
+                  {srnTree.length === 0 ? (
+                    <div className="text-xs text-slate-400 italic">No SRN Created</div>
+                  ) : srnTree.map(({ parent, children }) => {
+                    const srnQty = sumSrnQty(parent);
+                    const rcvd   = sumSrnReceived(parent);
+                    const notRcv = sumSrnNotReceivable(parent);
+                    const pend   = Math.max(0, srnQty - rcvd - notRcv);
+                    const sm     = statusMeta(parent.status);
                     return (
-                      <tr key={idx}>
-                        <td className="font-mono text-slate-500">{idx + 1}</td>
-                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                        <td className="text-slate-700">{it.description_1 || "—"}</td>
-                        <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
-                        <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
-                        <td className={`text-right font-mono font-bold ${diffCls}`}>
-                          {toNum(it.received_qty) == null ? "—" : (diff > 0 ? `+${diff}` : diff)}
-                        </td>
-                        <td>{it.make}</td>
-                      </tr>
+                      <div key={parent.id} className="mb-3">
+                        <div className="rounded border border-slate-200 p-2 text-xs bg-slate-50">
+                          <button onClick={() => setOpenSrn(parent)}
+                            className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
+                            {parent.srn_no}
+                          </button>
+                          <div className="mt-1 space-y-0.5 text-slate-600">
+                            <div><span className="font-semibold">Date:</span> {fmtDate(parent.srn_date)}</div>
+                            <div><span className="font-semibold">SRN Qty:</span> {srnQty || "—"}</div>
+                            <div><span className="font-semibold">Received Qty:</span> {rcvd || "—"}</div>
+                            <div><span className="font-semibold">Not Receivable:</span> {notRcv || "—"}</div>
+                            <div><span className="font-semibold">Pending Qty:</span> {pend || "—"}</div>
+                            <div><span className="font-semibold">Status:</span>{" "}
+                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${sm.cls}`}>{sm.label}</span>
+                            </div>
+                          </div>
+                        </div>
+                        {children.map(child => {
+                          const cQty   = sumSrnQty(child);
+                          const cRcvd  = sumSrnReceived(child);
+                          const cNotR  = sumSrnNotReceivable(child);
+                          const cPend  = Math.max(0, cQty - cRcvd - cNotR);
+                          const cSm    = statusMeta(child.status);
+                          return (
+                            <div key={child.id} className="ml-3 mt-1 border-l-2 border-slate-300 pl-2 rounded-r border border-l-0 border-slate-200 p-1.5 text-xs bg-white">
+                              <button onClick={() => setOpenSrn(child)}
+                                className="font-mono font-bold text-blue-600 hover:underline text-[11px]">
+                                {child.srn_no}
+                              </button>
+                              <div className="mt-0.5 space-y-0.5 text-slate-600">
+                                <div><span className="font-semibold">Date:</span> {fmtDate(child.srn_date)}</div>
+                                <div><span className="font-semibold">SRN Qty:</span> {cQty || "—"}</div>
+                                <div><span className="font-semibold">Received:</span> {cRcvd || "—"}</div>
+                                <div><span className="font-semibold">Not Rcv:</span> {cNotR || "—"}</div>
+                                <div><span className="font-semibold">Pending:</span> {cPend || "—"}</div>
+                                <div><span className="font-semibold">Status:</span>{" "}
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${cSm.cls}`}>{cSm.label}</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     );
                   })}
-                </tbody>
-              </table>
+                </div>
+
+                {/* ── Column 2: ERN ── */}
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">
+                    ERN Details
+                  </div>
+                  {ernTree.length === 0 ? (
+                    <div className="text-xs text-slate-400 italic">No ERN Created</div>
+                  ) : ernTree.map(({ parent, children }) => {
+                    const ernQty = sumErnQty(parent);
+                    const acc    = sumErnAccepted(parent);
+                    const rej    = sumErnRejected(parent);
+                    const pend   = Math.max(0, ernQty - acc - rej);
+                    const em     = statusMeta(parent.status);
+                    return (
+                      <div key={parent.id} className="mb-3">
+                        <div className="rounded border border-slate-200 p-2 text-xs bg-slate-50">
+                          <button onClick={() => setOpenErn(parent)}
+                            className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
+                            {parent.ern_no}
+                          </button>
+                          <div className="mt-1 space-y-0.5 text-slate-600">
+                            <div><span className="font-semibold">Date:</span> {fmtDate(parent.ern_date)}</div>
+                            <div><span className="font-semibold">ERN Qty:</span> {ernQty || "—"}</div>
+                            <div><span className="font-semibold">Accepted Qty:</span> {acc || "—"}</div>
+                            <div><span className="font-semibold">Rejected Qty:</span> {rej || "—"}</div>
+                            <div><span className="font-semibold">Pending Qty:</span> {pend || "—"}</div>
+                            <div><span className="font-semibold">Status:</span>{" "}
+                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${em.cls}`}>{em.label}</span>
+                            </div>
+                          </div>
+                        </div>
+                        {children.map(child => {
+                          const cQty  = sumErnQty(child);
+                          const cAcc  = sumErnAccepted(child);
+                          const cRej  = sumErnRejected(child);
+                          const cPend = Math.max(0, cQty - cAcc - cRej);
+                          const cEm   = statusMeta(child.status);
+                          return (
+                            <div key={child.id} className="ml-3 mt-1 border-l-2 border-slate-300 pl-2 rounded-r border border-l-0 border-slate-200 p-1.5 text-xs bg-white">
+                              <button onClick={() => setOpenErn(child)}
+                                className="font-mono font-bold text-blue-600 hover:underline text-[11px]">
+                                {child.ern_no}
+                              </button>
+                              <div className="mt-0.5 space-y-0.5 text-slate-600">
+                                <div><span className="font-semibold">Date:</span> {fmtDate(child.ern_date)}</div>
+                                <div><span className="font-semibold">ERN Qty:</span> {cQty || "—"}</div>
+                                <div><span className="font-semibold">Accepted:</span> {cAcc || "—"}</div>
+                                <div><span className="font-semibold">Rejected:</span> {cRej || "—"}</div>
+                                <div><span className="font-semibold">Pending:</span> {cPend || "—"}</div>
+                                <div><span className="font-semibold">Status:</span>{" "}
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${cEm.cls}`}>{cEm.label}</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* ── Column 3: RKN (flat list) ── */}
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">
+                    RKN Details
+                  </div>
+                  {rkns.length === 0 ? (
+                    <div className="text-xs text-slate-400 italic">No RKN Created</div>
+                  ) : rkns.map(rkn => {
+                    const rm = statusMeta(rkn.status);
+                    return (
+                      <div key={rkn.id} className="rounded border border-slate-200 p-2 text-xs bg-slate-50 mb-2">
+                        <button onClick={() => setOpenRkn({ kind: "racking", id: rkn.id, no: rkn.rkn_no })}
+                          className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
+                          {rkn.rkn_no}
+                        </button>
+                        <div className="mt-1 space-y-0.5 text-slate-600">
+                          <div><span className="font-semibold">Date:</span> {fmtDate(rkn.rkn_date)}</div>
+                          <div><span className="font-semibold">Source:</span> {rkn.source_type} · {rkn.source_no || "—"}</div>
+                          <div><span className="font-semibold">RKN Qty:</span> {sumRknQty(rkn) || "—"}</div>
+                          <div><span className="font-semibold">Status:</span>{" "}
+                            <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${rm.cls}`}>{rm.label}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+              </div>
             </div>
+
+            {/* ── ACTION BUTTONS ── */}
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-2">
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={() => setReloadTick(t => t + 1)}>
+                <ArrowsClockwise size={14} weight="bold" className="mr-1.5" /> Refresh
+              </Button>
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={handlePrint} data-testid="rn-detail-print">
+                <Printer size={14} weight="bold" className="mr-1.5" /> Print
+              </Button>
+            </div>
+
+            {/* ── SUB-DIALOGS ── */}
+            <ChildDetailDialog kind="srn" doc={openSrn} onClose={() => setOpenSrn(null)} onOpen={() => {}} />
+            <ChildDetailDialog kind="ern" doc={openErn} onClose={() => setOpenErn(null)} onOpen={() => {}} />
+            <DocumentDetailDialog kind={openRkn?.kind} id={openRkn?.id} no={openRkn?.no} onClose={() => setOpenRkn(null)} />
           </>
         )}
       </DialogContent>
@@ -507,25 +745,90 @@ function Detail({ k, v }) {
 /* --------------------------------------------------------------
    Print view — opens a new window with a print-friendly layout
    -------------------------------------------------------------- */
-function printReceiptNote(rn) {
+function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, srnTree = [], ernTree = []) {
   if (!rn) return;
   const sm = statusMeta(rn.status);
   const sit = stockInTypeMeta(rn.stock_in_type);
+
+  const pField = (label, value) =>
+    `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(value ?? "—"))}</div></div>`;
+
   const items = (rn.items || []).map((it, idx) => {
-    const inv = toNum(it.invoice_qty) ?? "—";
-    const rec = toNum(it.received_qty);
-    const diff = qtyDiff(it);
-    const diffStr = rec == null ? "—" : (diff > 0 ? `+${diff}` : diff);
+    const key = `${it.part_no}||${it.make}`;
+    const smItem = masterData[key];
+    const model = smItem?.model || "—";
+    const desc  = smItem?.description_1 || it.description_1 || "—";
+    const inv   = toNum(it.invoice_qty) ?? "—";
+    const rec   = toNum(it.received_qty);
+    const diff  = qtyDiff(it);
+    const diffStr = rec == null ? "—" : (diff > 0 ? `+${diff}` : String(diff));
     return `<tr>
       <td>${idx + 1}</td>
+      <td>${escapeHtml(model)}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
-      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(desc)}</td>
+      <td>${escapeHtml(it.make || "")}</td>
       <td style="text-align:right">${inv}</td>
       <td style="text-align:right">${rec ?? "—"}</td>
       <td style="text-align:right">${diffStr}</td>
-      <td>${escapeHtml(it.make || "")}</td>
     </tr>`;
   }).join("");
+
+  const pSrnCard = (srn, indented = false) => {
+    const srnQty = sumSrnQty(srn);
+    const rcvd   = sumSrnReceived(srn);
+    const notRcv = sumSrnNotReceivable(srn);
+    const pend   = Math.max(0, srnQty - rcvd - notRcv);
+    const indent = indented ? "margin-left:16px;border-left:3px solid #cbd5e1;padding-left:8px;" : "";
+    return `<div class="note-card" style="${indent}">
+      <div class="note-no">${escapeHtml(srn.srn_no)}</div>
+      <div>Date: ${escapeHtml(fmtDate(srn.srn_date))}</div>
+      <div>SRN Qty: ${srnQty || "—"}</div>
+      <div>Received Qty: ${rcvd || "—"}</div>
+      <div>Not Receivable: ${notRcv || "—"}</div>
+      <div>Pending Qty: ${pend || "—"}</div>
+      <div>Status: ${escapeHtml(statusMeta(srn.status).label)}</div>
+    </div>`;
+  };
+
+  const pErnCard = (ern, indented = false) => {
+    const ernQty = sumErnQty(ern);
+    const acc    = sumErnAccepted(ern);
+    const rej    = sumErnRejected(ern);
+    const pend   = Math.max(0, ernQty - acc - rej);
+    const indent = indented ? "margin-left:16px;border-left:3px solid #cbd5e1;padding-left:8px;" : "";
+    return `<div class="note-card" style="${indent}">
+      <div class="note-no">${escapeHtml(ern.ern_no)}</div>
+      <div>Date: ${escapeHtml(fmtDate(ern.ern_date))}</div>
+      <div>ERN Qty: ${ernQty || "—"}</div>
+      <div>Accepted Qty: ${acc || "—"}</div>
+      <div>Rejected Qty: ${rej || "—"}</div>
+      <div>Pending Qty: ${pend || "—"}</div>
+      <div>Status: ${escapeHtml(statusMeta(ern.status).label)}</div>
+    </div>`;
+  };
+
+  const srnHtml = srnTree.length === 0
+    ? '<div class="empty">No SRN Created</div>'
+    : srnTree.map(({ parent, children }) =>
+        pSrnCard(parent) + children.map(c => pSrnCard(c, true)).join("")
+      ).join("");
+
+  const ernHtml = ernTree.length === 0
+    ? '<div class="empty">No ERN Created</div>'
+    : ernTree.map(({ parent, children }) =>
+        pErnCard(parent) + children.map(c => pErnCard(c, true)).join("")
+      ).join("");
+
+  const rknHtml = rkns.length === 0
+    ? '<div class="empty">No RKN Created</div>'
+    : rkns.map(rkn => `<div class="note-card">
+        <div class="note-no">${escapeHtml(rkn.rkn_no)}</div>
+        <div>Date: ${escapeHtml(fmtDate(rkn.rkn_date))}</div>
+        <div>Source: ${escapeHtml(rkn.source_type || "—")} · ${escapeHtml(rkn.source_no || "—")}</div>
+        <div>RKN Qty: ${sumRknQty(rkn) || "—"}</div>
+        <div>Status: ${escapeHtml(statusMeta(rkn.status).label)}</div>
+      </div>`).join("");
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
@@ -533,53 +836,81 @@ function printReceiptNote(rn) {
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #0f172a; }
-  h1 { font-size: 28px; font-weight: 900; margin: 0 0 6px; letter-spacing: -0.02em; }
-  .muted { color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-  .pill { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; background: #f1f5f9; color: #334155; }
-  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 24px 0; padding: 16px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  .field-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
-  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
-  th { text-align: left; padding: 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
-  td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-  .footer { margin-top: 32px; font-size: 11px; color: #94a3b8; }
-  @media print { body { padding: 12mm; } }
+  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; }
+  .type-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; background: #e0e7ff; color: #3730a3; }
+  .status-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; background: #f1f5f9; color: #334155; }
+  .header-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  .field-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; }
+  .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #475569; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
+  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 20px; page-break-inside: avoid; }
+  .note-card { border: 1px solid #e2e8f0; border-radius: 4px; padding: 8px; font-size: 10px; background: #f8fafc; margin-bottom: 6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; line-height: 1.6; }
+  .note-no { font-weight: 700; color: #1e3a8a; margin-bottom: 4px; }
+  .empty { font-size: 10px; color: #94a3b8; font-style: italic; }
+  .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  @media print { body { padding: 12mm; } .three-col { page-break-inside: avoid; } }
 </style></head>
 <body>
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+  <h1>Receipt Note</h1>
+  <div style="text-align:center;margin-bottom:12px;">
+    <span class="type-pill">${escapeHtml(sit.label)} Stock In</span>
+    &nbsp;
+    <span class="status-pill">${escapeHtml(sm.label)}</span>
+  </div>
+
+  <div class="header-grid">
     <div>
-      <div class="muted">Receipt Note · <span style="color:#334155;font-weight:700;">${escapeHtml(sit.label)} Stock In</span></div>
-      <h1>${escapeHtml(rn.rn_no)}</h1>
+      ${pField("Receipt Note No", rn.rn_no)}
+      ${pField("Receipt Note Date", fmtDate(rn.rn_date))}
+      ${pField("Invoice No", rn.invoice_no || "—")}
+      ${pField("Invoice Date", fmtDate(rn.invoice_date))}
+      ${pField("Material Received Date", fmtDate(rn.goods_received_date))}
+      ${pField("Status", sm.label)}
     </div>
-    <span class="pill">${escapeHtml(sm.label)}</span>
+    <div>
+      ${pField("Created By", rn.created_by || "—")}
+      ${pField("Created At", rn.created_at ? new Date(rn.created_at).toLocaleString() : "—")}
+      ${pField("Assigned To", rn.assigned_to_name || rn.assigned_to_email || "—")}
+    </div>
   </div>
-  <div class="grid">
-    <div><div class="field-label">Receipt Note Date</div><div class="field-value">${escapeHtml(fmtDate(rn.rn_date))}</div></div>
-    <div><div class="field-label">Stock In Type</div><div class="field-value">${escapeHtml(sit.label)}</div></div>
-    <div><div class="field-label">Financial Year</div><div class="field-value">FY ${escapeHtml(rn.fy || "—")}</div></div>
-    <div><div class="field-label">Invoice Date</div><div class="field-value">${escapeHtml(fmtDate(rn.invoice_date))}</div></div>
-    <div><div class="field-label">Invoice No</div><div class="field-value">${escapeHtml(rn.invoice_no || "—")}</div></div>
-    <div><div class="field-label">Goods Received Date</div><div class="field-value">${escapeHtml(fmtDate(rn.goods_received_date))}</div></div>
-    <div><div class="field-label">Created By</div><div class="field-value">${escapeHtml(rn.created_by || "—")}</div></div>
-    <div><div class="field-label">Assigned To</div><div class="field-value">${escapeHtml(rn.assigned_to_name || rn.assigned_to_email || "—")}</div></div>
-    <div><div class="field-label">Created At</div><div class="field-value">${escapeHtml(rn.created_at ? new Date(rn.created_at).toLocaleString() : "—")}</div></div>
-  </div>
-  <div class="muted" style="margin-top:24px;">Items (${(rn.items || []).length})</div>
+
+  <div class="section-title">Items (${(rn.items || []).length})</div>
   <table>
     <thead><tr>
-      <th>Sl No</th><th>Part No</th><th>Description 1</th>
+      <th>Sl No</th><th>Model</th><th>Part No</th><th>Description 1</th><th>Make</th>
       <th style="text-align:right">Invoice Qty</th>
       <th style="text-align:right">Received Qty</th>
-      <th style="text-align:right">Qty Diff</th>
-      <th>Make</th>
+      <th style="text-align:right">Diff Qty</th>
     </tr></thead>
     <tbody>${items}</tbody>
   </table>
-  <div class="footer">Printed ${escapeHtml(new Date().toLocaleString())}</div>
+
+  <div class="three-col">
+    <div>
+      <div class="section-title">SRN Details</div>
+      ${srnHtml}
+    </div>
+    <div>
+      <div class="section-title">ERN Details</div>
+      ${ernHtml}
+    </div>
+    <div>
+      <div class="section-title">RKN Details</div>
+      ${rknHtml}
+    </div>
+  </div>
+
+  <div class="footer">
+    Printed: ${escapeHtml(new Date().toLocaleString())}
+    &nbsp;·&nbsp; Printed by: ${escapeHtml(rn.created_by || "—")}
+  </div>
   <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
 </body></html>`;
 
-  const w = window.open("", "_blank", "width=900,height=700");
+  const w = window.open("", "_blank", "width=1000,height=750");
   if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
   w.document.open();
   w.document.write(html);
