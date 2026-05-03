@@ -13,7 +13,10 @@
       "PowerShell(head -50)",
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Recurse -Directory)",
       "Bash(Format-Table FullName)",
-      "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")"
+      "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(xargs grep *)"
     ]
   }
 }

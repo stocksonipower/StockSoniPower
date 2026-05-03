@@ -39,6 +39,15 @@ function fmtDate(iso) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
+/** Format an ISO datetime string -> "DD-MM-YYYY HH:MM:SS". Returns "—" for falsy. */
+function fmtDateTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 /** Today as "YYYY-MM-DD" for date-input max attribute. */
 function todayISO() {
   const d = new Date();
@@ -66,8 +75,8 @@ function sumSrnQty(srn)           { return (srn.items||[]).reduce((s,it) => s + 
 function sumSrnReceived(srn)      { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.received_qty||0), 0), 0); }
 function sumSrnNotReceivable(srn) { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.not_receivable_qty||0), 0), 0); }
 function sumErnQty(ern)           { return (ern.items||[]).reduce((s,it) => s + (+it.extra_qty||0), 0); }
-function sumErnAccepted(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.accepted_qty||0), 0); }
-function sumErnRejected(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.rejected_qty||0), 0); }
+function sumErnAccepted(ern)      { return (ern.items||[]).reduce((s,it) => { const ch=it.children||[]; return s+(ch.length?ch.reduce((c,r)=>c+(+r.accepted_qty||0),0):(+it.accepted_qty||0)); }, 0); }
+function sumErnRejected(ern)      { return (ern.items||[]).reduce((s,it) => { const ch=it.children||[]; return s+(ch.length?ch.reduce((c,r)=>c+(+r.rejected_qty||0),0):(+it.rejected_qty||0)); }, 0); }
 function sumRknQty(rkn)           { return (rkn.items||[]).reduce((s,it) => s + (+it.quantity||0), 0); }
 
 /** Status pill metadata used in list view AND detail dialog. */
@@ -504,10 +513,14 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
               {/* Right */}
               <div className="space-y-2">
                 <Detail k="CREATED BY" v={rn.created_by || "—"} />
-                <Detail k="CREATED AT" v={rn.created_at ? new Date(rn.created_at).toLocaleString() : "—"} />
+                <Detail k="CREATED AT" v={fmtDateTime(rn.created_at)} />
                 <div>
                   <div className="label-sm">ASSIGNED TO</div>
                   <div className="mt-1"><AssigneeBadge name={rn.assigned_to_name} email={rn.assigned_to_email} /></div>
+                </div>
+                <div>
+                  <div className="label-sm">NARRATION</div>
+                  <div className="font-mono mt-1 text-slate-900 whitespace-pre-wrap">{rn.narration || "—"}</div>
                 </div>
               </div>
             </div>
@@ -872,8 +885,9 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
     </div>
     <div>
       ${pField("Created By", rn.created_by || "—")}
-      ${pField("Created At", rn.created_at ? new Date(rn.created_at).toLocaleString() : "—")}
+      ${pField("Created At", fmtDateTime(rn.created_at))}
       ${pField("Assigned To", rn.assigned_to_name || rn.assigned_to_email || "—")}
+      <div><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap">${escapeHtml(String(rn.narration ?? "—"))}</div></div>
     </div>
   </div>
 
@@ -930,6 +944,7 @@ const emptyItem = () => ({
   invoice_qty: "",
   received_qty: "",
   description_1: "",
+  model: "",
   makes: [],
   partLooked: false,
 });
@@ -976,11 +991,12 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
         invoice_qty: (it.invoice_qty ?? it.quantity ?? ""),
         received_qty: (it.received_qty ?? (isFinalEdit ? (it.quantity ?? "") : "")),
         description_1: it.description_1 || "",
+        model: "",
         makes: it.make ? [it.make] : [],
         partLooked: !!it.part_no,
       }));
       setItems(initial.length ? initial : [emptyItem()]);
-      // Refresh make lists
+      // Refresh make lists and fetch model for display
       initial.forEach((row, idx) => {
         if (!row.part_no) return;
         api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
@@ -989,6 +1005,12 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             const merged = row.make && !list.includes(row.make) ? [...list, row.make] : list;
             setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: merged } : r));
           }).catch(() => {});
+        if (row.make) {
+          api.get("/stock-master/lookup/item", { params: { part_no: row.part_no, make: row.make } })
+            .then(({ data: m }) => {
+              setItems((prev) => prev.map((r, i) => i === idx ? { ...r, model: m.model || "" } : r));
+            }).catch(() => {});
+        }
       });
     } else {
       api.get("/receipt-notes/next-no").then((r) => {
@@ -1025,34 +1047,34 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
     if (!v) {
-      updateItem(i, { makes: [], make: "", partLooked: false, description_1: "" });
+      updateItem(i, { makes: [], make: "", partLooked: false, description_1: "", model: "" });
       return;
     }
     try {
       const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no: v } });
       const list = data.makes || [];
-      // If exactly one make is auto-selected, also fetch description_1 for that pair
+      // If exactly one make is auto-selected, also fetch description_1 + model for that pair
       const autoMake = list.length === 1 ? list[0] : "";
       updateItem(i, { makes: list, partLooked: true, make: autoMake });
       if (autoMake) {
         try {
           const { data: m } = await api.get("/stock-master/lookup/item", { params: { part_no: v, make: autoMake } });
-          updateItem(i, { description_1: m.description_1 || "" });
+          updateItem(i, { description_1: m.description_1 || "", model: m.model || "" });
         } catch { /* ignore */ }
       } else {
-        updateItem(i, { description_1: "" });
+        updateItem(i, { description_1: "", model: "" });
       }
     } catch {
-      updateItem(i, { makes: [], partLooked: true, make: "", description_1: "" });
+      updateItem(i, { makes: [], partLooked: true, make: "", description_1: "", model: "" });
     }
   };
 
-  // Fetch description_1 when make is picked
+  // Fetch description_1 + model when make is picked
   const fetchDescription = async (i, partNo, make) => {
     if (!partNo || !make) return;
     try {
       const { data } = await api.get("/stock-master/lookup/item", { params: { part_no: partNo, make } });
-      updateItem(i, { description_1: data.description_1 || "" });
+      updateItem(i, { description_1: data.description_1 || "", model: data.model || "" });
     } catch { /* ignore */ }
   };
 
@@ -1076,7 +1098,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     if (masterDialog == null) return;
     const i = masterDialog.rowIdx;
     setItems((prev) => prev.map((r, idx) => idx === i
-      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "", masterMissing: false }
+      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "", model: newItem.model || "", masterMissing: false }
       : r));
     setMasterDialog(null);
     toast.success(`Master created: ${newItem.part_no} / ${newItem.make}`);
@@ -1138,6 +1160,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
           invoice_qty: inv,
           received_qty: rec,
           description_1: "",
+          model: "",
           makes: make ? [make] : [],
           partLooked: false,
         });
@@ -1169,7 +1192,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                     if (r.part_no === row.part_no && r.make && !r.description_1 && !r.masterMissing) {
                       api.get("/stock-master/lookup/item", { params: { part_no: r.part_no, make: r.make } })
                         .then(({ data: m }) => {
-                          setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "" } : rr));
+                          setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "", model: m.model || "" } : rr));
                         }).catch(() => {});
                     }
                   });
@@ -1411,18 +1434,6 @@ const canFinalize = useMemo(() => {
             <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
           </div>
           <div>
-            <Label className="label-sm">Material Received Date</Label>
-            <Input
-              type="date"
-              value={goodsReceivedDate}
-              max={todayISO()}
-              onChange={(e) => setGoodsReceivedDate(e.target.value)}
-              className="mt-2 rounded-sm font-mono"
-              data-testid="rn-grd-input"
-            />
-            <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
-          </div>
-          <div>
             <Label className="label-sm">Invoice Date</Label>
             <Input
               type="date"
@@ -1446,6 +1457,18 @@ const canFinalize = useMemo(() => {
               data-testid="rn-invoice-no-input"
             />
             <div className="text-[11px] text-slate-500 mt-1">{isGeneral ? "Blocked · General mode" : "Optional"}</div>
+          </div>
+          <div>
+            <Label className="label-sm">Material Received Date</Label>
+            <Input
+              type="date"
+              value={goodsReceivedDate}
+              max={todayISO()}
+              onChange={(e) => setGoodsReceivedDate(e.target.value)}
+              className="mt-2 rounded-sm font-mono"
+              data-testid="rn-grd-input"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">Optional · no future date</div>
           </div>
           <div className="col-span-2 lg:col-span-3">
             <AssigneeSelect
@@ -1516,12 +1539,13 @@ const canFinalize = useMemo(() => {
             <thead>
               <tr>
                 <th className="w-14">SL NO</th>
+                <th className="w-32">MODEL</th>
                 <th className="w-44">PART NO</th>
                 <th>DESCRIPTION 1</th>
+                <th className="w-56">MAKE</th>
                 <th className="w-28 text-right">{isGeneral ? "INV QTY" : "INVOICE QTY"}</th>
                 <th className="w-28 text-right">RECEIVED QTY</th>
                 <th className="w-24 text-right">QTY DIFF</th>
-                <th className="w-56">MAKE</th>
                 <th className="w-14"></th>
               </tr>
             </thead>
@@ -1552,11 +1576,29 @@ const canFinalize = useMemo(() => {
                     title={missingMaster ? "Master not found for this Part No / Make. Use the Make dropdown → + Create New Make to create it." : undefined}
                   >
                     <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td className="w-32">
+                      <div
+                        className="text-xs text-slate-700 px-2 py-1 bg-slate-50 rounded-sm border border-slate-200 truncate"
+                        title={it.model || "—"}
+                        data-testid={`rn-model-${idx}`}
+                      >
+                        {it.model || <span className="text-slate-400 italic">(auto)</span>}
+                      </div>
+                    </td>
                     <td>
                       <Input
                         value={it.part_no}
-                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "" })}
+                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "", model: "" })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
+                        onKeyDown={async (e) => {
+                          if (e.key === "Tab" && !e.shiftKey && e.target.value.trim() && !it.partLooked) {
+                            e.preventDefault();
+                            await lookupMakes(idx, e.target.value);
+                            setTimeout(() => {
+                              document.querySelector(`[data-testid="rn-make-${idx}"]`)?.focus();
+                            }, 0);
+                          }
+                        }}
                         placeholder="Enter part no"
                         className="rounded-sm font-mono h-8"
                         data-testid={`rn-part-no-${idx}`}
@@ -1570,6 +1612,15 @@ const canFinalize = useMemo(() => {
                       >
                         {it.description_1 || <span className="text-slate-400 italic">(auto from master)</span>}
                       </div>
+                    </td>
+                    <td className="w-56">
+                      <MakeDropdown
+  value={it.make}
+  makes={it.makes}
+  partLooked={it.partLooked}
+  onChange={(v) => handleMakeChange(idx, v)}
+  testid={`rn-make-${idx}`}
+/>
                     </td>
                     <td className="w-28">
                       <Input
@@ -1600,22 +1651,6 @@ const canFinalize = useMemo(() => {
                     </td>
                     <td className={`w-24 text-right font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
                       {!recFilled ? "—" : (diff > 0 ? `+${diff}` : diff)}
-                    </td>
-                    <td className="w-56">
-                      <MakeDropdown
-  value={it.make}
-  makes={it.makes}
-  partLooked={it.partLooked}
-  onChange={(v) => handleMakeChange(idx, v)}
-  onKeyDown={(e) => {
-    if (isLastRow && e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      const addBtn = document.querySelector(`[data-testid="rn-add-row-${idx}"]`);
-      if (addBtn) addBtn.focus();
-    }
-  }}
-  testid={`rn-make-${idx}`}
-/>
                     </td>
                                         <td>
                       <div className="flex items-center gap-1">
