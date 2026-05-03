@@ -90,6 +90,7 @@ class SrnChildBody(BaseModel):
     make: str
     received_qty: float = 0
     not_receivable_qty: float = 0
+    is_draft: bool = False
 
 
 class ExtraReceivedNoteUpdate(BaseModel):
@@ -102,6 +103,7 @@ class ErnChildBody(BaseModel):
     make: str
     accepted_qty: float = 0
     rejected_qty: float = 0
+    is_draft: bool = False
 
 
 # ==================== ENDPOINTS ====================
@@ -1360,6 +1362,7 @@ async def add_srn_child_row(srn_id: str, body: SrnChildBody, response: Response,
         "not_receivable_qty": nrcv,
         "created_at": now_iso(),
         "status": "RECEIVED" if rcv > 0 else "NOT_RECEIVABLE",
+        "finalized": not body.is_draft,
     }
     children.append(child)
 
@@ -1378,11 +1381,10 @@ async def add_srn_child_row(srn_id: str, body: SrnChildBody, response: Response,
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
 
-    # Rule 3: if the new child added rackable qty, auto-create a DRAFT RKN
-    # against this SRN (covers only the newly-pending qty thanks to
-    # prepare_racking_for_source's already_racked subtraction).
+    # Rule 3: if the new child added rackable qty and is not a draft save,
+    # auto-create a DRAFT RKN against this SRN.
     auto_rkn_no = None
-    if rcv > 0:
+    if rcv > 0 and not body.is_draft:
         auto_rkn_no = await _auto_create_rkn_for_source(
             "SRN", srn_id, user, auto_source="srn-child-save"
         )
@@ -1421,6 +1423,12 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
     p_item = parent["items"][item_idx]
     short_qty = float(p_item.get("short_qty") or 0)
     children = list(p_item.get("children") or [])
+
+    # Block edits on finalized (non-draft) rows.
+    target_child = next((c for c in children if c.get("child_srn_no") == child_srn_no), None)
+    if target_child and target_child.get("finalized", True):
+        raise HTTPException(status_code=409, detail="Cannot edit — this row has been saved as final")
+
     others_total = sum(
         float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
         for c in children if c.get("child_srn_no") != child_srn_no
@@ -1429,8 +1437,6 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
         raise HTTPException(status_code=400,
                             detail=f"Exceeds Short Qty ({short_qty - others_total:.2f})")
 
-    # If the parent's items[].children received qty already racked > new total received,
-    # block (would create negative racking inventory).
     racked = await _aggregate_other_rkn_qty_by_source("SRN", srn_id, exclude_rkn_id=None)
     racked_for_item = float(racked.get(_key(body.part_no, body.make), 0))
     new_total_rcv = sum(
@@ -1445,9 +1451,11 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
     new_children = []
     for c in children:
         if c.get("child_srn_no") == child_srn_no:
+            new_finalized = not body.is_draft
             new_children.append({
                 **c, "received_qty": rcv, "not_receivable_qty": nrcv,
                 "status": "RECEIVED" if rcv > 0 else "NOT_RECEIVABLE",
+                "finalized": new_finalized,
             })
             found = True
         else:
@@ -1469,9 +1477,9 @@ async def edit_srn_child_row(srn_id: str, child_srn_no: str, body: SrnChildBody,
     await _recompute_srn_racking_status(srn_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
-    # Rule 3: edit may have raised received_qty → auto-create RKN if newly pending.
+    # Rule 3: edit may have raised received_qty → auto-create RKN if not a draft save.
     auto_rkn_no = None
-    if rcv > 0:
+    if rcv > 0 and not body.is_draft:
         auto_rkn_no = await _auto_create_rkn_for_source(
             "SRN", srn_id, user, auto_source="srn-child-save"
         )
@@ -1502,6 +1510,10 @@ async def delete_srn_child_row(srn_id: str, child_srn_no: str,
             break
     if not target:
         raise HTTPException(status_code=404, detail="Child row not found")
+
+    # Block deletion of finalized (non-draft) rows.
+    if target.get("finalized", True):
+        raise HTTPException(status_code=409, detail="Cannot delete — this row has been saved as final")
 
     # Block deletion if dropping qty would go below already-racked.
     racked = await _aggregate_other_rkn_qty_by_source("SRN", srn_id, exclude_rkn_id=None)
@@ -1787,6 +1799,7 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
         "rejected_qty": rej,
         "created_at": now_iso(),
         "status": "COMPLETE",
+        "finalized": not body.is_draft,
     })
     new_items = []
     for i, it in enumerate(parent["items"]):
@@ -1802,9 +1815,9 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
     await _recompute_ern_racking_status(ern_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
-    # Rule 3 (parallel for ERN): if accepted_qty was added, auto-create RKN.
+    # Rule 3 (parallel for ERN): if accepted_qty was added and not a draft save, auto-create RKN.
     auto_rkn_no = None
-    if acc > 0:
+    if acc > 0 and not body.is_draft:
         auto_rkn_no = await _auto_create_rkn_for_source(
             "ERN", ern_id, user, auto_source="ern-child-save"
         )
@@ -1839,6 +1852,12 @@ async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
     p_item = parent["items"][item_idx]
     extra_qty = float(p_item.get("extra_qty") or 0)
     children = list(p_item.get("children") or [])
+
+    # Block edits on finalized (non-draft) rows.
+    target_child = next((c for c in children if c.get("child_ern_no") == child_ern_no), None)
+    if target_child and target_child.get("finalized", True):
+        raise HTTPException(status_code=409, detail="Cannot edit — this row has been saved as final")
+
     others = sum(float(c.get("accepted_qty") or 0) + float(c.get("rejected_qty") or 0)
                  for c in children if c.get("child_ern_no") != child_ern_no)
     if others + acc + rej > extra_qty + 1e-6:
@@ -1855,7 +1874,8 @@ async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
     new_children = []
     for c in children:
         if c.get("child_ern_no") == child_ern_no:
-            new_children.append({**c, "accepted_qty": acc, "rejected_qty": rej})
+            new_finalized = not body.is_draft
+            new_children.append({**c, "accepted_qty": acc, "rejected_qty": rej, "finalized": new_finalized})
             found = True
         else:
             new_children.append(c)
@@ -1875,9 +1895,9 @@ async def edit_ern_child_row(ern_id: str, child_ern_no: str, body: ErnChildBody,
     await _recompute_ern_racking_status(ern_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
-    # Rule 3 parallel: edit may have raised accepted_qty → auto-create RKN.
+    # Rule 3 parallel: edit may have raised accepted_qty → auto-create RKN if not a draft save.
     auto_rkn_no = None
-    if acc > 0:
+    if acc > 0 and not body.is_draft:
         auto_rkn_no = await _auto_create_rkn_for_source(
             "ERN", ern_id, user, auto_source="ern-child-save"
         )
@@ -1907,6 +1927,11 @@ async def delete_ern_child_row(ern_id: str, child_ern_no: str,
             break
     if not target:
         raise HTTPException(status_code=404, detail="Child row not found")
+
+    # Block deletion of finalized (non-draft) rows.
+    if target.get("finalized", True):
+        raise HTTPException(status_code=409, detail="Cannot delete — this row has been saved as final")
+
     racked = await _aggregate_other_rkn_qty_by_source("ERN", ern_id, exclude_rkn_id=None)
     p_item = parent["items"][item_idx]
     racked_for_item = float(racked.get(_key(p_item.get("part_no"), p_item.get("make")), 0))

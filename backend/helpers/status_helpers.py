@@ -5,24 +5,29 @@ from helpers.note_helpers import _key
 
 
 def _compute_srn_status(srn: dict) -> str:
-    """Inline-child model status:
-       sum(short_qty) == 0                                   -> PENDING
-       no children                                            -> PENDING
-       sum(received + not_receivable) < sum(short_qty)        -> PARTIALLY_RECEIVED
-       sum(received + not_receivable) >= sum(short_qty)       -> COMPLETE
+    """Inline-child model status (only finalized children count toward COMPLETE):
+       sum(short_qty) == 0                                        -> PENDING
+       no children at all                                          -> PENDING
+       no finalized children                                       -> PENDING
+       sum(finalized received + not_receivable) < sum(short_qty)  -> PARTIALLY_RECEIVED
+       sum(finalized received + not_receivable) >= sum(short_qty) -> COMPLETE
     """
     items = srn.get("items") or []
     total_short = 0.0
     total_decided = 0.0
-    has_children = False
+    has_any_children = False
+    has_final_children = False
     for it in items:
         total_short += float(it.get("short_qty") or 0)
         for c in (it.get("children") or []):
-            has_children = True
-            total_decided += float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
+            has_any_children = True
+            # Legacy rows without finalized field are treated as finalized (True).
+            if c.get("finalized", True):
+                has_final_children = True
+                total_decided += float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
     if total_short <= 0:
         return "PENDING"
-    if not has_children or total_decided <= 0:
+    if not has_any_children or not has_final_children or total_decided <= 0:
         return "PENDING"
     if total_decided + 1e-6 >= total_short:
         return "COMPLETE"
@@ -30,11 +35,11 @@ def _compute_srn_status(srn: dict) -> str:
 
 
 def _compute_ern_status(ern: dict) -> str:
-    """Inline-child model status:
+    """Inline-child model status (only finalized children count toward COMPLETE):
        Each child entry has accepted_qty + rejected_qty.
 
-         total_decided = sum(accepted+rejected) across all children
-         no children                            -> PENDING
+         total_decided = sum(accepted+rejected) across finalized children only
+         no children / no finalized children    -> PENDING
          total_decided >= sum(extra_qty)        -> COMPLETE
          any decided activity but not complete  -> PARTIALLY_ACCEPTED
                                                    (legacy PARTIALLY_REJECTED collapsed
@@ -44,24 +49,26 @@ def _compute_ern_status(ern: dict) -> str:
     total_extra = 0.0
     total_acc = 0.0
     total_rej = 0.0
-    has_children = False
+    has_any_children = False
+    has_final_children = False
     for it in items:
         total_extra += float(it.get("extra_qty") or 0)
         for c in (it.get("children") or []):
-            has_children = True
-            total_acc += float(c.get("accepted_qty") or 0)
-            total_rej += float(c.get("rejected_qty") or 0)
+            has_any_children = True
+            # Legacy rows without finalized field are treated as finalized (True).
+            if c.get("finalized", True):
+                has_final_children = True
+                total_acc += float(c.get("accepted_qty") or 0)
+                total_rej += float(c.get("rejected_qty") or 0)
     if total_extra <= 0:
         return "PENDING"
     decided = total_acc + total_rej
-    if not has_children or decided <= 0:
+    if not has_any_children or not has_final_children or decided <= 0:
         return "PENDING"
     if decided + 1e-6 >= total_extra:
         return "COMPLETE"
     if total_acc > 0:
         return "PARTIALLY_ACCEPTED"
-    # Only rejections so far → still partially-accepted (zero accepted)
-    # so the user knows fulfillment is in progress.
     if total_rej > 0:
         return "PARTIALLY_ACCEPTED"
     return "PENDING"

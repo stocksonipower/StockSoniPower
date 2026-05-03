@@ -936,6 +936,209 @@ function escapeHtml(s) {
 }
 
 /* --------------------------------------------------------------
+   Print view for SRN (Short Received Note)
+   -------------------------------------------------------------- */
+function printSrn(srn, me) {
+  if (!srn) return;
+  const pF = (label, val) =>
+    `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(val ?? "—"))}</div></div>`;
+
+  // Build items rows: summary row per item, then child rows
+  let itemRows = "";
+  let slNo = 0;
+  (srn.items || []).forEach((it) => {
+    slNo++;
+    const totalChildRcv = (it.children || []).reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0);
+    const totalChildNR  = (it.children || []).reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0);
+    const summaryPending = Math.max(0, (parseFloat(it.short_qty) || 0) - totalChildRcv - totalChildNR);
+    itemRows += `<tr class="summary-row">
+      <td>${slNo}</td>
+      <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(it.make || "")}</td>
+      <td style="text-align:right;color:#b91c1c;font-weight:700">${(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
+      <td style="text-align:right;color:#15803d">${totalChildRcv.toFixed(2)}</td>
+      <td style="text-align:right">${totalChildNR.toFixed(2)}</td>
+      <td style="text-align:right;font-weight:700;color:${summaryPending > 0.001 ? "#b45309" : "#15803d"}">${summaryPending.toFixed(2)}</td>
+      <td>—</td>
+    </tr>`;
+    let runningShort = parseFloat(it.short_qty) || 0;
+    (it.children || []).forEach((c) => {
+      const childRcv = parseFloat(c.received_qty) || 0;
+      const childNR  = parseFloat(c.not_receivable_qty) || 0;
+      const childPending = Math.max(0, runningShort - childRcv - childNR);
+      const isDraft = c.finalized === false;
+      itemRows += `<tr class="child-row">
+        <td></td>
+        <td colspan="3" style="padding-left:20px;font-size:10px;color:#64748b">
+          ${isDraft ? '<span style="background:#fef9c3;color:#854d0e;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">DRAFT</span>' : '<span style="background:#dcfce7;color:#166534;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">FINAL</span>'}
+        </td>
+        <td style="text-align:right;color:#64748b;font-size:10px">${runningShort.toFixed(2)}</td>
+        <td style="text-align:right">${childRcv.toFixed(2)}</td>
+        <td style="text-align:right">${childNR.toFixed(2)}</td>
+        <td style="text-align:right;color:${childPending > 0.001 ? "#b45309" : "#15803d"}">${childPending.toFixed(2)}</td>
+        <td style="font-family:monospace;font-size:11px;color:#1d4ed8">${escapeHtml(c.child_srn_no || "")}</td>
+      </tr>`;
+      runningShort = childPending;
+    });
+  });
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<title>${escapeHtml(srn.srn_no || "SRN")} — Short Received Note</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px;color:#0f172a;font-size:13px}
+  h1{font-size:20px;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px}
+  .header-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 20px;padding:14px;border:1px solid #e2e8f0;border-radius:4px}
+  .header-left,.header-right{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .field-label{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;font-weight:700}
+  .field-value{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;margin-top:2px}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:11px}
+  th{text-align:left;padding:6px 8px;background:#f1f5f9;border-bottom:2px solid #cbd5e1;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;font-weight:700}
+  td{padding:5px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  tr.summary-row{background:#f8fafc;font-weight:600}
+  tr.child-row{background:#ffffff}
+  .narration-box{margin-top:20px;padding:10px 14px;border:1px solid #e2e8f0;border-radius:4px}
+  .footer{margin-top:20px;font-size:10px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:8px;display:flex;justify-content:space-between}
+  @media print{body{padding:12mm}}
+</style></head><body>
+<h1>Short Received Note</h1>
+<div class="header-grid">
+  <div class="header-left">
+    ${pF("RECEIPT NOTE DATE", srn.parent_rn_date ? srn.parent_rn_date.split("T")[0].split("-").reverse().join("-") : "—")}
+    ${pF("RECEIPT NOTE NO", srn.parent_rn_no)}
+    ${pF("SRN DATE", srn.srn_date ? srn.srn_date.split("T")[0].split("-").reverse().join("-") : "—")}
+    ${pF("SRN NO", srn.srn_no)}
+  </div>
+  <div class="header-right">
+    ${pF("ASSIGNED TO", srn.assigned_to_name || srn.assigned_to_email || "—")}
+    ${pF("STATUS", srn.status || "—")}
+  </div>
+</div>
+<table>
+  <thead><tr>
+    <th class="w-8">SL NO</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
+    <th style="text-align:right">SHORT QTY</th><th style="text-align:right">RECEIVED QTY</th>
+    <th style="text-align:right">NR QTY</th><th style="text-align:right">PENDING QTY</th>
+    <th>CHILD SRN NO</th>
+  </tr></thead>
+  <tbody>${itemRows}</tbody>
+</table>
+${srn.narration ? `<div class="narration-box"><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:4px">${escapeHtml(srn.narration)}</div></div>` : ""}
+<div class="footer">
+  <span>Printed: ${new Date().toLocaleString()}</span>
+  <span>By: ${escapeHtml(me?.name || me?.email || "—")}</span>
+</div>
+<script>window.onload=()=>{setTimeout(()=>window.print(),100)}</script>
+</body></html>`;
+
+  const w = window.open("", "_blank", "width=1000,height=750");
+  if (!w) { toast.error("Popup blocked — allow popups to print"); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+/* --------------------------------------------------------------
+   Print view for ERN (Extra Received Note)
+   -------------------------------------------------------------- */
+function printErn(ern, me) {
+  if (!ern) return;
+  const pF = (label, val) =>
+    `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(val ?? "—"))}</div></div>`;
+
+  let itemRows = "";
+  let slNo = 0;
+  (ern.items || []).forEach((it) => {
+    slNo++;
+    const totalChildAcc = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
+    const totalChildRej = (it.children || []).reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
+    const summaryPending = Math.max(0, (parseFloat(it.extra_qty) || 0) - totalChildAcc - totalChildRej);
+    itemRows += `<tr class="summary-row">
+      <td>${slNo}</td>
+      <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(it.make || "")}</td>
+      <td style="text-align:right;color:#b45309;font-weight:700">${(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
+      <td style="text-align:right;color:#15803d">${totalChildAcc.toFixed(2)}</td>
+      <td style="text-align:right;color:#b91c1c">${totalChildRej.toFixed(2)}</td>
+      <td style="text-align:right;font-weight:700;color:${summaryPending > 0.001 ? "#b45309" : "#15803d"}">${summaryPending.toFixed(2)}</td>
+      <td>—</td>
+    </tr>`;
+    let runningExtra = parseFloat(it.extra_qty) || 0;
+    (it.children || []).forEach((c) => {
+      const childAcc = parseFloat(c.accepted_qty) || 0;
+      const childRej = parseFloat(c.rejected_qty) || 0;
+      const childPending = Math.max(0, runningExtra - childAcc - childRej);
+      const isDraft = c.finalized === false;
+      itemRows += `<tr class="child-row">
+        <td></td>
+        <td colspan="3" style="padding-left:20px;font-size:10px;color:#64748b">
+          ${isDraft ? '<span style="background:#fef9c3;color:#854d0e;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">DRAFT</span>' : '<span style="background:#dcfce7;color:#166534;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">FINAL</span>'}
+        </td>
+        <td style="text-align:right;color:#64748b;font-size:10px">${runningExtra.toFixed(2)}</td>
+        <td style="text-align:right">${childAcc.toFixed(2)}</td>
+        <td style="text-align:right">${childRej.toFixed(2)}</td>
+        <td style="text-align:right;color:${childPending > 0.001 ? "#b45309" : "#15803d"}">${childPending.toFixed(2)}</td>
+        <td style="font-family:monospace;font-size:11px;color:#1d4ed8">${escapeHtml(c.child_ern_no || "")}</td>
+      </tr>`;
+      runningExtra = childPending;
+    });
+  });
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<title>${escapeHtml(ern.ern_no || "ERN")} — Extra Received Note</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px;color:#0f172a;font-size:13px}
+  h1{font-size:20px;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px}
+  .header-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 20px;padding:14px;border:1px solid #e2e8f0;border-radius:4px}
+  .header-left,.header-right{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .field-label{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;font-weight:700}
+  .field-value{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;margin-top:2px}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:11px}
+  th{text-align:left;padding:6px 8px;background:#f1f5f9;border-bottom:2px solid #cbd5e1;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;font-weight:700}
+  td{padding:5px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  tr.summary-row{background:#f8fafc;font-weight:600}
+  tr.child-row{background:#ffffff}
+  .narration-box{margin-top:20px;padding:10px 14px;border:1px solid #e2e8f0;border-radius:4px}
+  .footer{margin-top:20px;font-size:10px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:8px;display:flex;justify-content:space-between}
+  @media print{body{padding:12mm}}
+</style></head><body>
+<h1>Extra Received Note</h1>
+<div class="header-grid">
+  <div class="header-left">
+    ${pF("RECEIPT NOTE DATE", ern.parent_rn_date ? ern.parent_rn_date.split("T")[0].split("-").reverse().join("-") : "—")}
+    ${pF("RECEIPT NOTE NO", ern.parent_rn_no)}
+    ${pF("ERN DATE", ern.ern_date ? ern.ern_date.split("T")[0].split("-").reverse().join("-") : "—")}
+    ${pF("ERN NO", ern.ern_no)}
+  </div>
+  <div class="header-right">
+    ${pF("ASSIGNED TO", ern.assigned_to_name || ern.assigned_to_email || "—")}
+    ${pF("STATUS", ern.status || "—")}
+  </div>
+</div>
+<table>
+  <thead><tr>
+    <th>SL NO</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
+    <th style="text-align:right">EXTRA QTY</th><th style="text-align:right">ACCEPTED QTY</th>
+    <th style="text-align:right">REJECTED QTY</th><th style="text-align:right">PENDING QTY</th>
+    <th>CHILD ERN NO</th>
+  </tr></thead>
+  <tbody>${itemRows}</tbody>
+</table>
+${ern.narration ? `<div class="narration-box"><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:4px">${escapeHtml(ern.narration)}</div></div>` : ""}
+<div class="footer">
+  <span>Printed: ${new Date().toLocaleString()}</span>
+  <span>By: ${escapeHtml(me?.name || me?.email || "—")}</span>
+</div>
+<script>window.onload=()=>{setTimeout(()=>window.print(),100)}</script>
+</body></html>`;
+
+  const w = window.open("", "_blank", "width=1000,height=750");
+  if (!w) { toast.error("Popup blocked — allow popups to print"); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+/* --------------------------------------------------------------
    Create / Edit view — the form (split qty + Draft/Final + Excel)
    -------------------------------------------------------------- */
 const emptyItem = () => ({
@@ -1948,7 +2151,7 @@ function ShortReceivedNoteTab() {
         />
       )}
       {view === "edit" && (
-        <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} />
+        <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} onOpenRn={handleOpenRn} />
       )}
       <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
@@ -2000,7 +2203,7 @@ function ExtraReceivedNoteTab() {
         />
       )}
       {view === "edit" && (
-        <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} />
+        <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} onOpenRn={handleOpenRn} />
       )}
       <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
@@ -2102,6 +2305,32 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
     />
     <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
       <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+    </Button>
+    <Button
+      onClick={() => {
+        if (filteredRows.length === 0) { toast.error("No rows to export"); return; }
+        const exportCols = [
+          { label: "Sl No", value: (r) => filteredRows.indexOf(r) + 1 },
+          { label: "Receipt Note Date", value: (r) => fmtDate(r.parent_rn_date) },
+          { label: "Receipt Note No", value: (r) => r.parent_rn_no || "" },
+          { label: `${noun} Date`, value: (r) => fmtDate(r[dateField]) },
+          { label: `${noun} No`, value: (r) => r[idField] || "" },
+          { label: "Assigned To", value: (r) => r.assigned_to_name || r.assigned_to_email || "" },
+          { label: "Status", value: (r) => statusMeta(r.status).label },
+          isSrn
+            ? { label: "Short Qty", value: (r) => sumSrnQty(r) }
+            : { label: "Extra Qty", value: (r) => sumErnQty(r) },
+          isSrn
+            ? { label: "Received Qty", value: (r) => sumSrnReceived(r) }
+            : { label: "Accepted Qty", value: (r) => sumErnAccepted(r) },
+          isSrn
+            ? { label: "Not Receivable Qty", value: (r) => sumSrnNotReceivable(r) }
+            : { label: "Rejected Qty", value: (r) => sumErnRejected(r) },
+        ];
+        exportToExcel(filteredRows, exportCols, `${isSrn ? "Short" : "Extra"}_Received_Notes_${todayISO()}.xlsx`);
+      }}
+      variant="outline" className="rounded-sm border-slate-300" data-testid={`${kind}-export`}>
+      <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
     </Button>
   </div>
 </div>
@@ -2225,168 +2454,197 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
   );
 }
 
-/** Read-only detail dialog for SRN/ERN — shows all rows with quantities. */
+/** Read-only detail dialog for SRN/ERN — layout mirrors the print format, includes Print button. */
 function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
+  const { user: me } = useAuth();
   if (!doc) return null;
   const isSrn = kind === "srn";
   const idField = isSrn ? "srn_no" : "ern_no";
   const dateField = isSrn ? "srn_date" : "ern_date";
   const meta = statusMeta(doc.status);
 
-  const renderChildren = (it) => {
-    const list = it.children || [];
-    if (!list.length) return <span className="text-slate-300">—</span>;
-    return (
-      <div className="flex flex-col gap-0.5 items-end">
-        {list.map((c, i) => {
-          const childNo = c.child_srn_no || c.child_ern_no;
-          const qty = isSrn ? c.received_qty : c.accepted_qty;
-          const altQty = isSrn ? c.not_receivable_qty : c.rejected_qty;
-          const altLabel = isSrn ? "n/r" : "rej";
-          return (
-            <span
-              key={i}
-              className="font-mono text-blue-700 text-[11px]"
-              title={`${childNo} · ${qty} rcvd${altQty ? ` · ${altQty} ${altLabel}` : ""}`}
-              data-testid={`${kind}-child-${childNo}`}
-            >
-              {childNo}
-            </span>
-          );
-        })}
-      </div>
-    );
-  };
-
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-5xl rounded-sm" data-testid={`${kind}-detail-dialog`}>
+      <DialogContent className="max-w-5xl rounded-sm max-h-[90vh] overflow-y-auto" data-testid={`${kind}-detail-dialog`}>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3">
-            <span className="font-mono">{doc[idField]}</span>
-            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>
+          <DialogTitle className="text-center text-base font-black uppercase tracking-widest">
+            {isSrn ? "Short Received Note" : "Extra Received Note"}
           </DialogTitle>
         </DialogHeader>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-          <Detail k={`${isSrn ? "SRN" : "ERN"} Date`} v={fmtDate(doc[dateField])} />
-          <Detail k="Parent RN" v={`${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date) || "—"})`} />
-          <Detail k="Invoice No" v={doc.invoice_no || "—"} />
-          <Detail k="Invoice Date" v={fmtDate(doc.invoice_date)} />
-          {isSrn && <Detail k="Fulfilment Date" v={fmtDate(doc.fulfillment_date)} />}
-          <Detail k="Assigned To" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
-          <Detail k="Created By" v={doc.created_by || "—"} />
-          {doc.parent_srn_no && <Detail k="Parent SRN" v={doc.parent_srn_no} />}
-          {doc.parent_ern_no && <Detail k="Parent ERN" v={doc.parent_ern_no} />}
+
+        {/* Header: 4-field + 2-field rows */}
+        <div className="space-y-3 py-2">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <Detail k="RECEIPT NOTE DATE" v={fmtDate(doc.parent_rn_date)} />
+            <Detail k="RECEIPT NOTE NO" v={doc.parent_rn_no || "—"} />
+            <Detail k={`${isSrn ? "SRN" : "ERN"} DATE`} v={fmtDate(doc[dateField])} />
+            <Detail k={`${isSrn ? "SRN" : "ERN"} NO`} v={doc[idField] || "—"} />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-2 border-t border-slate-100">
+            <Detail k="ASSIGNED TO" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
+            <div>
+              <div className="label-sm">STATUS</div>
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm mt-1 inline-block ${meta.cls}`}>{meta.label}</span>
+            </div>
+          </div>
         </div>
         {doc.chain_remarks && (
-          <div className="text-xs text-slate-600 italic mt-2">{doc.chain_remarks}</div>
+          <div className="text-xs text-slate-500 italic border-l-2 border-slate-200 pl-3">{doc.chain_remarks}</div>
         )}
-        <div className="overflow-x-auto mt-4">
+
+        {/* Items table: Summary + Child rows, no ACTIONS column */}
+        <div className="overflow-x-auto border border-slate-200 rounded-sm">
           <table className="data-table w-full text-xs">
             <thead>
               <tr>
-                <th className="w-10">#</th>
+                <th className="w-10">SL NO</th>
                 <th>PART NO</th>
                 <th>DESCRIPTION 1</th>
                 <th>MAKE</th>
-                <th className="text-right">INV QTY</th>
-                <th className="text-right">RCVD QTY</th>
                 {isSrn ? (
                   <>
                     <th className="text-right">SHORT QTY</th>
-                    <th className="text-right">FULFILLED QTY</th>
+                    <th className="text-right">RECEIVED QTY</th>
+                    <th className="text-right">NR QTY</th>
                     <th className="text-right">PENDING QTY</th>
-                    <th className="text-right">CHILD SRNs</th>
+                    <th>CHILD SRN NO</th>
                   </>
                 ) : (
                   <>
                     <th className="text-right">EXTRA QTY</th>
                     <th className="text-right">ACCEPTED QTY</th>
                     <th className="text-right">REJECTED QTY</th>
-                    <th className="text-right">UNDECIDED</th>
-                    <th className="text-right">CHILD ERNs</th>
+                    <th className="text-right">PENDING QTY</th>
+                    <th>CHILD ERN NO</th>
                   </>
                 )}
               </tr>
             </thead>
             <tbody>
-              {(doc.items || []).map((it, idx) => {
+              {(doc.items || []).flatMap((it, idx) => {
+                const rows = [];
                 if (isSrn) {
                   const shortQ = parseFloat(it.short_qty) || 0;
-                  // Inline-child model: total received + not_receivable across children
-                  const childRcv = (it.children || []).reduce(
-                    (s, c) => s + (parseFloat(c.received_qty) || 0), 0,
-                  );
-                  const childNRcv = (it.children || []).reduce(
-                    (s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0,
-                  );
-                  const ful = (it.children || []).length > 0
-                    ? childRcv
-                    : (it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0));
-                  const pending = ful == null ? shortQ : (shortQ - ful - childNRcv);
-                  return (
-                    <tr key={idx}>
+                  const totalRcv = (it.children || []).reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0);
+                  const totalNR  = (it.children || []).reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0);
+                  const summaryPending = Math.max(0, shortQ - totalRcv - totalNR);
+                  rows.push(
+                    <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
                       <td className="font-mono text-slate-500">{idx + 1}</td>
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
-                      <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                      <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                      <td className="text-right font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
-                      <td className="text-right font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
-                      <td className={`text-right font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                      <td className="text-right">{renderChildren(it)}</td>
+                      <td className="text-right font-mono text-red-700">{shortQ.toFixed(2)}</td>
+                      <td className="text-right font-mono text-green-700">{totalRcv.toFixed(2)}</td>
+                      <td className="text-right font-mono">{totalNR.toFixed(2)}</td>
+                      <td className={`text-right font-mono ${summaryPending > 0.001 ? "text-amber-700" : "text-green-700"}`}>{summaryPending.toFixed(2)}</td>
+                      <td className="text-slate-400 font-mono">—</td>
                     </tr>
                   );
+                  let runningShort = shortQ;
+                  (it.children || []).forEach((c, ci) => {
+                    const childRcv = parseFloat(c.received_qty) || 0;
+                    const childNR = parseFloat(c.not_receivable_qty) || 0;
+                    const childPending = Math.max(0, runningShort - childRcv - childNR);
+                    const isDraftRow = c.finalized === false;
+                    rows.push(
+                      <tr key={`child-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/30"}>
+                        <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
+                        <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                          <span className="text-slate-300">└ </span>
+                          <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                            {isDraftRow ? "Draft" : "Final"}
+                          </span>
+                        </td>
+                        <td className="text-right font-mono text-slate-500 text-[10px]">{runningShort.toFixed(2)}</td>
+                        <td className="text-right font-mono font-semibold text-green-800">{childRcv.toFixed(2)}</td>
+                        <td className="text-right font-mono text-slate-600">{childNR.toFixed(2)}</td>
+                        <td className={`text-right font-mono ${childPending > 0.001 ? "text-amber-600" : "text-green-600"}`}>{childPending.toFixed(2)}</td>
+                        <td className="font-mono text-[11px] text-blue-700">{c.child_srn_no}</td>
+                      </tr>
+                    );
+                    runningShort = childPending;
+                  });
+                } else {
+                  const extraQ = parseFloat(it.extra_qty) || 0;
+                  const totalAcc = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
+                  const totalRej = (it.children || []).reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
+                  const summaryPending = Math.max(0, extraQ - totalAcc - totalRej);
+                  rows.push(
+                    <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                      <td className="text-slate-700">{it.description_1 || "—"}</td>
+                      <td>{it.make}</td>
+                      <td className="text-right font-mono text-amber-700">{extraQ.toFixed(2)}</td>
+                      <td className="text-right font-mono text-green-700">{totalAcc.toFixed(2)}</td>
+                      <td className="text-right font-mono text-red-700">{totalRej.toFixed(2)}</td>
+                      <td className={`text-right font-mono ${summaryPending > 0.001 ? "text-amber-700" : "text-green-700"}`}>{summaryPending.toFixed(2)}</td>
+                      <td className="text-slate-400 font-mono">—</td>
+                    </tr>
+                  );
+                  let runningExtra = extraQ;
+                  (it.children || []).forEach((c, ci) => {
+                    const childAcc = parseFloat(c.accepted_qty) || 0;
+                    const childRej = parseFloat(c.rejected_qty) || 0;
+                    const childPending = Math.max(0, runningExtra - childAcc - childRej);
+                    const isDraftRow = c.finalized === false;
+                    rows.push(
+                      <tr key={`child-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/30"}>
+                        <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
+                        <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                          <span className="text-slate-300">└ </span>
+                          <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                            {isDraftRow ? "Draft" : "Final"}
+                          </span>
+                        </td>
+                        <td className="text-right font-mono text-slate-500 text-[10px]">{runningExtra.toFixed(2)}</td>
+                        <td className="text-right font-mono font-semibold text-green-800">{childAcc.toFixed(2)}</td>
+                        <td className="text-right font-mono text-red-700">{childRej.toFixed(2)}</td>
+                        <td className={`text-right font-mono ${childPending > 0.001 ? "text-amber-600" : "text-green-600"}`}>{childPending.toFixed(2)}</td>
+                        <td className="font-mono text-[11px] text-blue-700">{c.child_ern_no}</td>
+                      </tr>
+                    );
+                    runningExtra = childPending;
+                  });
                 }
-                const extraQ = parseFloat(it.extra_qty) || 0;
-                const childAcc = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.accepted_qty) || 0), 0,
-                );
-                const childRej = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.rejected_qty) || 0), 0,
-                );
-                const acc = (it.children || []).length > 0
-                  ? childAcc
-                  : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
-                const rej = (it.children || []).length > 0
-                  ? childRej
-                  : (it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0));
-                const undecided = extraQ - (acc || 0) - (rej || 0);
-                return (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td className="text-slate-700">{it.description_1 || "—"}</td>
-                    <td>{it.make}</td>
-                    <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                    <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                    <td className="text-right font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
-                    <td className="text-right font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
-                    <td className="text-right font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
-                    <td className={`text-right font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
-                    <td className="text-right">{renderChildren(it)}</td>
-                  </tr>
-                );
+                return rows;
               })}
             </tbody>
           </table>
         </div>
+
+        {/* Narration */}
+        {doc.narration && (
+          <div className="pt-2">
+            <div className="label-sm">NARRATION</div>
+            <div className="font-mono mt-1 text-sm text-slate-700 whitespace-pre-wrap">{doc.narration}</div>
+          </div>
+        )}
+
+        <DialogFooter className="flex items-center justify-between pt-2">
+          <Button onClick={() => isSrn ? printSrn(doc, me) : printErn(doc, me)}
+            variant="outline" size="sm" className="rounded-sm border-slate-300">
+            <Printer size={14} weight="bold" className="mr-1.5" /> Print
+          </Button>
+          <Button onClick={onClose} variant="outline" size="sm" className="rounded-sm border-slate-300">
+            Close
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-/** SRN finalize/edit form — user enters fulfilled_qty per row + fulfillment_date. */
-function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
-  // Inline-child model: each item has children[]; user clicks (+) to add a row.
+/** SRN entry/edit form — redesigned with grouped table, immediate child numbers, and page-level save. */
+function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved, onOpenRn }) {
   const [parent, setParent] = useState(initialSrn);
-  // Per-item draft: { [itemIdx]: { received_qty, not_receivable_qty } } — appears inline as a new row when user clicks +
-  const [drafts, setDrafts] = useState({});
-  const [editing, setEditing] = useState(null); // { itemIdx, child_srn_no, received_qty, not_receivable_qty }
-  const [busy, setBusy] = useState(false);
+  // pendingChildren: { [itemIdx]: [{ localId, childNo, shortQty, received_qty, not_receivable_qty }] }
+  const [pendingChildren, setPendingChildren] = useState({});
+  const [editingChild, setEditingChild] = useState(null); // { itemIdx, child_srn_no, received_qty, not_receivable_qty }
   const [narration, setNarration] = useState(initialSrn.narration || "");
-  const [savingNarration, setSavingNarration] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const { user: me } = useAuth();
 
   const reload = async () => {
     try {
@@ -2397,65 +2655,136 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     }
   };
 
-  const setDraft = (idx, patch) =>
-    setDrafts((d) => ({ ...d, [idx]: { ...(d[idx] || { received_qty: "", not_receivable_qty: "" }), ...patch } }));
-
-  const startAddChild = (idx) => setDraft(idx, {});
-
-  const cancelAddChild = (idx) =>
-    setDrafts((d) => { const n = { ...d }; delete n[idx]; return n; });
-
-  const totals = (it) => {
-    const children = it.children || [];
-    const rcv = children.reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0);
-    const nrcv = children.reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0);
-    const pending = (parseFloat(it.short_qty) || 0) - rcv - nrcv;
-    return { rcv, nrcv, pending };
+  // Effective pending for an item: accounts for saved + pending (unsaved) children
+  const effectivePending = (item, idx) => {
+    const savedUsed = (item.children || []).reduce(
+      (s, c) => s + (parseFloat(c.received_qty) || 0) + (parseFloat(c.not_receivable_qty) || 0), 0
+    );
+    const pendingUsed = (pendingChildren[idx] || []).reduce(
+      (s, p) => s + (parseFloat(p.received_qty) || 0) + (parseFloat(p.not_receivable_qty) || 0), 0
+    );
+    return Math.max(0, (parseFloat(item.short_qty) || 0) - savedUsed - pendingUsed);
   };
 
-  const saveNewChild = async (idx) => {
-    const it = parent.items[idx];
-    const d = drafts[idx] || {};
-    const rcv = parseFloat(d.received_qty || 0);
-    const nrcv = parseFloat(d.not_receivable_qty || 0);
-    if (!rcv && !nrcv) { toast.error("Enter Received Qty or Not Receivable Qty"); return; }
-    const { pending } = totals(it);
-    if (rcv + nrcv > pending + 1e-6) {
-      toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return;
+  // Summary totals: includes both saved and pending children
+  const summaryRcv = (item, idx) =>
+    (item.children || []).reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0) +
+    (pendingChildren[idx] || []).reduce((s, p) => s + (parseFloat(p.received_qty) || 0), 0);
+  const summaryNR = (item, idx) =>
+    (item.children || []).reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0) +
+    (pendingChildren[idx] || []).reduce((s, p) => s + (parseFloat(p.not_receivable_qty) || 0), 0);
+
+  // Compute the next available child letter (A, B, C...) for an item
+  const computeNextChildNo = (item, idx) => {
+    const usedLetters = new Set([
+      ...(item.children || []).map(c => { const p = (c.child_srn_no || "").split("-"); return p[p.length - 1]; }),
+      ...(pendingChildren[idx] || []).map(p => { const parts = (p.childNo || "").split("-"); return parts[parts.length - 1]; }),
+    ]);
+    for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+      if (!usedLetters.has(ch)) return `${parent.srn_no}-${ch}`;
     }
+    return null;
+  };
+
+  const handleAddRow = (itemIdx) => {
+    const item = parent.items[itemIdx];
+    const childNo = computeNextChildNo(item, itemIdx);
+    if (!childNo) { toast.error("Maximum child rows reached (26)"); return; }
+    const shortQty = effectivePending(item, itemIdx);
+    if (shortQty <= 0) { toast.error("No pending quantity remaining"); return; }
+    setPendingChildren(prev => ({
+      ...prev,
+      [itemIdx]: [...(prev[itemIdx] || []), {
+        localId: Math.random().toString(36).slice(2),
+        childNo,
+        shortQty,
+        received_qty: "",
+        not_receivable_qty: "",
+      }],
+    }));
+  };
+
+  const updatePendingRow = (itemIdx, rowIdx, field, value) => {
+    setPendingChildren(prev => {
+      const rows = [...(prev[itemIdx] || [])];
+      rows[rowIdx] = { ...rows[rowIdx], [field]: value };
+      return { ...prev, [itemIdx]: rows };
+    });
+  };
+
+  const removePendingRow = (itemIdx, rowIdx) => {
+    setPendingChildren(prev => {
+      const rows = [...(prev[itemIdx] || [])];
+      rows.splice(rowIdx, 1);
+      if (rows.length === 0) {
+        const next = { ...prev };
+        delete next[itemIdx];
+        return next;
+      }
+      return { ...prev, [itemIdx]: rows };
+    });
+  };
+
+  const saveAll = async (isDraft) => {
+    for (const [idx, rows] of Object.entries(pendingChildren)) {
+      for (const r of rows) {
+        const rcv = parseFloat(r.received_qty) || 0;
+        const nrcv = parseFloat(r.not_receivable_qty) || 0;
+        if (!rcv && !nrcv) { toast.error(`Row ${r.childNo}: enter at least one quantity`); return; }
+        if (rcv + nrcv > r.shortQty + 1e-6) { toast.error(`Row ${r.childNo}: sum exceeds pending qty (${r.shortQty.toFixed(2)})`); return; }
+      }
+    }
+    const hasPending = Object.values(pendingChildren).some(rows => rows.length > 0);
+    const hasNarrationChange = narration !== (parent.narration || "");
+    if (!hasPending && !hasNarrationChange) { toast.error("Nothing to save"); return; }
     setBusy(true);
     try {
-      const res = await api.post(`/short-received-notes/${parent.id}/children`, {
-        part_no: it.part_no, make: it.make,
-        received_qty: rcv, not_receivable_qty: nrcv,
-      });
-      const autoRkn = res.headers?.["x-auto-rkn-no"];
-      if (autoRkn) toast.success(`Child row added — ${autoRkn} auto-created for racking`);
-      else toast.success("Child row added");
-      cancelAddChild(idx);
-      await reload();
+      for (const [idx, rows] of Object.entries(pendingChildren)) {
+        const item = parent.items[+idx];
+        for (const r of rows) {
+          const res = await api.post(`/short-received-notes/${parent.id}/children`, {
+            part_no: item.part_no, make: item.make,
+            received_qty: parseFloat(r.received_qty) || 0,
+            not_receivable_qty: parseFloat(r.not_receivable_qty) || 0,
+            is_draft: isDraft,
+          });
+          if (!isDraft) {
+            const autoRkn = res.headers?.["x-auto-rkn-no"];
+            if (autoRkn) toast.success(`${r.childNo} saved — ${autoRkn} auto-created for racking`);
+          }
+        }
+      }
+      if (hasNarrationChange) {
+        await api.patch(`/short-received-notes/${parent.id}/narration`, { narration: narration.trim() });
+      }
+      setPendingChildren({});
+      const { data } = await api.get(`/short-received-notes/${parent.id}`);
+      setParent(data);
+      toast.success(isDraft
+        ? "Saved as draft — rows are editable, no racking note created"
+        : "Saved final — rows are locked, racking note auto-created");
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not add row");
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
     } finally { setBusy(false); }
   };
 
-  const saveEdit = async () => {
-    if (!editing) return;
-    const { itemIdx, child_srn_no, received_qty, not_receivable_qty } = editing;
-    const it = parent.items[itemIdx];
-    const rcv = parseFloat(received_qty || 0);
-    const nrcv = parseFloat(not_receivable_qty || 0);
-    if (!rcv && !nrcv) { toast.error("Enter Received or Not Receivable Qty"); return; }
+  const saveEditedChild = async () => {
+    if (!editingChild) return;
+    const { itemIdx, child_srn_no, received_qty, not_receivable_qty } = editingChild;
+    const item = parent.items[itemIdx];
+    const rcv = parseFloat(received_qty) || 0;
+    const nrcv = parseFloat(not_receivable_qty) || 0;
+    if (!rcv && !nrcv) { toast.error("Enter at least one quantity"); return; }
     setBusy(true);
     try {
       const res = await api.put(
         `/short-received-notes/${parent.id}/children/${encodeURIComponent(child_srn_no)}`,
-        { part_no: it.part_no, make: it.make, received_qty: rcv, not_receivable_qty: nrcv },
+        { part_no: item.part_no, make: item.make, received_qty: rcv, not_receivable_qty: nrcv, is_draft: false },
       );
       const autoRkn = res.headers?.["x-auto-rkn-no"];
       if (autoRkn) toast.success(`Row updated — ${autoRkn} auto-created for racking`);
       else toast.success("Row updated");
-      setEditing(null);
+      setEditingChild(null);
       await reload();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
@@ -2474,211 +2803,230 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     } finally { setBusy(false); }
   };
 
-  const saveNarration = async () => {
-    setSavingNarration(true);
-    try {
-      await api.patch(`/short-received-notes/${parent.id}/narration`, { narration: narration.trim() });
-      toast.success("Narration saved");
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not save narration");
-    } finally { setSavingNarration(false); }
-  };
-
+  const hasPendingRows = Object.values(pendingChildren).some(rows => rows.length > 0);
+  const hasNarrationChange = narration !== (parent.narration || "");
+  const canSave = hasPendingRows || hasNarrationChange;
   const meta = statusMeta(parent.status);
 
   return (
     <div className="mt-4 space-y-6" data-testid="srn-finalize-view">
+      {/* TOP BAR */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="srn-back">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <Button onClick={onSaved} variant="outline"
-          className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50" data-testid="srn-done">
-          <CheckCircle size={14} weight="bold" className="mr-2" /> Done
+        <Button onClick={() => printSrn(parent, me)} variant="outline" className="rounded-sm border-slate-300">
+          <Printer size={14} weight="bold" className="mr-2" /> Print
         </Button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Detail k="SRN Date" v={fmtDate(parent.srn_date)} />
-        <Detail k="SRN No" v={parent.srn_no} />
-        <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
-        <Detail k="Invoice No" v={parent.invoice_no || "—"} />
-        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
+      {/* HEADER SECTION */}
+      <div className="bg-white border border-slate-200 rounded-sm p-6 space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+          <Detail k="RECEIPT NOTE DATE" v={fmtDate(parent.parent_rn_date)} />
+          <div>
+            <div className="label-sm">RECEIPT NOTE NO</div>
+            <button onClick={() => onOpenRn?.(parent.parent_rn_id)}
+              className="font-mono mt-1 text-blue-700 hover:underline text-sm" data-testid="srn-open-rn">
+              {parent.parent_rn_no || "—"}
+            </button>
+          </div>
+          <Detail k="SRN DATE" v={fmtDate(parent.srn_date)} />
+          <Detail k="SRN NO" v={parent.srn_no} />
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 pt-3 border-t border-slate-100">
+          <Detail k="ASSIGNED TO" v={parent.assigned_to_name || parent.assigned_to_email || "—"} />
+          <div>
+            <div className="label-sm">STATUS</div>
+            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm mt-1 inline-block ${meta.cls}`}>
+              {meta.label}
+            </span>
+          </div>
+        </div>
       </div>
 
+      {/* ITEMS TABLE */}
       <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 label-sm flex items-center justify-between">
-          <span>SHORT ITEMS — Click + to add a fulfillment row as material arrives</span>
-          <span className="text-[11px] text-slate-500 normal-case">Each row is a Child SRN (PARENT-A, PARENT-B…). Only Received Qty is rackable.</span>
-        </div>
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-8">#</th>
-              <th className="w-44">PART NO</th>
+              <th className="w-10">SL NO</th>
+              <th className="w-36">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-20 text-right">SHORT QTY</th>
-              <th className="w-24 text-right">TOTAL RCVD</th>
-              <th className="w-24 text-right">TOTAL N/R</th>
-              <th className="w-20 text-right">PENDING</th>
-              <th className="w-28">CHILD NO</th>
-              <th className="w-32">RECEIVED QTY</th>
-              <th className="w-32">NOT RECEIVABLE</th>
-              <th className="w-24 text-right">ACTION</th>
+              <th className="w-28">MAKE</th>
+              <th className="w-24 text-right">SHORT QTY</th>
+              <th className="w-28 text-right">RECEIVED QTY</th>
+              <th className="w-24 text-right">NR QTY</th>
+              <th className="w-24 text-right">PENDING QTY</th>
+              <th className="w-36">CHILD SRN NO</th>
+              <th className="w-20 text-center">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {(parent.items || []).flatMap((it, idx) => {
-              const { rcv, nrcv, pending } = totals(it);
+            {(parent.items || []).flatMap((item, idx) => {
               const rows = [];
+              const sPending = effectivePending(item, idx);
+              const sRcv = summaryRcv(item, idx);
+              const sNR = summaryNR(item, idx);
 
-              // Header row showing the parent item + Add (+) button
+              // Summary Row (read-only)
               rows.push(
-                <tr key={`h-${idx}`} className="bg-slate-50">
-                  <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
-                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                  <td className="text-xs text-slate-700 truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono font-bold text-red-700">{(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-green-700">{rcv.toFixed(2)}</td>
-                  <td className="text-right font-mono text-slate-700">{nrcv.toFixed(2)}</td>
-                  <td className={`text-right font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                  <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
-                  <td className="text-right">
-                    {pending > 1e-6 && drafts[idx] === undefined && (
-                      <button onClick={() => startAddChild(idx)} disabled={busy}
-                        className="bg-blue-700 text-white hover:bg-blue-800 px-2 py-1 rounded-sm text-xs font-bold inline-flex items-center"
-                        data-testid={`srn-add-child-${idx}`}>
-                        <Plus size={12} weight="bold" className="mr-1" /> Add
+                <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td><PartNoLink partNo={item.part_no} make={item.make} /></td>
+                  <td className="text-xs text-slate-700 truncate max-w-[200px]" title={item.description_1}>{item.description_1 || "—"}</td>
+                  <td className="text-xs text-slate-700">{item.make}</td>
+                  <td className="text-right font-mono text-red-700">{(parseFloat(item.short_qty) || 0).toFixed(2)}</td>
+                  <td className="text-right font-mono text-green-700">{sRcv.toFixed(2)}</td>
+                  <td className="text-right font-mono text-slate-600">{sNR.toFixed(2)}</td>
+                  <td className={`text-right font-mono ${sPending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{sPending.toFixed(2)}</td>
+                  <td className="text-slate-400 font-mono text-xs">—</td>
+                  <td className="text-center">
+                    {sPending > 1e-6 && (
+                      <button onClick={() => handleAddRow(idx)} disabled={busy}
+                        className="p-1.5 rounded-sm text-blue-700 hover:bg-blue-50" title="Add child row"
+                        data-testid={`srn-add-${idx}`}>
+                        <Plus size={14} weight="bold" />
                       </button>
                     )}
                   </td>
                 </tr>
               );
 
-              // Saved children
-              (it.children || []).forEach((c, ci) => {
-                const isEdit = editing && editing.child_srn_no === c.child_srn_no;
+              // Saved child rows with running short qty chain
+              let runningShort = parseFloat(item.short_qty) || 0;
+              (item.children || []).forEach((c, ci) => {
+                const childShort = runningShort;
+                const childRcv = parseFloat(c.received_qty) || 0;
+                const childNR = parseFloat(c.not_receivable_qty) || 0;
+                const childPending = Math.max(0, childShort - childRcv - childNR);
+                runningShort = childPending;
+                const isEdit = editingChild && editingChild.child_srn_no === c.child_srn_no;
+                const isDraftRow = c.finalized === false;
+
                 rows.push(
-                  <tr key={`${idx}-c-${ci}`} className="bg-green-50/30" data-testid={`srn-row-${idx}-${ci}`}>
-                    <td className="font-mono text-slate-400 text-[10px]">{idx + 1}.{ci + 1}</td>
-                    <td colSpan={6} className="text-xs text-slate-500 pl-8">
-                      <span className="text-slate-400">└─ </span>
-                      <span className="font-mono text-blue-700">{c.child_srn_no}</span>
-                      <span className="ml-2 text-[10px] text-slate-500">({fmtDate(c.created_at)})</span>
+                  <tr key={`saved-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/40"}
+                    data-testid={`srn-saved-${idx}-${ci}`}>
+                    <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
+                    <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                      <span className="text-slate-300">└ </span>
+                      <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                        {isDraftRow ? "Draft" : "Final"}
+                      </span>
                     </td>
-                    <td className="font-mono text-blue-700 text-xs">{c.child_srn_no}</td>
-                    <td>
+                    <td className="text-right font-mono text-slate-500 text-xs">{childShort.toFixed(2)}</td>
+                    <td className="text-right">
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.received_qty}
-                          onChange={(e) => setEditing({ ...editing, received_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
-                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.received_qty) || 0).toFixed(2)}</span>}
-                    </td>
-                    <td>
-                      {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.not_receivable_qty}
-                          onChange={(e) => setEditing({ ...editing, not_receivable_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
-                      ) : <span className="font-mono text-slate-700">{(parseFloat(c.not_receivable_qty) || 0).toFixed(2)}</span>}
+                        <Input type="number" min="0" step="any" value={editingChild.received_qty}
+                          onChange={e => setEditingChild({...editingChild, received_qty: e.target.value})}
+                          className="rounded-sm font-mono h-7 text-right w-28" />
+                      ) : <span className="font-mono font-semibold text-green-800">{childRcv.toFixed(2)}</span>}
                     </td>
                     <td className="text-right">
                       {isEdit ? (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={saveEdit} disabled={busy}
-                            className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                            data-testid={`srn-row-save-${idx}-${ci}`}>
-                            <FloppyDisk size={14} weight="bold" />
+                        <Input type="number" min="0" step="any" value={editingChild.not_receivable_qty}
+                          onChange={e => setEditingChild({...editingChild, not_receivable_qty: e.target.value})}
+                          className="rounded-sm font-mono h-7 text-right w-28" />
+                      ) : <span className="font-mono text-slate-600">{childNR.toFixed(2)}</span>}
+                    </td>
+                    <td className={`text-right font-mono text-xs ${childPending > 0.0001 ? "text-amber-600" : "text-green-600"}`}>{childPending.toFixed(2)}</td>
+                    <td className="font-mono text-[11px] text-blue-700">{c.child_srn_no}</td>
+                    <td className="text-center">
+                      {isEdit ? (
+                        <div className="flex gap-1 justify-center">
+                          <button onClick={saveEditedChild} disabled={busy}
+                            className="p-1.5 text-green-700 hover:bg-green-50 rounded-sm" title="Save edit">
+                            <FloppyDisk size={13} weight="bold" />
                           </button>
-                          <button onClick={() => setEditing(null)} disabled={busy}
-                            className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel">
-                            <X size={14} weight="bold" />
+                          <button onClick={() => setEditingChild(null)} disabled={busy}
+                            className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-sm" title="Cancel">
+                            <X size={13} weight="bold" />
                           </button>
                         </div>
-                      ) : (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={() => setEditing({
+                      ) : isDraftRow ? (
+                        <div className="flex gap-1 justify-center">
+                          <button onClick={() => setEditingChild({
                             itemIdx: idx, child_srn_no: c.child_srn_no,
                             received_qty: c.received_qty, not_receivable_qty: c.not_receivable_qty,
                           })} disabled={busy}
-                            className="text-blue-700 hover:bg-blue-100 p-1 rounded-sm" title="Edit"
+                            className="p-1.5 text-blue-700 hover:bg-blue-50 rounded-sm" title="Edit"
                             data-testid={`srn-row-edit-${idx}-${ci}`}>
-                            <PencilSimple size={14} weight="bold" />
+                            <PencilSimple size={13} weight="bold" />
                           </button>
                           <button onClick={() => deleteChild(c.child_srn_no)} disabled={busy}
-                            className="text-red-700 hover:bg-red-100 p-1 rounded-sm" title="Delete"
+                            className="p-1.5 text-red-700 hover:bg-red-50 rounded-sm" title="Delete"
                             data-testid={`srn-row-del-${idx}-${ci}`}>
-                            <Trash size={14} weight="bold" />
+                            <Trash size={13} weight="bold" />
                           </button>
                         </div>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 );
               });
 
-              // Inline draft row for adding a new child
-              if (drafts[idx] !== undefined) {
-                const d = drafts[idx];
+              // Pending (unsaved) new child rows
+              (pendingChildren[idx] || []).forEach((row, ri) => {
+                const pendingRcv = parseFloat(row.received_qty) || 0;
+                const pendingNR = parseFloat(row.not_receivable_qty) || 0;
+                const pendingQty = Math.max(0, row.shortQty - pendingRcv - pendingNR);
                 rows.push(
-                  <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`srn-draft-${idx}`}>
-                    <td className="font-mono text-blue-600 text-[10px]">+</td>
-                    <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
-                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
+                  <tr key={`pend-${idx}-${ri}`} className="bg-blue-50/60" data-testid={`srn-pending-${idx}-${ri}`}>
+                    <td className="font-mono text-blue-500 text-[10px] pl-4">{idx + 1}.{(item.children || []).length + ri + 1}</td>
+                    <td colSpan={3} className="text-xs text-blue-600 pl-4 italic">
+                      <span className="text-slate-300">└ </span>
+                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm bg-blue-100 text-blue-800">New</span>
                     </td>
-                    <td className="font-mono text-slate-400 italic text-xs">auto…</td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.received_qty || ""}
-                        onChange={(e) => setDraft(idx, { received_qty: e.target.value })}
+                    <td className="text-right font-mono text-slate-500 text-xs">{row.shortQty.toFixed(2)}</td>
+                    <td className="text-right">
+                      <Input type="number" min="0" step="any" max={row.shortQty}
+                        value={row.received_qty}
+                        onChange={e => updatePendingRow(idx, ri, "received_qty", e.target.value)}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
-                        data-testid={`srn-input-rcv-${idx}`} />
-                    </td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.not_receivable_qty || ""}
-                        onChange={(e) => setDraft(idx, { not_receivable_qty: e.target.value })}
-                        placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
-                        data-testid={`srn-input-nrcv-${idx}`} />
+                        className="rounded-sm font-mono h-8 text-right w-28"
+                        data-testid={`srn-pend-rcv-${idx}-${ri}`} />
                     </td>
                     <td className="text-right">
-                      <div className="flex gap-1 justify-end">
-                        <button onClick={() => saveNewChild(idx)} disabled={busy}
-                          className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                          data-testid={`srn-draft-save-${idx}`}>
-                          <FloppyDisk size={14} weight="bold" />
+                      <Input type="number" min="0" step="any" max={row.shortQty}
+                        value={row.not_receivable_qty}
+                        onChange={e => updatePendingRow(idx, ri, "not_receivable_qty", e.target.value)}
+                        placeholder="0"
+                        className="rounded-sm font-mono h-8 text-right w-28"
+                        data-testid={`srn-pend-nrcv-${idx}-${ri}`} />
+                    </td>
+                    <td className={`text-right font-mono text-xs ${pendingQty > 0.0001 ? "text-amber-600" : "text-green-600"}`}>{pendingQty.toFixed(2)}</td>
+                    <td className="font-mono text-[11px] text-blue-700">{row.childNo}</td>
+                    <td className="text-center">
+                      <div className="flex gap-1 justify-center">
+                        <button onClick={() => handleAddRow(idx)} disabled={busy || pendingQty <= 0}
+                          className={`p-1.5 rounded-sm ${pendingQty > 0 ? "text-blue-700 hover:bg-blue-100" : "text-slate-300 cursor-not-allowed"}`}
+                          title="Add another row">
+                          <Plus size={13} weight="bold" />
                         </button>
-                        <button onClick={() => cancelAddChild(idx)} disabled={busy}
-                          className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel"
-                          data-testid={`srn-draft-cancel-${idx}`}>
-                          <X size={14} weight="bold" />
+                        <button onClick={() => removePendingRow(idx, ri)} disabled={busy}
+                          className="p-1.5 text-red-700 hover:bg-red-50 rounded-sm" title="Remove">
+                          <Trash size={13} weight="bold" />
                         </button>
                       </div>
                     </td>
                   </tr>
                 );
-              }
+              });
+
               return rows;
             })}
           </tbody>
         </table>
-        <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
-          <strong>How this works:</strong> Click <strong>+ Add</strong> to record a fulfillment batch.
-          Each batch becomes a Child SRN ({parent.srn_no}-A, -B, -C…). <em>Received Qty</em> is rackable;
-          <em> Not Receivable Qty</em> is recorded but won't count toward racking. Status auto-flips to
-          <strong> COMPLETE</strong> when Total Received + Total Not Receivable = Short Qty.
-        </div>
       </div>
 
-      {/* NARRATION + SAVE BAR */}
+      {/* NARRATION + SAVE BUTTONS */}
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-start justify-between gap-4 p-4">
           <div className="flex-1 max-w-sm">
-            <label className="label-sm block mb-1.5">Narration</label>
+            <label className="label-sm block mb-1.5">NARRATION</label>
             <textarea
               value={narration}
-              onChange={(e) => setNarration(e.target.value)}
+              onChange={e => setNarration(e.target.value)}
               placeholder="Optional narration…"
               rows={2}
               className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -2686,9 +3034,18 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
             />
           </div>
           <div className="flex items-center gap-2 pt-7">
-            <Button onClick={saveNarration} disabled={savingNarration || busy} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="srn-save-narration">
+            <Button onClick={() => saveAll(true)} disabled={busy || !canSave}
+              variant="outline"
+              className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50 disabled:border-slate-300 disabled:text-slate-400"
+              data-testid="srn-save-draft">
               <FloppyDisk size={14} weight="bold" className="mr-2" />
-              {savingNarration ? "Saving…" : "Save SRN"}
+              {busy ? "Saving…" : "SAVE AS DRAFT"}
+            </Button>
+            <Button onClick={() => saveAll(false)} disabled={busy || !canSave}
+              className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+              data-testid="srn-save-final">
+              <CheckCircle size={14} weight="bold" className="mr-2" />
+              {busy ? "Saving…" : "SAVE FINAL"}
             </Button>
           </div>
         </div>
@@ -2696,13 +3053,14 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     </div>
   );
 }
-function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
+/** ERN entry/edit form — mirror of SrnFinalizeForm with ERN-specific columns. */
+function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved, onOpenRn }) {
   const [parent, setParent] = useState(initialErn);
-  const [drafts, setDrafts] = useState({});
-  const [editing, setEditing] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [pendingChildren, setPendingChildren] = useState({});
+  const [editingChild, setEditingChild] = useState(null);
   const [narration, setNarration] = useState(initialErn.narration || "");
-  const [savingNarration, setSavingNarration] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const { user: me } = useAuth();
 
   const reload = async () => {
     try {
@@ -2713,59 +3071,126 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     }
   };
 
-  const setDraft = (idx, patch) =>
-    setDrafts((d) => ({ ...d, [idx]: { ...(d[idx] || { accepted_qty: "", rejected_qty: "" }), ...patch } }));
-  const startAdd = (idx) => setDraft(idx, {});
-  const cancelAdd = (idx) => setDrafts((d) => { const n = { ...d }; delete n[idx]; return n; });
-
-  const totals = (it) => {
-    const children = it.children || [];
-    const acc = children.reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
-    const rej = children.reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
-    const pending = (parseFloat(it.extra_qty) || 0) - acc - rej;
-    return { acc, rej, pending };
+  const effectivePending = (item, idx) => {
+    const savedUsed = (item.children || []).reduce(
+      (s, c) => s + (parseFloat(c.accepted_qty) || 0) + (parseFloat(c.rejected_qty) || 0), 0
+    );
+    const pendingUsed = (pendingChildren[idx] || []).reduce(
+      (s, p) => s + (parseFloat(p.accepted_qty) || 0) + (parseFloat(p.rejected_qty) || 0), 0
+    );
+    return Math.max(0, (parseFloat(item.extra_qty) || 0) - savedUsed - pendingUsed);
   };
 
-  const saveNew = async (idx) => {
-    const it = parent.items[idx];
-    const d = drafts[idx] || {};
-    const acc = parseFloat(d.accepted_qty || 0);
-    const rej = parseFloat(d.rejected_qty || 0);
-    if (!acc && !rej) { toast.error("Enter Accepted Qty or Rejected Qty"); return; }
-    const { pending } = totals(it);
-    if (acc + rej > pending + 1e-6) { toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return; }
+  const summaryAcc = (item, idx) =>
+    (item.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0) +
+    (pendingChildren[idx] || []).reduce((s, p) => s + (parseFloat(p.accepted_qty) || 0), 0);
+  const summaryRej = (item, idx) =>
+    (item.children || []).reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0) +
+    (pendingChildren[idx] || []).reduce((s, p) => s + (parseFloat(p.rejected_qty) || 0), 0);
+
+  const computeNextChildNo = (item, idx) => {
+    const usedLetters = new Set([
+      ...(item.children || []).map(c => { const p = (c.child_ern_no || "").split("-"); return p[p.length - 1]; }),
+      ...(pendingChildren[idx] || []).map(p => { const parts = (p.childNo || "").split("-"); return parts[parts.length - 1]; }),
+    ]);
+    for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+      if (!usedLetters.has(ch)) return `${parent.ern_no}-${ch}`;
+    }
+    return null;
+  };
+
+  const handleAddRow = (itemIdx) => {
+    const item = parent.items[itemIdx];
+    const childNo = computeNextChildNo(item, itemIdx);
+    if (!childNo) { toast.error("Maximum child rows reached (26)"); return; }
+    const extraQty = effectivePending(item, itemIdx);
+    if (extraQty <= 0) { toast.error("No pending quantity remaining"); return; }
+    setPendingChildren(prev => ({
+      ...prev,
+      [itemIdx]: [...(prev[itemIdx] || []), {
+        localId: Math.random().toString(36).slice(2),
+        childNo, extraQty, accepted_qty: "", rejected_qty: "",
+      }],
+    }));
+  };
+
+  const updatePendingRow = (itemIdx, rowIdx, field, value) => {
+    setPendingChildren(prev => {
+      const rows = [...(prev[itemIdx] || [])];
+      rows[rowIdx] = { ...rows[rowIdx], [field]: value };
+      return { ...prev, [itemIdx]: rows };
+    });
+  };
+
+  const removePendingRow = (itemIdx, rowIdx) => {
+    setPendingChildren(prev => {
+      const rows = [...(prev[itemIdx] || [])];
+      rows.splice(rowIdx, 1);
+      if (rows.length === 0) { const n = { ...prev }; delete n[itemIdx]; return n; }
+      return { ...prev, [itemIdx]: rows };
+    });
+  };
+
+  const saveAll = async (isDraft) => {
+    for (const [idx, rows] of Object.entries(pendingChildren)) {
+      for (const r of rows) {
+        const acc = parseFloat(r.accepted_qty) || 0;
+        const rej = parseFloat(r.rejected_qty) || 0;
+        if (!acc && !rej) { toast.error(`Row ${r.childNo}: enter at least one quantity`); return; }
+        if (acc + rej > r.extraQty + 1e-6) { toast.error(`Row ${r.childNo}: sum exceeds pending qty (${r.extraQty.toFixed(2)})`); return; }
+      }
+    }
+    const hasPending = Object.values(pendingChildren).some(rows => rows.length > 0);
+    const hasNarrationChange = narration !== (parent.narration || "");
+    if (!hasPending && !hasNarrationChange) { toast.error("Nothing to save"); return; }
     setBusy(true);
     try {
-      const res = await api.post(`/extra-received-notes/${parent.id}/children`, {
-        part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej,
-      });
-      const autoRkn = res.headers?.["x-auto-rkn-no"];
-      if (autoRkn) toast.success(`Child row added — ${autoRkn} auto-created for racking`);
-      else toast.success("Child row added");
-      cancelAdd(idx);
-      await reload();
+      for (const [idx, rows] of Object.entries(pendingChildren)) {
+        const item = parent.items[+idx];
+        for (const r of rows) {
+          const res = await api.post(`/extra-received-notes/${parent.id}/children`, {
+            part_no: item.part_no, make: item.make,
+            accepted_qty: parseFloat(r.accepted_qty) || 0,
+            rejected_qty: parseFloat(r.rejected_qty) || 0,
+            is_draft: isDraft,
+          });
+          if (!isDraft) {
+            const autoRkn = res.headers?.["x-auto-rkn-no"];
+            if (autoRkn) toast.success(`${r.childNo} saved — ${autoRkn} auto-created for racking`);
+          }
+        }
+      }
+      if (hasNarrationChange) {
+        await api.patch(`/extra-received-notes/${parent.id}/narration`, { narration: narration.trim() });
+      }
+      setPendingChildren({});
+      const { data } = await api.get(`/extra-received-notes/${parent.id}`);
+      setParent(data);
+      toast.success(isDraft
+        ? "Saved as draft — rows are editable, no racking note created"
+        : "Saved final — rows are locked, racking note auto-created");
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not add row");
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
     } finally { setBusy(false); }
   };
 
-  const saveEdit = async () => {
-    if (!editing) return;
-    const { itemIdx, child_ern_no, accepted_qty, rejected_qty } = editing;
-    const it = parent.items[itemIdx];
-    const acc = parseFloat(accepted_qty || 0);
-    const rej = parseFloat(rejected_qty || 0);
-    if (!acc && !rej) { toast.error("Enter Accepted or Rejected Qty"); return; }
+  const saveEditedChild = async () => {
+    if (!editingChild) return;
+    const { itemIdx, child_ern_no, accepted_qty, rejected_qty } = editingChild;
+    const item = parent.items[itemIdx];
+    const acc = parseFloat(accepted_qty) || 0;
+    const rej = parseFloat(rejected_qty) || 0;
+    if (!acc && !rej) { toast.error("Enter at least one quantity"); return; }
     setBusy(true);
     try {
       const res = await api.put(
         `/extra-received-notes/${parent.id}/children/${encodeURIComponent(child_ern_no)}`,
-        { part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej },
+        { part_no: item.part_no, make: item.make, accepted_qty: acc, rejected_qty: rej, is_draft: false },
       );
       const autoRkn = res.headers?.["x-auto-rkn-no"];
       if (autoRkn) toast.success(`Row updated — ${autoRkn} auto-created for racking`);
       else toast.success("Row updated");
-      setEditing(null);
+      setEditingChild(null);
       await reload();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
@@ -2784,205 +3209,230 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     } finally { setBusy(false); }
   };
 
-  const saveNarration = async () => {
-    setSavingNarration(true);
-    try {
-      await api.patch(`/extra-received-notes/${parent.id}/narration`, { narration: narration.trim() });
-      toast.success("Narration saved");
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not save narration");
-    } finally { setSavingNarration(false); }
-  };
-
+  const hasPendingRows = Object.values(pendingChildren).some(rows => rows.length > 0);
+  const hasNarrationChange = narration !== (parent.narration || "");
+  const canSave = hasPendingRows || hasNarrationChange;
   const meta = statusMeta(parent.status);
 
   return (
     <div className="mt-4 space-y-6" data-testid="ern-finalize-view">
+      {/* TOP BAR */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="ern-back">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <Button onClick={onSaved} variant="outline"
-          className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50" data-testid="ern-done">
-          <CheckCircle size={14} weight="bold" className="mr-2" /> Done
+        <Button onClick={() => printErn(parent, me)} variant="outline" className="rounded-sm border-slate-300">
+          <Printer size={14} weight="bold" className="mr-2" /> Print
         </Button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Detail k="ERN Date" v={fmtDate(parent.ern_date)} />
-        <Detail k="ERN No" v={parent.ern_no} />
-        <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
-        <Detail k="Invoice No" v={parent.invoice_no || "—"} />
-        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
+      {/* HEADER SECTION */}
+      <div className="bg-white border border-slate-200 rounded-sm p-6 space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+          <Detail k="RECEIPT NOTE DATE" v={fmtDate(parent.parent_rn_date)} />
+          <div>
+            <div className="label-sm">RECEIPT NOTE NO</div>
+            <button onClick={() => onOpenRn?.(parent.parent_rn_id)}
+              className="font-mono mt-1 text-blue-700 hover:underline text-sm" data-testid="ern-open-rn">
+              {parent.parent_rn_no || "—"}
+            </button>
+          </div>
+          <Detail k="ERN DATE" v={fmtDate(parent.ern_date)} />
+          <Detail k="ERN NO" v={parent.ern_no} />
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 pt-3 border-t border-slate-100">
+          <Detail k="ASSIGNED TO" v={parent.assigned_to_name || parent.assigned_to_email || "—"} />
+          <div>
+            <div className="label-sm">STATUS</div>
+            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm mt-1 inline-block ${meta.cls}`}>
+              {meta.label}
+            </span>
+          </div>
+        </div>
       </div>
 
+      {/* ITEMS TABLE */}
       <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 label-sm flex items-center justify-between">
-          <span>EXTRA ITEMS — Click + to add an accept/reject decision row</span>
-          <span className="text-[11px] text-slate-500 normal-case">Each row is a Child ERN (PARENT-A, -B…). Only Accepted Qty is rackable.</span>
-        </div>
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-8">#</th>
-              <th className="w-44">PART NO</th>
+              <th className="w-10">SL NO</th>
+              <th className="w-36">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-20 text-right">EXTRA</th>
-              <th className="w-24 text-right">TOTAL ACC</th>
-              <th className="w-24 text-right">TOTAL REJ</th>
-              <th className="w-20 text-right">PENDING</th>
-              <th className="w-28">CHILD NO</th>
-              <th className="w-32">ACCEPTED QTY</th>
-              <th className="w-32">REJECTED QTY</th>
-              <th className="w-24 text-right">ACTION</th>
+              <th className="w-28">MAKE</th>
+              <th className="w-24 text-right">EXTRA QTY</th>
+              <th className="w-28 text-right">ACCEPTED QTY</th>
+              <th className="w-24 text-right">REJECTED QTY</th>
+              <th className="w-24 text-right">PENDING QTY</th>
+              <th className="w-36">CHILD ERN NO</th>
+              <th className="w-20 text-center">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            {(parent.items || []).flatMap((it, idx) => {
-              const { acc, rej, pending } = totals(it);
+            {(parent.items || []).flatMap((item, idx) => {
               const rows = [];
+              const sPending = effectivePending(item, idx);
+              const sAcc = summaryAcc(item, idx);
+              const sRej = summaryRej(item, idx);
+
+              // Summary Row (read-only)
               rows.push(
-                <tr key={`h-${idx}`} className="bg-slate-50">
-                  <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
-                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                  <td className="text-xs text-slate-700 truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono font-bold text-amber-700">{(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-green-700">{acc.toFixed(2)}</td>
-                  <td className="text-right font-mono text-red-700">{rej.toFixed(2)}</td>
-                  <td className={`text-right font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                  <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
-                  <td className="text-right">
-                    {pending > 1e-6 && drafts[idx] === undefined && (
-                      <button onClick={() => startAdd(idx)} disabled={busy}
-                        className="bg-blue-700 text-white hover:bg-blue-800 px-2 py-1 rounded-sm text-xs font-bold inline-flex items-center"
-                        data-testid={`ern-add-child-${idx}`}>
-                        <Plus size={12} weight="bold" className="mr-1" /> Add
+                <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
+                  <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td><PartNoLink partNo={item.part_no} make={item.make} /></td>
+                  <td className="text-xs text-slate-700 truncate max-w-[200px]" title={item.description_1}>{item.description_1 || "—"}</td>
+                  <td className="text-xs text-slate-700">{item.make}</td>
+                  <td className="text-right font-mono text-amber-700">{(parseFloat(item.extra_qty) || 0).toFixed(2)}</td>
+                  <td className="text-right font-mono text-green-700">{sAcc.toFixed(2)}</td>
+                  <td className="text-right font-mono text-red-700">{sRej.toFixed(2)}</td>
+                  <td className={`text-right font-mono ${sPending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{sPending.toFixed(2)}</td>
+                  <td className="text-slate-400 font-mono text-xs">—</td>
+                  <td className="text-center">
+                    {sPending > 1e-6 && (
+                      <button onClick={() => handleAddRow(idx)} disabled={busy}
+                        className="p-1.5 rounded-sm text-blue-700 hover:bg-blue-50" title="Add child row"
+                        data-testid={`ern-add-${idx}`}>
+                        <Plus size={14} weight="bold" />
                       </button>
                     )}
                   </td>
                 </tr>
               );
-              (it.children || []).forEach((c, ci) => {
-                const isEdit = editing && editing.child_ern_no === c.child_ern_no;
+
+              // Saved child rows with running extra qty chain
+              let runningExtra = parseFloat(item.extra_qty) || 0;
+              (item.children || []).forEach((c, ci) => {
+                const childExtra = runningExtra;
+                const childAcc = parseFloat(c.accepted_qty) || 0;
+                const childRej = parseFloat(c.rejected_qty) || 0;
+                const childPending = Math.max(0, childExtra - childAcc - childRej);
+                runningExtra = childPending;
+                const isEdit = editingChild && editingChild.child_ern_no === c.child_ern_no;
+                const isDraftRow = c.finalized === false;
+
                 rows.push(
-                  <tr key={`${idx}-c-${ci}`} className="bg-green-50/30" data-testid={`ern-row-${idx}-${ci}`}>
-                    <td className="font-mono text-slate-400 text-[10px]">{idx + 1}.{ci + 1}</td>
-                    <td colSpan={6} className="text-xs text-slate-500 pl-8">
-                      <span className="text-slate-400">└─ </span>
-                      <span className="font-mono text-blue-700">{c.child_ern_no}</span>
-                      <span className="ml-2 text-[10px] text-slate-500">({fmtDate(c.created_at)})</span>
+                  <tr key={`saved-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/40"}
+                    data-testid={`ern-saved-${idx}-${ci}`}>
+                    <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
+                    <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                      <span className="text-slate-300">└ </span>
+                      <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                        {isDraftRow ? "Draft" : "Final"}
+                      </span>
                     </td>
-                    <td className="font-mono text-blue-700 text-xs">{c.child_ern_no}</td>
-                    <td>
+                    <td className="text-right font-mono text-slate-500 text-xs">{childExtra.toFixed(2)}</td>
+                    <td className="text-right">
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.accepted_qty}
-                          onChange={(e) => setEditing({ ...editing, accepted_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
-                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.accepted_qty) || 0).toFixed(2)}</span>}
-                    </td>
-                    <td>
-                      {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.rejected_qty}
-                          onChange={(e) => setEditing({ ...editing, rejected_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
-                      ) : <span className="font-mono text-red-700">{(parseFloat(c.rejected_qty) || 0).toFixed(2)}</span>}
+                        <Input type="number" min="0" step="any" value={editingChild.accepted_qty}
+                          onChange={e => setEditingChild({...editingChild, accepted_qty: e.target.value})}
+                          className="rounded-sm font-mono h-7 text-right w-28" />
+                      ) : <span className="font-mono font-semibold text-green-800">{childAcc.toFixed(2)}</span>}
                     </td>
                     <td className="text-right">
                       {isEdit ? (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={saveEdit} disabled={busy}
-                            className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                            data-testid={`ern-row-save-${idx}-${ci}`}>
-                            <FloppyDisk size={14} weight="bold" />
+                        <Input type="number" min="0" step="any" value={editingChild.rejected_qty}
+                          onChange={e => setEditingChild({...editingChild, rejected_qty: e.target.value})}
+                          className="rounded-sm font-mono h-7 text-right w-28" />
+                      ) : <span className="font-mono text-red-700">{childRej.toFixed(2)}</span>}
+                    </td>
+                    <td className={`text-right font-mono text-xs ${childPending > 0.0001 ? "text-amber-600" : "text-green-600"}`}>{childPending.toFixed(2)}</td>
+                    <td className="font-mono text-[11px] text-blue-700">{c.child_ern_no}</td>
+                    <td className="text-center">
+                      {isEdit ? (
+                        <div className="flex gap-1 justify-center">
+                          <button onClick={saveEditedChild} disabled={busy}
+                            className="p-1.5 text-green-700 hover:bg-green-50 rounded-sm" title="Save edit">
+                            <FloppyDisk size={13} weight="bold" />
                           </button>
-                          <button onClick={() => setEditing(null)} disabled={busy}
-                            className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel">
-                            <X size={14} weight="bold" />
+                          <button onClick={() => setEditingChild(null)} disabled={busy}
+                            className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-sm" title="Cancel">
+                            <X size={13} weight="bold" />
                           </button>
                         </div>
-                      ) : (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={() => setEditing({
+                      ) : isDraftRow ? (
+                        <div className="flex gap-1 justify-center">
+                          <button onClick={() => setEditingChild({
                             itemIdx: idx, child_ern_no: c.child_ern_no,
                             accepted_qty: c.accepted_qty, rejected_qty: c.rejected_qty,
                           })} disabled={busy}
-                            className="text-blue-700 hover:bg-blue-100 p-1 rounded-sm" title="Edit"
+                            className="p-1.5 text-blue-700 hover:bg-blue-50 rounded-sm" title="Edit"
                             data-testid={`ern-row-edit-${idx}-${ci}`}>
-                            <PencilSimple size={14} weight="bold" />
+                            <PencilSimple size={13} weight="bold" />
                           </button>
                           <button onClick={() => deleteChild(c.child_ern_no)} disabled={busy}
-                            className="text-red-700 hover:bg-red-100 p-1 rounded-sm" title="Delete"
+                            className="p-1.5 text-red-700 hover:bg-red-50 rounded-sm" title="Delete"
                             data-testid={`ern-row-del-${idx}-${ci}`}>
-                            <Trash size={14} weight="bold" />
+                            <Trash size={13} weight="bold" />
                           </button>
                         </div>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 );
               });
-              if (drafts[idx] !== undefined) {
-                const d = drafts[idx];
+
+              // Pending (unsaved) new child rows
+              (pendingChildren[idx] || []).forEach((row, ri) => {
+                const pendingAcc = parseFloat(row.accepted_qty) || 0;
+                const pendingRej = parseFloat(row.rejected_qty) || 0;
+                const pendingQty = Math.max(0, row.extraQty - pendingAcc - pendingRej);
                 rows.push(
-                  <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`ern-draft-${idx}`}>
-                    <td className="font-mono text-blue-600 text-[10px]">+</td>
-                    <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
-                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
+                  <tr key={`pend-${idx}-${ri}`} className="bg-blue-50/60" data-testid={`ern-pending-${idx}-${ri}`}>
+                    <td className="font-mono text-blue-500 text-[10px] pl-4">{idx + 1}.{(item.children || []).length + ri + 1}</td>
+                    <td colSpan={3} className="text-xs text-blue-600 pl-4 italic">
+                      <span className="text-slate-300">└ </span>
+                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm bg-blue-100 text-blue-800">New</span>
                     </td>
-                    <td className="font-mono text-slate-400 italic text-xs">auto…</td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.accepted_qty || ""}
-                        onChange={(e) => setDraft(idx, { accepted_qty: e.target.value })}
+                    <td className="text-right font-mono text-slate-500 text-xs">{row.extraQty.toFixed(2)}</td>
+                    <td className="text-right">
+                      <Input type="number" min="0" step="any" max={row.extraQty}
+                        value={row.accepted_qty}
+                        onChange={e => updatePendingRow(idx, ri, "accepted_qty", e.target.value)}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
-                        data-testid={`ern-input-acc-${idx}`} />
-                    </td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.rejected_qty || ""}
-                        onChange={(e) => setDraft(idx, { rejected_qty: e.target.value })}
-                        placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
-                        data-testid={`ern-input-rej-${idx}`} />
+                        className="rounded-sm font-mono h-8 text-right w-28"
+                        data-testid={`ern-pend-acc-${idx}-${ri}`} />
                     </td>
                     <td className="text-right">
-                      <div className="flex gap-1 justify-end">
-                        <button onClick={() => saveNew(idx)} disabled={busy}
-                          className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                          data-testid={`ern-draft-save-${idx}`}>
-                          <FloppyDisk size={14} weight="bold" />
+                      <Input type="number" min="0" step="any" max={row.extraQty}
+                        value={row.rejected_qty}
+                        onChange={e => updatePendingRow(idx, ri, "rejected_qty", e.target.value)}
+                        placeholder="0"
+                        className="rounded-sm font-mono h-8 text-right w-28"
+                        data-testid={`ern-pend-rej-${idx}-${ri}`} />
+                    </td>
+                    <td className={`text-right font-mono text-xs ${pendingQty > 0.0001 ? "text-amber-600" : "text-green-600"}`}>{pendingQty.toFixed(2)}</td>
+                    <td className="font-mono text-[11px] text-blue-700">{row.childNo}</td>
+                    <td className="text-center">
+                      <div className="flex gap-1 justify-center">
+                        <button onClick={() => handleAddRow(idx)} disabled={busy || pendingQty <= 0}
+                          className={`p-1.5 rounded-sm ${pendingQty > 0 ? "text-blue-700 hover:bg-blue-100" : "text-slate-300 cursor-not-allowed"}`}
+                          title="Add another row">
+                          <Plus size={13} weight="bold" />
                         </button>
-                        <button onClick={() => cancelAdd(idx)} disabled={busy}
-                          className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel"
-                          data-testid={`ern-draft-cancel-${idx}`}>
-                          <X size={14} weight="bold" />
+                        <button onClick={() => removePendingRow(idx, ri)} disabled={busy}
+                          className="p-1.5 text-red-700 hover:bg-red-50 rounded-sm" title="Remove">
+                          <Trash size={13} weight="bold" />
                         </button>
                       </div>
                     </td>
                   </tr>
                 );
-              }
+              });
+
               return rows;
             })}
           </tbody>
         </table>
-        <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
-          <strong>How this works:</strong> Click <strong>+ Add</strong> to record an inspection batch.
-          Each batch becomes a Child ERN ({parent.ern_no}-A, -B…). <em>Accepted Qty</em> is rackable;
-          <em> Rejected Qty</em> is recorded but won't count toward racking. Status auto-flips to
-          <strong> COMPLETE</strong> when Total Accepted + Total Rejected = Extra Qty.
-        </div>
       </div>
 
-      {/* NARRATION + SAVE BAR */}
+      {/* NARRATION + SAVE BUTTONS */}
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-start justify-between gap-4 p-4">
           <div className="flex-1 max-w-sm">
-            <label className="label-sm block mb-1.5">Narration</label>
+            <label className="label-sm block mb-1.5">NARRATION</label>
             <textarea
               value={narration}
-              onChange={(e) => setNarration(e.target.value)}
+              onChange={e => setNarration(e.target.value)}
               placeholder="Optional narration…"
               rows={2}
               className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -2990,9 +3440,18 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
             />
           </div>
           <div className="flex items-center gap-2 pt-7">
-            <Button onClick={saveNarration} disabled={savingNarration || busy} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="ern-save-narration">
+            <Button onClick={() => saveAll(true)} disabled={busy || !canSave}
+              variant="outline"
+              className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50 disabled:border-slate-300 disabled:text-slate-400"
+              data-testid="ern-save-draft">
               <FloppyDisk size={14} weight="bold" className="mr-2" />
-              {savingNarration ? "Saving…" : "Save ERN"}
+              {busy ? "Saving…" : "SAVE AS DRAFT"}
+            </Button>
+            <Button onClick={() => saveAll(false)} disabled={busy || !canSave}
+              className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+              data-testid="ern-save-final">
+              <CheckCircle size={14} weight="bold" className="mr-2" />
+              {busy ? "Saving…" : "SAVE FINAL"}
             </Button>
           </div>
         </div>

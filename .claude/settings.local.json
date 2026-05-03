@@ -16,7 +16,11 @@
       "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")",
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Directory)",
       "Bash(Select-Object Name)",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "PowerShell(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\\" -Recurse -File | Select-Object -ExpandProperty FullName | ForEach-Object { $_ -replace [regex]::Escape\\(\"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\\\\\"\\), \"\" })",
+      "Bash(Get-Content \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\frontend\\\\src\\\\pages\\\\StockInPage.jsx\")",
+      "Bash(Measure-Object -Line)",
+      "PowerShell(\\(Get-Content \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\frontend\\\\src\\\\pages\\\\StockInPage.jsx\"\\).Count)"
     ]
   }
 }
