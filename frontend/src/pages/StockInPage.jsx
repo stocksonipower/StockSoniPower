@@ -26,6 +26,7 @@ import { useAuth } from "../lib/auth";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import { exportToExcel } from "../lib/exportExcel";
+import StockMasterImageUploader from "../components/StockMasterImageUploader";
 
 /* ==============================================================
    STOCK IN  ·  Receipt Note tab (Phase 1: Draft/Final + SRN/ERN)
@@ -2020,10 +2021,11 @@ function MakeDropdown({ value, makes, partLooked, onChange, onKeyDown, testid })
    Inline "Create New Master" dialog (Part No pre-filled)
    -------------------------------------------------------------- */
 const emptyMaster = (partNo) => ({
-  model: "", part_no: partNo, old_part_no: "", make_part_no: "",
+  model: "", part_no: partNo, old_part_no: "", new_part_no: "", make_part_no: "",
   description_1: "", description_2: "",
   remarks_oem: "", remarks_others: "",
-  make: "", item_category: "", reorder_level: 0, image: "",
+  make: "", item_category: "", unit: "", reorder_level: 0,
+  images: [],
 });
 
 function CreateMasterDialog({ open, partNo, onClose, onCreated }) {
@@ -2053,33 +2055,48 @@ function CreateMasterDialog({ open, partNo, onClose, onCreated }) {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl rounded-sm" data-testid="create-master-dialog">
+      <DialogContent className="max-w-3xl rounded-sm" data-testid="create-master-dialog">
         <DialogHeader>
           <DialogTitle className="text-xl font-black">Create New Stock Master</DialogTitle>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-4">
           <Field label="Model" v={form.model} on={(v) => set("model", v)} testid="cm-model" />
           <Field label="Part No *" v={form.part_no} on={(v) => set("part_no", v)} testid="cm-part-no" />
-          <Field label="Make *" v={form.make} on={(v) => set("make", v)} testid="cm-make" />
-          <Field label="Item Category" v={form.item_category} on={(v) => set("item_category", v)} testid="cm-category" />
           <Field label="Old Part No." v={form.old_part_no} on={(v) => set("old_part_no", v)} testid="cm-old-part-no" />
+          <Field label="New Part No." v={form.new_part_no} on={(v) => set("new_part_no", v)} testid="cm-new-part-no" />
           <Field label="Make Part No." v={form.make_part_no} on={(v) => set("make_part_no", v)} testid="cm-make-part-no" />
           <Field label="Description 1" v={form.description_1} on={(v) => set("description_1", v)} testid="cm-desc-1" />
           <Field label="Description 2" v={form.description_2} on={(v) => set("description_2", v)} testid="cm-desc-2" />
-          <div>
-            <Label className="label-sm">Remarks OEM</Label>
-            <Textarea value={form.remarks_oem} onChange={(e) => set("remarks_oem", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-oem" />
+          <div className="col-span-2 grid grid-cols-2 gap-4">
+            <div>
+              <Label className="label-sm">OEM</Label>
+              <Textarea value={form.remarks_oem} onChange={(e) => set("remarks_oem", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-oem" />
+            </div>
+            <div>
+              <Label className="label-sm">Remarks</Label>
+              <Textarea value={form.remarks_others} onChange={(e) => set("remarks_others", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-others" />
+            </div>
           </div>
-          <div>
-            <Label className="label-sm">Remarks Others</Label>
-            <Textarea value={form.remarks_others} onChange={(e) => set("remarks_others", e.target.value)} rows={2} className="mt-2 rounded-sm" data-testid="cm-remarks-others" />
-          </div>
+          <Field label="Make *" v={form.make} on={(v) => set("make", v)} testid="cm-make" />
+          <Field label="Item Category" v={form.item_category} on={(v) => set("item_category", v)} testid="cm-category" />
+          <Field label="Unit" v={form.unit} on={(v) => set("unit", v)} testid="cm-unit" />
           <div>
             <Label className="label-sm">Reorder Level</Label>
             <Input type="number" min="0" value={form.reorder_level ?? ""}
               onChange={(e) => set("reorder_level", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
               className="mt-2 rounded-sm font-mono" data-testid="cm-reorder-level"
             />
+            <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable.</div>
+          </div>
+          <div className="col-span-2">
+            <Label className="label-sm">Images</Label>
+            <div className="mt-2">
+              <StockMasterImageUploader
+                value={form.images}
+                onChange={(images) => set("images", images)}
+                testid="cm-images"
+              />
+            </div>
           </div>
         </div>
         <DialogFooter>

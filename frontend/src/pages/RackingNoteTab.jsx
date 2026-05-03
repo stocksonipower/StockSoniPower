@@ -2,9 +2,8 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from "react"
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
 import {
-  Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectGroup, SelectLabel,
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../components/ui/select";
 import PartNoLink from "../components/PartNoLink";
 import {
@@ -12,8 +11,8 @@ import {
 } from "../components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
-  DownloadSimple, ArrowsClockwise,
+  Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
+  DownloadSimple, ArrowsClockwise, Printer,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
@@ -31,12 +30,12 @@ function fmtDate(iso) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
-// Phase 2: source-type badge colours (RN=blue, SRN=amber, ERN=purple)
 const SRC_TYPE_STYLES = {
   RN:  { badge: "bg-blue-100 text-blue-800 border-blue-200",       label: "RN"  },
   SRN: { badge: "bg-amber-100 text-amber-800 border-amber-200",    label: "SRN" },
   ERN: { badge: "bg-purple-100 text-purple-800 border-purple-200", label: "ERN" },
 };
+
 function SourceTypeBadge({ type }) {
   const s = SRC_TYPE_STYLES[type] || SRC_TYPE_STYLES.RN;
   return (
@@ -46,18 +45,106 @@ function SourceTypeBadge({ type }) {
   );
 }
 
+function escapeHtml(str) {
+  return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function printRackingNote(rkn, locByKey, me) {
+  if (!rkn) return;
+  const srcType = rkn.source_type || "RN";
+  const srcLabel = SRC_TYPE_STYLES[srcType]?.label || srcType;
+  const statusLabel = rkn.status === "RECORDED" ? "Fully Racked" : "Draft";
+
+  const pField = (label, value) =>
+    `<div style="margin-bottom:8px"><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(value ?? "—"))}</div></div>`;
+
+  const itemsHtml = (rkn.items || []).map((it, idx) => {
+    const locs = (locByKey || {})[`${it.part_no}||${it.make}`] || [];
+    const locsText = locs.length === 0 ? "—" :
+      locs.map((l) => `${escapeHtml(l.godown_name)} / ${escapeHtml(l.rack_no || "—")} / ${escapeHtml(l.box_no || "—")} (${l.current_qty})`).join("<br>");
+    return `<tr>
+      <td>${idx + 1}</td>
+      <td class="mono">${escapeHtml(it.model || "—")}</td>
+      <td class="mono">${escapeHtml(it.part_no || "—")}</td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(it.make || "—")}</td>
+      <td>${escapeHtml(it.item_category || "—")}</td>
+      <td style="text-align:right" class="mono">${it.quantity}</td>
+      <td class="mono">${escapeHtml(it.godown_name || "—")}</td>
+      <td class="mono">${escapeHtml(it.rack_no || "—")}</td>
+      <td class="mono">${escapeHtml(it.box_no || "—")}</td>
+      <td class="mono" style="line-height:1.8">${locsText}</td>
+    </tr>`;
+  }).join("");
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<title>${escapeHtml(rkn.rkn_no)} — Racking Note</title>
+<style>
+  * { box-sizing: border-box; }
+  @page { size: A4 landscape; margin: 15mm; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 0; color: #0f172a; }
+  h1 { font-size: 20px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; }
+  .header-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 14px 0; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  .field-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; margin-bottom: 2px; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #475569; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin: 14px 0 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  th { text-align: left; padding: 5px 6px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+  td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; font-size: 10px; vertical-align: top; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .footer { margin-top: 20px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  @media print { body { padding: 0; } tr { page-break-inside: avoid; } }
+</style></head>
+<body>
+  <h1>Racking Note</h1>
+  <div class="header-grid">
+    <div>
+      ${pField("Racking Source", `[${srcLabel}] ${rkn.source_no || rkn.receipt_note_no || "—"}`)}
+      ${pField("Racking Note Date", fmtDate(rkn.rkn_date))}
+      ${pField("Racking Note No", rkn.rkn_no)}
+    </div>
+    <div>
+      ${pField("Assigned To", rkn.parent_assigned_to_name || rkn.parent_assigned_to_email || "—")}
+      ${pField("Status", statusLabel)}
+      ${pField("Created By", rkn.created_by || "—")}
+      ${rkn.narration ? `<div style="margin-bottom:8px"><div class="field-label">Narration</div><div class="field-value" style="white-space:pre-wrap">${escapeHtml(rkn.narration)}</div></div>` : ""}
+    </div>
+  </div>
+  <div class="section-title">Items (${(rkn.items || []).length})</div>
+  <table>
+    <thead><tr>
+      <th>SL</th><th>Model</th><th>Part No</th><th>Description</th><th>Make</th>
+      <th>Category</th><th style="text-align:right">Qty</th>
+      <th>Godown</th><th>Rack</th><th>Box</th><th>Existing Locations</th>
+    </tr></thead>
+    <tbody>${itemsHtml}</tbody>
+  </table>
+  <div class="footer">
+    Printed: ${escapeHtml(new Date().toLocaleString())}
+    &nbsp;·&nbsp; Printed by: ${escapeHtml(me?.email || rkn.created_by || "—")}
+  </div>
+  <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
+</body></html>`;
+
+  const w = window.open("", "_blank", "width=1200,height=800");
+  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
 
 /* ==============================================================
    STOCK IN  ·  Racking Note tab
    ============================================================== */
 export default function RackingNoteTab() {
-  const [view, setView] = useState("list"); // list | create | edit | detail
+  const [view, setView] = useState("list"); // list | edit
   const [editing, setEditing] = useState(null);
   const [openRkn, setOpenRkn] = useState(null);
   const [openRn, setOpenRn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const goCreate = () => { setEditing(null); setView("create"); };
   const goEdit = (rkn) => { setEditing(rkn); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
 
@@ -76,30 +163,27 @@ export default function RackingNoteTab() {
       {view === "list" && (
         <RackingNoteList
           reloadKey={reloadKey}
-          onCreate={goCreate}
           onEdit={goEdit}
           onOpen={(r) => setOpenRkn(r)}
           onOpenRn={handleOpenRn}
-          onRecorded={() => setReloadKey((k) => k + 1)}
         />
       )}
-      {(view === "create" || view === "edit") && (
-        <RackingNoteForm editing={editing} onCancel={goList} onSaved={goList} />
+      {view === "edit" && (
+        <RackingNoteForm editing={editing} onCancel={goList} onSaved={goList} onOpenRn={handleOpenRn} />
       )}
-      <RackingNoteDetailDialog rkn={openRkn} onClose={() => setOpenRkn(null)} />
+      <RackingNoteDetailDialog rkn={openRkn} onClose={() => setOpenRkn(null)} onOpenRn={handleOpenRn} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
 }
 
 /* ---------- LIST VIEW ---------- */
-function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onRecorded }) {
+function RackingNoteList({ reloadKey, onEdit, onOpen, onOpenRn }) {
   const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [recordingId, setRecordingId] = useState(null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef(null);
 
@@ -138,25 +222,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
     }
-  };
-
-  const handleRecord = async (rkn) => {
-    if (!window.confirm(`Record ${rkn.rkn_no} as Stock In?\n\nThis will add ${rkn.items.length} stock-in transaction(s) and mark the linked Receipt Note (${rkn.receipt_note_no}) as RACKED. This cannot be undone.`)) return;
-    setRecordingId(rkn.id);
-    try {
-      const res = await api.post(`/racking-notes/${rkn.id}/record`);
-      const data = res.data || {};
-      const autoRkn = res.headers?.["x-auto-rkn-no"] || data.auto_rkn_no;
-      if (autoRkn) {
-        toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) · ${autoRkn} auto-created for remaining qty`);
-      } else {
-        toast.success(`Recorded · ${data.transactions_created} stock-in transaction(s) created`);
-      }
-      load();
-      onRecorded?.();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not record");
-    } finally { setRecordingId(null); }
   };
 
   const columns = useMemo(() => [
@@ -200,9 +265,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="rkn-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
-          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rkn-button">
-            <Plus size={16} weight="bold" className="mr-2" /> Create New Racking Note
-          </Button>
         </div>
       </div>
 
@@ -230,7 +292,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const assigneeId = r.parent_assigned_to_user_id;
               const assigneeName = r.parent_assigned_to_name;
@@ -241,8 +302,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
               const deleteTitle = recorded ? "Cannot delete — already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Delete");
-              const recordTitle = recorded ? "Already recorded"
-                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Record as Stock In");
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -303,112 +362,155 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       >
                         <Trash size={14} />
                       </button>
-                      <Button
-                        onClick={() => handleRecord(r)}
-                        disabled={lock || recordingId === r.id}
-                        size="sm"
-                        title={recordTitle}
-                        className={`rounded-sm h-7 text-xs ml-1 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
-                        data-testid={`rkn-record-${r.rkn_no}`}
-                      >
-                        <CheckCircle size={12} weight="bold" className="mr-1" />
-                        {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock In")}
-                      </Button>
                     </div>
                   </td>
                 </tr>
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
       <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-  <div>
-    {total === 0 ? "No racking notes" : (
-      <>
-        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-      </>
-    )}
-  </div>
-  <div className="flex items-center gap-2">
-    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-    </Button>
-    <span className="font-mono">Page {page} of {totalPages}</span>
-    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      Next <CaretRight size={12} weight="bold" className="ml-1" />
-    </Button>
-    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-  </div>
-</div>
+        <div>
+          {total === 0 ? "No racking notes" : (
+            <>
+              Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+              {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ---------- DETAIL DIALOG (read-only) ---------- */
-function RackingNoteDetailDialog({ rkn, onClose }) {
+function RackingNoteDetailDialog({ rkn, onClose, onOpenRn }) {
+  const { user: me } = useAuth();
+  const [locByKey, setLocByKey] = useState({});
+
+  useEffect(() => {
+    if (!rkn) { setLocByKey({}); return; }
+    const srcType = rkn.source_type || "RN";
+    const srcId = rkn.source_id || rkn.receipt_note_id;
+    if (!srcId) return;
+    api.get("/racking-notes/prepare-source", {
+      params: { source_type: srcType, source_id: srcId, exclude_rkn_id: rkn.id },
+    }).then((r) => {
+      const map = {};
+      (r.data.items || []).forEach((it) => {
+        map[`${it.part_no}||${it.make}`] = it.existing_locations || [];
+      });
+      setLocByKey(map);
+    }).catch(() => setLocByKey({}));
+  }, [rkn?.id]);
+
   return (
     <Dialog open={!!rkn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-6xl rounded-sm" data-testid="rkn-detail-dialog">
+      <DialogContent className="max-w-7xl rounded-sm" data-testid="rkn-detail-dialog">
         {rkn && (
           <>
             <DialogHeader>
-              <DialogTitle className="text-2xl font-black font-mono">{rkn.rkn_no}</DialogTitle>
+              <div className="flex items-center justify-between">
+                <DialogTitle className="text-2xl font-black font-mono">{rkn.rkn_no}</DialogTitle>
+                <Button variant="outline" size="sm" className="rounded-sm" onClick={() => printRackingNote(rkn, locByKey, me)} data-testid="rkn-detail-print">
+                  <Printer size={14} weight="bold" className="mr-1.5" /> Print
+                </Button>
+              </div>
             </DialogHeader>
+
             <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Racking Note Date" v={fmtDate(rkn.rkn_date)} />
-              <Detail k="Receipt Note No" v={rkn.receipt_note_no || "—"} />
-              <Detail k="Receipt Note Date" v={fmtDate(rkn.receipt_note_date)} />
               <div>
-                <div className="label-sm">Racked Against</div>
+                <div className="label-sm">RACKING SOURCE</div>
                 <div className="font-mono mt-1 text-slate-900 flex items-center gap-2" data-testid="rkn-detail-source">
                   <SourceTypeBadge type={rkn.source_type || "RN"} />
-                  <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
+                  <button
+                    onClick={() => onOpenRn?.(rkn.receipt_note_id)}
+                    className="font-mono font-semibold text-blue-700 hover:underline"
+                  >
+                    {rkn.source_no || rkn.receipt_note_no || "—"}
+                  </button>
                 </div>
               </div>
-              <Detail k="Status" v={rkn.status === "RECORDED" ? "Fully Racked" : (rkn.status || "Draft")} />
-              <Detail k="Created By" v={rkn.created_by || "—"} />
-              <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
+              <Detail k="RACKING NOTE DATE" v={fmtDate(rkn.rkn_date)} />
+              <Detail k="RACKING NOTE NO" v={rkn.rkn_no} />
               <div>
-                <div className="label-sm">Assigned To (from Receipt Note)</div>
+                <div className="label-sm">ASSIGNED TO</div>
                 <div className="mt-1"><AssigneeBadge name={rkn.parent_assigned_to_name} email={rkn.parent_assigned_to_email} /></div>
               </div>
+              <div>
+                <div className="label-sm">STATUS</div>
+                <div className="mt-1">
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${rkn.status === "RECORDED" ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}>
+                    {rkn.status === "RECORDED" ? "Fully Racked" : "Draft"}
+                  </span>
+                </div>
+              </div>
+              <Detail k="CREATED BY" v={rkn.created_by || "—"} />
             </div>
+
             <div className="overflow-x-auto">
               <table className="data-table w-full text-xs">
                 <thead>
                   <tr>
                     <th>SL</th>
-                    <th>PART NO</th>
-                    <th>MAKE</th>
                     <th>MODEL</th>
+                    <th>PART NO</th>
                     <th>DESCRIPTION</th>
-                    <th>CATEGORY</th>
+                    <th>MAKE</th>
+                    <th>ITEM CATEGORY</th>
                     <th className="text-right">QTY</th>
                     <th>GODOWN</th>
                     <th>RACK</th>
                     <th>BOX</th>
+                    <th>EXISTING LOCATIONS</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(rkn.items || []).map((it, idx) => (
-                    <tr key={idx}>
-                                            <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td className="font-mono text-slate-600">{it.model || "—"}</td>
-                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                      <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
-                      <td className="text-slate-600">{it.item_category || "—"}</td>
-                      <td className="text-right font-mono font-bold">{it.quantity}</td>
-                      <td className="font-mono">{it.godown_name || "—"}</td>
-                      <td className="font-mono">{it.rack_no || "—"}</td>
-                      <td className="font-mono">{it.box_no || "—"}</td>
-                    </tr>
-                  ))}
+                  {(rkn.items || []).map((it, idx) => {
+                    const locs = locByKey[`${it.part_no}||${it.make}`] || [];
+                    return (
+                      <tr key={idx}>
+                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                        <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                        <td className="text-slate-700 max-w-[220px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                        <td className="text-slate-700">{it.make || "—"}</td>
+                        <td className="text-slate-600">{it.item_category || "—"}</td>
+                        <td className="text-right font-mono font-bold">{it.quantity}</td>
+                        <td className="font-mono">{it.godown_name || "—"}</td>
+                        <td className="font-mono">{it.rack_no || "—"}</td>
+                        <td className="font-mono">{it.box_no || "—"}</td>
+                        <td>
+                          {locs.length === 0 ? (
+                            <span className="text-slate-400 text-[11px]">—</span>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {locs.map((loc, k) => (
+                                <span key={k} className="text-[10px] font-mono px-2 py-0.5 rounded-sm border bg-slate-50 border-slate-200 text-slate-700">
+                                  {loc.godown_name} / {loc.rack_no || "—"} / {loc.box_no || "—"} ({loc.current_qty})
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -428,82 +530,48 @@ function Detail({ k, v }) {
   );
 }
 
-/* ---------- CREATE / EDIT FORM ---------- */
-function RackingNoteForm({ editing, onCancel, onSaved }) {
-  const isEdit = !!editing;
-  const [rknNo, setRknNo] = useState("");
-  const [rknDate, setRknDate] = useState("");
-  // Phase 2: polymorphic sources grouped by parent RN.
-  // sourceGroups: [{ parent_rn_no, parent_rn_date, sources: [{source_type, source_id, source_no, ...}] }]
-  const [sourceGroups, setSourceGroups] = useState([]);
-  // Currently-selected source = composite "TYPE:ID" key.
-  const [selectedSourceKey, setSelectedSourceKey] = useState("");
-  const [selectedSource, setSelectedSource] = useState(null); // full object from sources list OR prepare-source response.source
+/* ---------- EDIT FORM ---------- */
+function RackingNoteForm({ editing, onCancel, onSaved, onOpenRn }) {
   const [items, setItems] = useState([]);
   const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
 
   // Cascading dropdown caches
   const [godowns, setGodowns] = useState([]);
-  const [racksByGodown, setRacksByGodown] = useState({}); // {godown_id: [racks]}
+  const [racksByGodown, setRacksByGodown] = useState({});
   const [boxesByRack, setBoxesByRack] = useState({});
 
   useEffect(() => { api.get("/godowns").then((r) => setGodowns(r.data)); }, []);
 
-  // Bootstrap form
+  // Load items + pending/existing-location data for this RKN
   useEffect(() => {
-    if (isEdit) {
-      setRknNo(editing.rkn_no);
-      setRknDate(editing.rkn_date);
-      setNarration(editing.narration || "");
-      // Resolve source identity: prefer Phase 2 fields, fall back to legacy receipt_note_id.
-      const srcType = editing.source_type || "RN";
-      const srcId = editing.source_id || editing.receipt_note_id;
-      const srcNo = editing.source_no || editing.receipt_note_no;
-      const srcDate = editing.source_date || editing.receipt_note_date;
-      const key = `${srcType}:${srcId}`;
-      setSelectedSourceKey(key);
-      setSelectedSource({
-        source_type: srcType, source_id: srcId, source_no: srcNo, source_date: srcDate,
-        parent_rn_id: editing.receipt_note_id, parent_rn_no: editing.receipt_note_no, parent_rn_date: editing.receipt_note_date,
-      });
-      // Seed the dropdown with a single-group entry so the trigger displays something sensible.
-      setSourceGroups([{
-        parent_rn_id: editing.receipt_note_id,
-        parent_rn_no: editing.receipt_note_no,
-        parent_rn_date: editing.receipt_note_date,
-        sources: [{ source_type: srcType, source_id: srcId, source_no: srcNo, source_date: srcDate, status: "" }],
-      }]);
-      // Fetch a fresh prepare to learn pending_qty per (part,make) excluding THIS rkn so user can edit safely
-      api.get("/racking-notes/prepare-source", { params: { source_type: srcType, source_id: srcId, exclude_rkn_id: editing.id } })
-        .then((r) => {
-          const pendingMap = {};
-          (r.data.items || []).forEach((p) => { pendingMap[`${p.part_no}||${p.make}`] = p; });
-          setItems((editing.items || []).map((it) => {
-            const p = pendingMap[`${it.part_no}||${it.make}`] || {};
-            return {
-              ...it,
-              existing_locations: p.existing_locations || [],
-              pending_qty: p.pending_qty ?? 0,
-              rackable_qty: p.rackable_qty ?? p.received_qty ?? 0,
-              received_qty: p.received_qty ?? p.rackable_qty ?? 0,
-            };
-          }));
-        }).catch(() => {
-          setItems((editing.items || []).map((it) => ({ ...it, existing_locations: [], pending_qty: 0, received_qty: 0, rackable_qty: 0 })));
-        });
-    } else {
-      api.get("/racking-notes/next-no").then((r) => {
-        setRknNo(r.data.next_rkn_no);
-        setRknDate(r.data.rkn_date);
-      }).catch(() => toast.error("Could not preview racking-note number"));
-      // Phase 2: fetch polymorphic source groups (RN + SRN + ERN) keyed by parent RN.
-      api.get("/racking-notes/sources")
-        .then((r) => setSourceGroups(r.data || []))
-        .catch((err) => toast.error(formatApiError(err.response?.data?.detail) || "Could not load racking sources"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEdit, editing]);
+    if (!editing) return;
+    setNarration(editing.narration || "");
+    const srcType = editing.source_type || "RN";
+    const srcId = editing.source_id || editing.receipt_note_id;
+    api.get("/racking-notes/prepare-source", {
+      params: { source_type: srcType, source_id: srcId, exclude_rkn_id: editing.id },
+    }).then((r) => {
+      const pendingMap = {};
+      (r.data.items || []).forEach((p) => { pendingMap[`${p.part_no}||${p.make}`] = p; });
+      setItems((editing.items || []).map((it) => {
+        const p = pendingMap[`${it.part_no}||${it.make}`] || {};
+        return {
+          ...it,
+          existing_locations: p.existing_locations || [],
+          pending_qty: p.pending_qty ?? 0,
+          rackable_qty: p.rackable_qty ?? p.received_qty ?? 0,
+          received_qty: p.received_qty ?? p.rackable_qty ?? 0,
+          _boxNone: false,
+        };
+      }));
+    }).catch(() => {
+      setItems((editing.items || []).map((it) => ({
+        ...it, existing_locations: [], pending_qty: 0, received_qty: 0, rackable_qty: 0, _boxNone: false,
+      })));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing?.id]);
 
   // Fetch racks for a given godown lazily
   const ensureRacks = useCallback(async (godownId) => {
@@ -527,44 +595,27 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items.length]);
 
-  const handleSourceChange = async (compositeKey) => {
-    setSelectedSourceKey(compositeKey);
-    if (!compositeKey) { setItems([]); setSelectedSource(null); return; }
-    const [sourceType, sourceId] = compositeKey.split(":");
-    if (!sourceType || !sourceId) { setItems([]); setSelectedSource(null); return; }
-    try {
-      const { data } = await api.get("/racking-notes/prepare-source", {
-        params: { source_type: sourceType, source_id: sourceId },
-      });
-      setSelectedSource(data.source || null);
-      setItems(data.items || []);
-      // Eagerly preload racks/boxes for prefilled rows
-      (data.items || []).forEach((it) => {
-        if (it.godown_id) ensureRacks(it.godown_id);
-        if (it.rack_id) ensureBoxes(it.rack_id);
-      });
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not prepare items");
-    }
-  };
-
   const updateItem = (i, patch) => setItems((prev) => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
   const onGodownChange = async (i, godownId) => {
     const g = godowns.find((x) => x.id === godownId);
-    updateItem(i, { godown_id: godownId, godown_name: g?.godown_name || "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "" });
+    updateItem(i, { godown_id: godownId, godown_name: g?.godown_name || "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "", _boxNone: false });
     await ensureRacks(godownId);
   };
   const onRackChange = async (i, rackId) => {
     const racks = racksByGodown[items[i].godown_id] || [];
     const rk = racks.find((x) => x.id === rackId);
-    updateItem(i, { rack_id: rackId, rack_no: rk?.rack_no || "", box_id: "", box_no: "", box_category: "" });
+    updateItem(i, { rack_id: rackId, rack_no: rk?.rack_no || "", box_id: "", box_no: "", box_category: "", _boxNone: false });
     await ensureBoxes(rackId);
   };
   const onBoxChange = (i, boxId) => {
+    if (boxId === "__none__") {
+      updateItem(i, { box_id: "", box_no: "", box_category: "", _boxNone: true });
+      return;
+    }
     const boxes = boxesByRack[items[i].rack_id] || [];
     const bx = boxes.find((x) => x.id === boxId);
-    updateItem(i, { box_id: boxId, box_no: bx?.box_no || "", box_category: bx?.box_category || "" });
+    updateItem(i, { box_id: boxId, box_no: bx?.box_no || "", box_category: bx?.box_category || "", _boxNone: false });
   };
 
   // Apply an existing-location chip click
@@ -574,8 +625,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     updateItem(i, {
       godown_id: loc.godown_id, godown_name: loc.godown_name,
       rack_id: loc.rack_id, rack_no: loc.rack_no,
-      box_id: loc.box_id, box_no: loc.box_no,
+      box_id: loc.box_id || "", box_no: loc.box_no || "",
       box_category: loc.box_category || "",
+      _boxNone: !loc.box_id,
     });
   };
 
@@ -589,7 +641,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         godown_id: "", godown_name: "",
         rack_id: "", rack_no: "",
         box_id: "", box_no: "", box_category: "",
-        // existing_locations & received/pending hint stay the same so the chips still appear
+        _boxNone: false,
       };
       const out = [...prev];
       out.splice(i + 1, 0, copy);
@@ -602,7 +654,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     setItems((prev) => prev.filter((_, idx) => idx !== i));
   };
 
-  // Sum of qty per (part_no, make) across the current rows -- used to display "Allocated X of Y" hints
+  // Sum of qty per (part_no, make) — used for "Allocated X of Y" hints
   const allocatedByKey = useMemo(() => {
     const map = {};
     items.forEach((r) => {
@@ -612,26 +664,38 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     return map;
   }, [items]);
 
-  const save = async () => {
-    if (!selectedSourceKey) { toast.error("Select a racking source (RN / SRN / ERN)"); return; }
-    const [sourceType, sourceId] = selectedSourceKey.split(":");
-    if (!sourceType || !sourceId) { toast.error("Invalid source selection"); return; }
-    if (items.length === 0) { toast.error("No items to rack"); return; }
-    // Per-row checks
+  const buildPayload = () => {
+    const srcType = editing?.source_type || "RN";
+    const srcId = editing?.source_id || editing?.receipt_note_id;
+    return {
+      source_type: srcType,
+      source_id: srcId,
+      receipt_note_id: srcType === "RN" ? srcId : (editing?.receipt_note_id || undefined),
+      narration: narration.trim(),
+      items: items.map((it) => ({
+        part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
+        model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
+        description_1: it.description_1 || "", description_2: it.description_2 || "",
+        remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
+        item_category: it.item_category || "",
+        godown_id: it.godown_id, godown_name: it.godown_name,
+        rack_id: it.rack_id, rack_no: it.rack_no,
+        box_id: it.box_id || "", box_no: it.box_no || "", box_category: it.box_category || "",
+      })),
+    };
+  };
+
+  const validate = () => {
+    if (items.length === 0) { toast.error("No items to rack"); return false; }
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (!it.godown_id || !it.rack_id) {
-        toast.error(`Row ${i + 1}: pick Godown / Rack`); return;
-      }
-      const hasBoxesForRack = (boxesByRack[it.rack_id] || []).length > 0;
-      if (hasBoxesForRack && !it.box_id) {
-        toast.error(`Row ${i + 1}: pick Box`); return;
+        toast.error(`Row ${i + 1}: pick Godown / Rack`); return false;
       }
       const q = parseFloat(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
+      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return false; }
     }
     // Cumulative-vs-pending check (client-side; backend re-validates)
-    // Build a map of pending_qty per key from the current rows (any row carries it)
     const pendingMap = {};
     items.forEach((r) => {
       const k = `${r.part_no}||${r.make}`;
@@ -642,37 +706,50 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       if (pending !== undefined && allocated > pending + 1e-6) {
         const [p, m] = k.split("||");
         toast.error(`${p} / ${m}: allocated ${allocated} exceeds pending ${pending}`);
-        return;
+        return false;
       }
     }
+    return true;
+  };
+
+  const saveAsDraft = async () => {
+    if (!validate()) return;
     setSaving(true);
     try {
-      const payload = {
-        source_type: sourceType,
-        source_id: sourceId,
-        // Legacy back-compat: backend still accepts receipt_note_id; harmless when source_type/id is sent.
-        receipt_note_id: sourceType === "RN" ? sourceId : (selectedSource?.parent_rn_id || undefined),
-        narration: narration.trim(),
-        items: items.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
-          model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
-          description_1: it.description_1 || "", description_2: it.description_2 || "",
-          remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
-          item_category: it.item_category || "",
-          godown_id: it.godown_id, godown_name: it.godown_name,
-          rack_id: it.rack_id, rack_no: it.rack_no,
-          box_id: it.box_id, box_no: it.box_no, box_category: it.box_category || "",
-        })),
-      };
-      const { data } = isEdit
-        ? await api.put(`/racking-notes/${editing.id}`, payload)
-        : await api.post("/racking-notes", payload);
-      toast.success(`Racking Note ${data.rkn_no} ${isEdit ? "updated" : "saved"}`);
+      const { data } = await api.put(`/racking-notes/${editing.id}`, buildPayload());
+      toast.success(`Racking Note ${data.rkn_no} updated`);
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
     } finally { setSaving(false); }
   };
+
+  const saveFinal = async () => {
+    if (editing?.status === "RECORDED") {
+      toast.error("This racking note has already been recorded");
+      return;
+    }
+    if (!validate()) return;
+    setSaving(true);
+    try {
+      const { data } = await api.put(`/racking-notes/${editing.id}`, buildPayload());
+      const res = await api.post(`/racking-notes/${data.id}/record`);
+      const recData = res.data || {};
+      const autoRkn = res.headers?.["x-auto-rkn-no"] || recData.auto_rkn_no;
+      if (autoRkn) {
+        toast.success(`Recorded · ${recData.transactions_created} stock-in transaction(s) · ${autoRkn} auto-created for remaining qty`);
+      } else {
+        toast.success(`Recorded · ${recData.transactions_created} stock-in transaction(s) created`);
+      }
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not record");
+    } finally { setSaving(false); }
+  };
+
+  const srcType = editing?.source_type || "RN";
+  const srcNo = editing?.source_no || editing?.receipt_note_no || "—";
+  const recorded = editing?.status === "RECORDED";
 
   return (
     <div className="mt-4 space-y-6" data-testid="rkn-create-view">
@@ -683,67 +760,43 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       </div>
 
       {/* HEADER */}
-      <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-3 gap-4">
-        <div>
-          <Label className="label-sm">Racking Note Date</Label>
-          <Input value={rknDate} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="rkn-date-input" />
-        </div>
-        <div>
-          <Label className="label-sm">Racking Note No</Label>
-          <Input value={rknNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rkn-no-input" />
-        </div>
-        <div className="col-span-2 lg:col-span-3">
-          <Label className="label-sm">Racking Source *</Label>
-          <Select value={selectedSourceKey || undefined} onValueChange={handleSourceChange} disabled={isEdit}>
-            <SelectTrigger className="mt-2 rounded-sm" data-testid="rkn-source-select">
-              <SelectValue placeholder={sourceGroups.length === 0 ? "No rackable sources available" : "Select a source (RN / SRN / ERN)"} />
-            </SelectTrigger>
-            <SelectContent className="max-h-[420px]">
-              {sourceGroups.map((grp, gi) => (
-                <SelectGroup key={`${grp.parent_rn_id}-${gi}`}>
-                  <SelectLabel className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-50 border-b border-slate-100">
-                    <span className="font-mono text-slate-800">{grp.parent_rn_no}</span>
-                    <span className="ml-2 text-slate-400">·</span>
-                    <span className="ml-2 font-mono text-slate-500">{fmtDate(grp.parent_rn_date)}</span>
-                    {grp.invoice_no ? (
-                      <span className="ml-2 text-slate-400 normal-case tracking-normal">Inv {grp.invoice_no}</span>
-                    ) : null}
-                  </SelectLabel>
-                  {(grp.sources || []).map((s) => {
-                    const key = `${s.source_type}:${s.source_id}`;
-                    return (
-                      <SelectItem
-                        key={key}
-                        value={key}
-                        className="pl-6"
-                        data-testid={`rkn-source-option-${s.source_type}-${s.source_id}`}
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <SourceTypeBadge type={s.source_type} />
-                          <span className="font-mono font-semibold">{s.source_no}</span>
-                          <span className="text-slate-400 text-[11px]">{fmtDate(s.source_date)}</span>
-                          {s.assigned_to_name ? (
-                            <span className="text-[10px] text-slate-500 ml-1">· {s.assigned_to_name}</span>
-                          ) : null}
-                        </span>
-                      </SelectItem>
-                    );
-                  })}
-                </SelectGroup>
-              ))}
-            </SelectContent>
-          </Select>
-          {isEdit && <div className="text-[11px] text-slate-500 mt-1">Source cannot be changed in edit mode</div>}
-          {selectedSource && (
-            <div className="text-[11px] text-slate-600 mt-2 flex items-center gap-2" data-testid="rkn-selected-source-hint">
-              Racking against:
-              <SourceTypeBadge type={selectedSource.source_type || selectedSource.type} />
-              <span className="font-mono font-semibold">{selectedSource.source_no || selectedSource.no}</span>
-              {(selectedSource.parent_rn_no && (selectedSource.parent_rn_no !== (selectedSource.source_no || selectedSource.no))) && (
-                <span className="text-slate-500">(parent <span className="font-mono">{selectedSource.parent_rn_no}</span>)</span>
-              )}
+      <div className="bg-white border border-slate-200 rounded-sm p-6 space-y-4">
+        <div className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <div className="label-sm">RACKING SOURCE</div>
+            <div className="font-mono mt-1 text-slate-900 flex items-center gap-2" data-testid="rkn-source-display">
+              <SourceTypeBadge type={srcType} />
+              <button
+                onClick={() => onOpenRn?.(editing?.receipt_note_id)}
+                className="font-mono font-semibold text-blue-700 hover:underline"
+                data-testid="rkn-source-link"
+              >
+                {srcNo}
+              </button>
             </div>
-          )}
+          </div>
+          <div>
+            <div className="label-sm">RACKING NOTE DATE</div>
+            <div className="font-mono mt-1 text-slate-900" data-testid="rkn-date-input">{fmtDate(editing?.rkn_date)}</div>
+          </div>
+          <div>
+            <div className="label-sm">RACKING NOTE NO</div>
+            <div className="font-mono mt-1 font-semibold text-blue-900" data-testid="rkn-no-input">{editing?.rkn_no || "—"}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <div className="label-sm">ASSIGNED TO</div>
+            <div className="mt-1"><AssigneeBadge name={editing?.parent_assigned_to_name} email={editing?.parent_assigned_to_email} /></div>
+          </div>
+          <div>
+            <div className="label-sm">STATUS</div>
+            <div className="mt-1">
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}>
+                {recorded ? "Fully Racked" : "Draft"}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -751,17 +804,18 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
           <table className="data-table w-full text-xs">
-                        <thead>
+            <thead>
               <tr>
                 <th className="w-10">SL</th>
                 <th>MODEL</th>
                 <th>PART NO</th>
-                <th>DESCRIPTION 1</th>
+                <th>DESCRIPTION</th>
+                <th>MAKE</th>
                 <th>ITEM CATEGORY</th>
                 <th className="text-right">QTY</th>
                 <th className="min-w-[140px]">GODOWN *</th>
                 <th className="min-w-[120px]">RACK *</th>
-                <th className="min-w-[120px]">BOX *</th>
+                <th className="min-w-[120px]">BOX</th>
                 <th>EXISTING LOCATIONS</th>
                 <th className="w-20"></th>
               </tr>
@@ -777,15 +831,17 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 const overAllocated = pending !== undefined && allocated > pending + 1e-6;
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
-                                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-slate-700">{it.make || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="text-right">
                       <Input type="number" min="0.001" step="any" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-right w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
+                        className={`rounded-sm font-mono h-8 text-right w-20 ${overAllocated ? "border-red-400" : ""}`}
+                        data-testid={`rkn-qty-${idx}`} />
                       {pending !== undefined && (
                         <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`rkn-pending-hint-${idx}`}>
                           {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${received}`}
@@ -809,11 +865,16 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                       </Select>
                     </td>
                     <td>
-                      <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id || boxes.length === 0}>
+                      <Select
+                        value={it._boxNone ? "__none__" : (it.box_id || undefined)}
+                        onValueChange={(v) => onBoxChange(idx, v)}
+                        disabled={!it.rack_id}
+                      >
                         <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}>
-                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes — skip" : "Box")} />
+                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes — skip" : "Box (optional)")} />
                         </SelectTrigger>
                         <SelectContent>
+                          {boxes.length > 0 && <SelectItem value="__none__">— (No Box)</SelectItem>}
                           {boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}
                         </SelectContent>
                       </Select>
@@ -822,16 +883,18 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                       {(it.existing_locations || []).length === 0 ? (
                         <span className="text-[11px] text-slate-400 italic">New part — pick any location</span>
                       ) : (
-                        <div className="flex flex-wrap gap-1 max-w-[220px]">
+                        <div className="flex flex-col gap-1">
                           {(it.existing_locations || []).map((loc, k) => {
-                            const isCurrent = loc.box_id === it.box_id;
+                            const isCurrent = loc.godown_id === it.godown_id &&
+                              loc.rack_id === it.rack_id &&
+                              (loc.box_id || "") === (it.box_id || "");
                             return (
                               <button key={k} onClick={() => applyExistingLocation(idx, loc)}
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded-sm border ${isCurrent ? "bg-blue-50 border-blue-300 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"}`}
-                                title={`${loc.godown_name}/${loc.rack_no}/${loc.box_no} — ${loc.current_qty} in stock`}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-sm border text-left ${isCurrent ? "bg-blue-50 border-blue-300 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"}`}
+                                title={`${loc.godown_name}/${loc.rack_no || "—"}/${loc.box_no || "—"} — ${loc.current_qty} in stock`}
                                 data-testid={`rkn-existing-loc-${idx}-${k}`}>
                                 <MapPin size={10} weight="bold" className="inline mr-0.5" />
-                                {loc.godown_name}/{loc.rack_no}/{loc.box_no} ({loc.current_qty})
+                                {loc.godown_name} / {loc.rack_no || "—"} / {loc.box_no || "—"} ({loc.current_qty})
                               </button>
                             );
                           })}
@@ -866,9 +929,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
           </table>
         </div>
       )}
-      
+
       {/* NARRATION + SAVE BAR */}
-      {selectedSourceKey && items.length > 0 && (
+      {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm">
           <div className="flex items-start justify-between gap-4 p-4">
             <div className="flex-1 max-w-sm">
@@ -883,18 +946,27 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
               />
             </div>
             <div className="flex items-center gap-2 pt-7">
-              <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-6" data-testid="rkn-save-button">
+              <Button
+                onClick={saveAsDraft}
+                disabled={saving || recorded}
+                variant="outline"
+                className="rounded-sm border-slate-300 px-4"
+                data-testid="rkn-save-draft-button"
+              >
                 <FloppyDisk size={14} weight="bold" className="mr-2" />
-                {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
+                {saving ? "Saving…" : "Save as Draft"}
+              </Button>
+              <Button
+                onClick={saveFinal}
+                disabled={saving || recorded}
+                className="rounded-sm bg-blue-700 hover:bg-blue-800 px-4"
+                data-testid="rkn-save-final-button"
+              >
+                <CheckCircle size={14} weight="bold" className="mr-2" />
+                {saving ? "Saving…" : "Save Final"}
               </Button>
             </div>
           </div>
-        </div>
-      )}
-
-      {!selectedSourceKey && !isEdit && (
-        <div className="bg-amber-50 border border-amber-200 rounded-sm p-6 text-sm text-amber-800">
-          Pick a racking source (RN / SRN / ERN) above to load its items for racking.
         </div>
       )}
     </div>
