@@ -954,6 +954,7 @@ function printSrn(srn, me) {
     const summaryPending = Math.max(0, (parseFloat(it.short_qty) || 0) - totalChildRcv - totalChildNR);
     itemRows += `<tr class="summary-row">
       <td>${slNo}</td>
+      <td>${escapeHtml(it.model || "—")}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
       <td>${escapeHtml(it.description_1 || "—")}</td>
       <td>${escapeHtml(it.make || "")}</td>
@@ -971,7 +972,7 @@ function printSrn(srn, me) {
       const isDraft = c.finalized === false;
       itemRows += `<tr class="child-row">
         <td></td>
-        <td colspan="3" style="padding-left:20px;font-size:10px;color:#64748b">
+        <td colspan="4" style="padding-left:20px;font-size:10px;color:#64748b">
           ${isDraft ? '<span style="background:#fef9c3;color:#854d0e;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">DRAFT</span>' : '<span style="background:#dcfce7;color:#166534;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">FINAL</span>'}
         </td>
         <td style="text-align:right;color:#64748b;font-size:10px">${runningShort.toFixed(2)}</td>
@@ -991,7 +992,7 @@ function printSrn(srn, me) {
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px;color:#0f172a;font-size:13px}
   h1{font-size:20px;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px}
   .header-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 20px;padding:14px;border:1px solid #e2e8f0;border-radius:4px}
-  .header-left,.header-right{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .header-left,.header-right{display:grid;grid-template-columns:1fr;gap:10px}
   .field-label{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;font-weight:700}
   .field-value{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;margin-top:2px}
   table{width:100%;border-collapse:collapse;margin-top:16px;font-size:11px}
@@ -999,7 +1000,6 @@ function printSrn(srn, me) {
   td{padding:5px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,"SF Mono",Menlo,monospace}
   tr.summary-row{background:#f8fafc;font-weight:600}
   tr.child-row{background:#ffffff}
-  .narration-box{margin-top:20px;padding:10px 14px;border:1px solid #e2e8f0;border-radius:4px}
   .footer{margin-top:20px;font-size:10px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:8px;display:flex;justify-content:space-between}
   @media print{body{padding:12mm}}
 </style></head><body>
@@ -1010,22 +1010,24 @@ function printSrn(srn, me) {
     ${pF("RECEIPT NOTE NO", srn.parent_rn_no)}
     ${pF("SRN DATE", srn.srn_date ? srn.srn_date.split("T")[0].split("-").reverse().join("-") : "—")}
     ${pF("SRN NO", srn.srn_no)}
+    ${pF("STATUS", srn.status || "—")}
   </div>
   <div class="header-right">
+    ${pF("CREATED BY", srn.created_by || "—")}
+    ${pF("CREATED AT", fmtDateTime(srn.created_at))}
     ${pF("ASSIGNED TO", srn.assigned_to_name || srn.assigned_to_email || "—")}
-    ${pF("STATUS", srn.status || "—")}
+    ${srn.narration ? `<div><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:2px">${escapeHtml(srn.narration)}</div></div>` : pF("NARRATION", "—")}
   </div>
 </div>
 <table>
   <thead><tr>
-    <th class="w-8">SL NO</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
+    <th class="w-8">SL NO</th><th>MODEL</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
     <th style="text-align:right">SHORT QTY</th><th style="text-align:right">RECEIVED QTY</th>
     <th style="text-align:right">NR QTY</th><th style="text-align:right">PENDING QTY</th>
     <th>CHILD SRN NO</th>
   </tr></thead>
   <tbody>${itemRows}</tbody>
 </table>
-${srn.narration ? `<div class="narration-box"><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:4px">${escapeHtml(srn.narration)}</div></div>` : ""}
 <div class="footer">
   <span>Printed: ${new Date().toLocaleString()}</span>
   <span>By: ${escapeHtml(me?.name || me?.email || "—")}</span>
@@ -1055,6 +1057,7 @@ function printErn(ern, me) {
     const summaryPending = Math.max(0, (parseFloat(it.extra_qty) || 0) - totalChildAcc - totalChildRej);
     itemRows += `<tr class="summary-row">
       <td>${slNo}</td>
+      <td>${escapeHtml(it.model || "—")}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
       <td>${escapeHtml(it.description_1 || "—")}</td>
       <td>${escapeHtml(it.make || "")}</td>
@@ -1072,7 +1075,7 @@ function printErn(ern, me) {
       const isDraft = c.finalized === false;
       itemRows += `<tr class="child-row">
         <td></td>
-        <td colspan="3" style="padding-left:20px;font-size:10px;color:#64748b">
+        <td colspan="4" style="padding-left:20px;font-size:10px;color:#64748b">
           ${isDraft ? '<span style="background:#fef9c3;color:#854d0e;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">DRAFT</span>' : '<span style="background:#dcfce7;color:#166534;font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700">FINAL</span>'}
         </td>
         <td style="text-align:right;color:#64748b;font-size:10px">${runningExtra.toFixed(2)}</td>
@@ -1092,7 +1095,7 @@ function printErn(ern, me) {
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px;color:#0f172a;font-size:13px}
   h1{font-size:20px;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px}
   .header-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 20px;padding:14px;border:1px solid #e2e8f0;border-radius:4px}
-  .header-left,.header-right{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .header-left,.header-right{display:grid;grid-template-columns:1fr;gap:10px}
   .field-label{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;font-weight:700}
   .field-value{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;margin-top:2px}
   table{width:100%;border-collapse:collapse;margin-top:16px;font-size:11px}
@@ -1100,7 +1103,6 @@ function printErn(ern, me) {
   td{padding:5px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,"SF Mono",Menlo,monospace}
   tr.summary-row{background:#f8fafc;font-weight:600}
   tr.child-row{background:#ffffff}
-  .narration-box{margin-top:20px;padding:10px 14px;border:1px solid #e2e8f0;border-radius:4px}
   .footer{margin-top:20px;font-size:10px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:8px;display:flex;justify-content:space-between}
   @media print{body{padding:12mm}}
 </style></head><body>
@@ -1111,22 +1113,24 @@ function printErn(ern, me) {
     ${pF("RECEIPT NOTE NO", ern.parent_rn_no)}
     ${pF("ERN DATE", ern.ern_date ? ern.ern_date.split("T")[0].split("-").reverse().join("-") : "—")}
     ${pF("ERN NO", ern.ern_no)}
+    ${pF("STATUS", ern.status || "—")}
   </div>
   <div class="header-right">
+    ${pF("CREATED BY", ern.created_by || "—")}
+    ${pF("CREATED AT", fmtDateTime(ern.created_at))}
     ${pF("ASSIGNED TO", ern.assigned_to_name || ern.assigned_to_email || "—")}
-    ${pF("STATUS", ern.status || "—")}
+    ${ern.narration ? `<div><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:2px">${escapeHtml(ern.narration)}</div></div>` : pF("NARRATION", "—")}
   </div>
 </div>
 <table>
   <thead><tr>
-    <th>SL NO</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
+    <th>SL NO</th><th>MODEL</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
     <th style="text-align:right">EXTRA QTY</th><th style="text-align:right">ACCEPTED QTY</th>
     <th style="text-align:right">REJECTED QTY</th><th style="text-align:right">PENDING QTY</th>
     <th>CHILD ERN NO</th>
   </tr></thead>
   <tbody>${itemRows}</tbody>
 </table>
-${ern.narration ? `<div class="narration-box"><div class="field-label">NARRATION</div><div class="field-value" style="white-space:pre-wrap;margin-top:4px">${escapeHtml(ern.narration)}</div></div>` : ""}
 <div class="footer">
   <span>Printed: ${new Date().toLocaleString()}</span>
   <span>By: ${escapeHtml(me?.name || me?.email || "—")}</span>
@@ -2170,7 +2174,7 @@ function ShortReceivedNoteTab() {
       {view === "edit" && (
         <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} onOpenRn={handleOpenRn} />
       )}
-      <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
+      <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} onOpenRn={handleOpenRn} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
@@ -2222,7 +2226,7 @@ function ExtraReceivedNoteTab() {
       {view === "edit" && (
         <ErnFinalizeForm ern={editing} onCancel={goList} onSaved={goList} onOpenRn={handleOpenRn} />
       )}
-      <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
+      <ChildDetailDialog kind="ern" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} onOpenRn={handleOpenRn} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
     </>
   );
@@ -2428,9 +2432,10 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                         <Pencil size={14} />
                       </button>
                       <button
-                        onClick={() => handleDelete(r)}
-                        className="p-1.5 rounded-sm hover:bg-red-50 text-red-700"
-                        title="Delete"
+                        onClick={() => canEdit && handleDelete(r)}
+                        disabled={!canEdit}
+                        className={`p-1.5 rounded-sm ${canEdit ? "hover:bg-red-50 text-red-700" : "text-slate-300 cursor-not-allowed"}`}
+                        title={canEdit ? "Delete" : (isSrn ? "Cannot delete — already fully received" : "Cannot delete — already complete")}
                         data-testid={`${kind}-delete-${r[idField]}`}
                       >
                         <Trash size={14} />
@@ -2472,13 +2477,14 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 }
 
 /** Read-only detail dialog for SRN/ERN — layout mirrors the print format, includes Print button. */
-function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
+function ChildDetailDialog({ kind, doc, onClose, onOpen, onOpenRn }) {
   const { user: me } = useAuth();
   if (!doc) return null;
   const isSrn = kind === "srn";
   const idField = isSrn ? "srn_no" : "ern_no";
   const dateField = isSrn ? "srn_date" : "ern_date";
   const meta = statusMeta(doc.status);
+  const label = isSrn ? "SRN" : "ERN";
 
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
@@ -2489,19 +2495,42 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
           </DialogTitle>
         </DialogHeader>
 
-        {/* Header: 4-field + 2-field rows */}
-        <div className="space-y-3 py-2">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Header: left (doc details) / right (audit metadata) */}
+        <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+          {/* Left */}
+          <div className="space-y-2">
             <Detail k="RECEIPT NOTE DATE" v={fmtDate(doc.parent_rn_date)} />
-            <Detail k="RECEIPT NOTE NO" v={doc.parent_rn_no || "—"} />
-            <Detail k={`${isSrn ? "SRN" : "ERN"} DATE`} v={fmtDate(doc[dateField])} />
-            <Detail k={`${isSrn ? "SRN" : "ERN"} NO`} v={doc[idField] || "—"} />
-          </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-2 border-t border-slate-100">
-            <Detail k="ASSIGNED TO" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
+            <div>
+              <div className="label-sm">RECEIPT NOTE NO</div>
+              {onOpenRn ? (
+                <button
+                  onClick={() => onOpenRn(doc.parent_rn_id)}
+                  className="font-mono text-blue-700 hover:underline text-sm mt-0.5 text-left"
+                >
+                  {doc.parent_rn_no || "—"}
+                </button>
+              ) : (
+                <div className="font-mono text-sm mt-0.5">{doc.parent_rn_no || "—"}</div>
+              )}
+            </div>
+            <Detail k={`${label} DATE`} v={fmtDate(doc[dateField])} />
+            <Detail k={`${label} NO`} v={doc[idField] || "—"} />
             <div>
               <div className="label-sm">STATUS</div>
               <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm mt-1 inline-block ${meta.cls}`}>{meta.label}</span>
+            </div>
+          </div>
+          {/* Right */}
+          <div className="space-y-2">
+            <Detail k="CREATED BY" v={doc.created_by || "—"} />
+            <Detail k="CREATED AT" v={fmtDateTime(doc.created_at)} />
+            <div>
+              <div className="label-sm">ASSIGNED TO</div>
+              <div className="mt-1"><AssigneeBadge name={doc.assigned_to_name} email={doc.assigned_to_email} /></div>
+            </div>
+            <div>
+              <div className="label-sm">NARRATION</div>
+              <div className="font-mono mt-1 text-slate-900 whitespace-pre-wrap text-sm">{doc.narration || "—"}</div>
             </div>
           </div>
         </div>
@@ -2515,6 +2544,7 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
             <thead>
               <tr>
                 <th className="w-10">SL NO</th>
+                <th>MODEL</th>
                 <th>PART NO</th>
                 <th>DESCRIPTION 1</th>
                 <th>MAKE</th>
@@ -2548,6 +2578,7 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                   rows.push(
                     <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
                       <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono text-slate-700">{it.model || "—"}</td>
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
@@ -2567,7 +2598,7 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                     rows.push(
                       <tr key={`child-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/30"}>
                         <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
-                        <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                        <td colSpan={4} className="text-xs text-slate-500 pl-4">
                           <span className="text-slate-300">└ </span>
                           <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
                             {isDraftRow ? "Draft" : "Final"}
@@ -2590,6 +2621,7 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                   rows.push(
                     <tr key={`sum-${idx}`} className="bg-slate-50 font-semibold">
                       <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono text-slate-700">{it.model || "—"}</td>
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
@@ -2609,7 +2641,7 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                     rows.push(
                       <tr key={`child-${idx}-${ci}`} className={isDraftRow ? "bg-yellow-50/60" : "bg-green-50/30"}>
                         <td className="font-mono text-slate-400 text-[10px] pl-4">{idx + 1}.{ci + 1}</td>
-                        <td colSpan={3} className="text-xs text-slate-500 pl-4">
+                        <td colSpan={4} className="text-xs text-slate-500 pl-4">
                           <span className="text-slate-300">└ </span>
                           <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${isDraftRow ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
                             {isDraftRow ? "Draft" : "Final"}
@@ -2630,14 +2662,6 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
             </tbody>
           </table>
         </div>
-
-        {/* Narration */}
-        {doc.narration && (
-          <div className="pt-2">
-            <div className="label-sm">NARRATION</div>
-            <div className="font-mono mt-1 text-sm text-slate-700 whitespace-pre-wrap">{doc.narration}</div>
-          </div>
-        )}
 
         <DialogFooter className="flex items-center justify-between pt-2">
           <Button onClick={() => isSrn ? printSrn(doc, me) : printErn(doc, me)}

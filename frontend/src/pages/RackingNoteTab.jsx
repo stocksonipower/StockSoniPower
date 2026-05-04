@@ -664,6 +664,16 @@ function RackingNoteForm({ editing, onCancel, onSaved, onOpenRn }) {
     return map;
   }, [items]);
 
+  // Sum of pending_qty per (part_no, make) — same part may appear in multiple RN rows
+  const totalPendingByKey = useMemo(() => {
+    const map = {};
+    items.forEach((r) => {
+      const k = `${r.part_no}||${r.make}`;
+      if (r.pending_qty !== undefined) map[k] = (map[k] || 0) + r.pending_qty;
+    });
+    return map;
+  }, [items]);
+
   const buildPayload = () => {
     const srcType = editing?.source_type || "RN";
     const srcId = editing?.source_id || editing?.receipt_note_id;
@@ -699,7 +709,7 @@ function RackingNoteForm({ editing, onCancel, onSaved, onOpenRn }) {
     const pendingMap = {};
     items.forEach((r) => {
       const k = `${r.part_no}||${r.make}`;
-      if (pendingMap[k] === undefined && r.pending_qty !== undefined) pendingMap[k] = r.pending_qty;
+      if (r.pending_qty !== undefined) pendingMap[k] = (pendingMap[k] || 0) + r.pending_qty;
     });
     for (const [k, allocated] of Object.entries(allocatedByKey)) {
       const pending = pendingMap[k];
@@ -828,7 +838,8 @@ function RackingNoteForm({ editing, onCancel, onSaved, onOpenRn }) {
                 const allocated = allocatedByKey[key] || 0;
                 const pending = it.pending_qty;
                 const received = it.rackable_qty ?? it.received_qty;
-                const overAllocated = pending !== undefined && allocated > pending + 1e-6;
+                const totalPending = totalPendingByKey[key];
+                const overAllocated = totalPending !== undefined && allocated > totalPending + 1e-6;
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -844,7 +855,7 @@ function RackingNoteForm({ editing, onCancel, onSaved, onOpenRn }) {
                         data-testid={`rkn-qty-${idx}`} />
                       {pending !== undefined && (
                         <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`rkn-pending-hint-${idx}`}>
-                          {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${received}`}
+                          {overAllocated ? `Over ${allocated}/${totalPending}` : `Pending ${pending} of ${received}`}
                         </div>
                       )}
                     </td>
