@@ -276,16 +276,20 @@ async def _recompute_str_status(str_id: str):
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
         return
+    cur_status = s.get("status", "")
     requested = {}
     for it in s.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
     transferred = await _transfer_other_qty(str_id)
     if not requested or sum(transferred.values()) == 0:
-        new_status = "PENDING"
-    else:
-        all_full = all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items())
-        new_status = "FULLY_TRANSFERRED" if all_full else "PARTIALLY_TRANSFERRED"
+        # No recorded transfers yet — preserve DRAFT / TRANSFER_NOTE_DRAFT as-is.
+        # If PARTIALLY_TRANSFERRED (e.g. all STNs deleted), revert to TRANSFER_NOTE_DRAFT.
+        if cur_status == "PARTIALLY_TRANSFERRED":
+            await db.transfer_requests.update_one({"id": str_id}, {"$set": {"status": "TRANSFER_NOTE_DRAFT"}, "$unset": {"transferred_at": ""}})
+        return
+    all_full = all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items())
+    new_status = "FULLY_TRANSFERRED" if all_full else "PARTIALLY_TRANSFERRED"
     update = {"status": new_status}
     if new_status == "FULLY_TRANSFERRED":
         update["transferred_at"] = s.get("transferred_at") or now_iso()

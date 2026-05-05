@@ -444,7 +444,15 @@ class TransferRequestItem(BaseModel):
     part_no: str
     make: str
     quantity: float
-    # Optional destination preference (the Transfer Note can override)
+    # Optional preferred source location
+    src_godown_id: Optional[str] = ""
+    src_godown_name: Optional[str] = ""
+    src_rack_id: Optional[str] = ""
+    src_rack_no: Optional[str] = ""
+    src_box_id: Optional[str] = ""
+    src_box_no: Optional[str] = ""
+    src_box_category: Optional[str] = ""
+    # Optional preferred destination location (the Transfer Note can override)
     dest_godown_id: Optional[str] = ""
     dest_godown_name: Optional[str] = ""
     dest_rack_id: Optional[str] = ""
@@ -456,6 +464,7 @@ class TransferRequestItem(BaseModel):
 
 class TransferRequestCreate(BaseModel):
     purpose: str = ""  # free-form reason for the transfer
+    str_type: Optional[str] = "INTRA"  # "INTER" | "INTRA"
     items: List[TransferRequestItem] = []
     assigned_to_user_id: Optional[str] = None
 
@@ -467,6 +476,7 @@ class TransferRequest(BaseModel):
     fy: str
     serial: int
     purpose: str = ""
+    str_type: Optional[str] = "INTRA"  # "INTER" | "INTRA"
     items: List[TransferRequestItem] = []
     status: str = "PENDING"  # PENDING | PARTIALLY_TRANSFERRED | FULLY_TRANSFERRED
     transferred_at: Optional[str] = None
@@ -490,18 +500,18 @@ class TransferNoteItem(BaseModel):
     remarks_oem: Optional[str] = ""
     remarks_others: Optional[str] = ""
     item_category: Optional[str] = ""
-    # Source location (picked from)
-    src_godown_id: str
+    # Source location (optional in DRAFT; required at record time)
+    src_godown_id: Optional[str] = ""
     src_godown_name: Optional[str] = ""
-    src_rack_id: str
+    src_rack_id: Optional[str] = ""
     src_rack_no: Optional[str] = ""
     src_box_id: Optional[str] = ""
     src_box_no: Optional[str] = ""
     src_box_category: Optional[str] = ""
-    # Destination location (placed at)
-    dest_godown_id: str
+    # Destination location (optional in DRAFT; required at record time)
+    dest_godown_id: Optional[str] = ""
     dest_godown_name: Optional[str] = ""
-    dest_rack_id: str
+    dest_rack_id: Optional[str] = ""
     dest_rack_no: Optional[str] = ""
     dest_box_id: Optional[str] = ""
     dest_box_no: Optional[str] = ""
@@ -511,6 +521,7 @@ class TransferNoteItem(BaseModel):
 class TransferNoteCreate(BaseModel):
     transfer_request_id: str
     items: List[TransferNoteItem] = []
+    narration: Optional[str] = ""
 
 
 class TransferNote(BaseModel):
@@ -527,5 +538,7 @@ class TransferNote(BaseModel):
     recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
+    narration: Optional[str] = ""
+    auto_created: bool = False
 
 

@@ -264,6 +264,7 @@ async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = 
 
 
 def _validate_transfer_note_items(items):
+    """Strict validation used at record time (Save Final)."""
     if not items:
         raise HTTPException(status_code=400, detail="At least one item is required")
     for idx, it in enumerate(items, start=1):
@@ -277,16 +278,27 @@ def _validate_transfer_note_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
         if not (it.dest_godown_id or "").strip() or not (it.dest_rack_id or "").strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown and Rack are required")
-        # Disallow source == destination
-        if (
-            it.src_godown_id == it.dest_godown_id
-            and it.src_rack_id == it.dest_rack_id
-            and (it.src_box_id or "") == (it.dest_box_id or "")
-        ):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination locations must differ")
+        # Same-location transfers (no-op) are allowed by design
 
 
-async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None):
+def _validate_transfer_note_items_draft(items):
+    """Relaxed validation used when saving as draft. Only checks identifiers are present."""
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    for idx, it in enumerate(items, start=1):
+        if not it.part_no.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
+        if not it.make.strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
+        # qty=0 is valid in draft (freshly split rows)
+
+
+async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None, strict: bool = True):
+    """Validate STN items against the parent STR.
+
+    strict=True  (Save Final / record): checks cumulative qty cap + per-location stock.
+    strict=False (Save as Draft):       checks only cumulative qty cap; skips location stock.
+    """
     from helpers.stock_helpers import _stock_locations_for
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
@@ -302,13 +314,15 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     new_loc_sums = {}
     for it in items:
         k = _key(it.part_no, it.make)
-        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
-        loc_key = f"{it.part_no}||{it.make}||{it.src_box_id or ''}"
-        new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
+        qty = it.quantity or 0
+        new_sums[k] = new_sums.get(k, 0) + qty
+        if qty > 0 and (it.src_box_id or it.src_rack_id):
+            loc_key = f"{it.part_no}||{it.make}||{it.src_box_id or ''}"
+            new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + qty
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
 
-    # Cumulative qty cap vs request
+    # Cumulative qty cap vs request (always enforced)
     for k, new_q in new_sums.items():
         recv = requested.get(k, 0)
         used = other_sums.get(k, 0)
@@ -320,7 +334,10 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
                 f"(total {used + new_q} > {recv})"
             ))
 
-    # Per-source-location stock check
+    if not strict:
+        return
+
+    # Per-source-location stock check (strict mode only)
     loc_cache = {}
     for k_full, new_q in new_loc_sums.items():
         part_no, make, box_id = k_full.split("||", 2)
