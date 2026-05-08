@@ -201,6 +201,7 @@ async def list_transfer_requests(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
@@ -210,6 +211,12 @@ async def list_transfer_requests(
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"str_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     total = await db.transfer_requests.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.transfer_requests.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)

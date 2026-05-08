@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -23,6 +23,7 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
+import * as XLSX from "xlsx";
 
 const PAGE_SIZE = 100;
 
@@ -119,17 +120,31 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen, onFinalized 
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [finalizingId, setFinalizingId] = useState(null);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/transfer-requests", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/transfer-requests", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
+  }, [page, search]);
   useEffect(() => { load(); }, [load, reloadKey]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleDelete = async (s) => {
     if (!window.confirm(`Delete ${s.str_no}?`)) return;
@@ -178,6 +193,14 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen, onFinalized 
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div className="text-sm text-slate-600"></div>
         <div className="flex items-center gap-2">
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search"
+            className="rounded-sm font-mono h-9 w-80"
+            data-testid="str-search-input"
+          />
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="str-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>
@@ -362,6 +385,7 @@ const emptyTransferReqItem = () => ({
   dest_godown_id: "", dest_godown_name: "",
   dest_rack_id: "", dest_rack_no: "",
   dest_box_id: "", dest_box_no: "", dest_box_category: "",
+  importStatus: null, importError: "",
 });
 
 function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
@@ -375,6 +399,9 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
+  const [narration, setNarration] = useState("");
+  const fileInputRef = useRef(null);
+  const [importing, setImporting] = useState(false);
 
   const [godowns, setGodowns] = useState([]);
   const [racksByGodown, setRacksByGodown] = useState({});
@@ -400,6 +427,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
       setPurpose(editing.purpose || "");
       setStrType((editing.str_type || "INTRA").toUpperCase());
       setAssignedToUserId(editing.assigned_to_user_id || "");
+      setNarration(editing.narration || "");
       const initial = (editing.items || []).map((it) => ({
         ...emptyTransferReqItem(),
         ...it,
@@ -548,6 +576,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
   };
 
   const buildPayload = () => ({
+    narration: narration.trim(),
     purpose: purpose.trim(),
     str_type: strType,
     assigned_to_user_id: assignedToUserId || null,
@@ -576,6 +605,104 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
     } finally { setSaving(false); }
   };
 
+  const downloadTemplate = () => {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([["SL NO", "PART NO", "MAKE", "QTY"]]);
+    XLSX.utils.book_append_sheet(wb, ws, "Template");
+    XLSX.writeFile(wb, "STR_Import_Template.xlsx");
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setImporting(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const wb = XLSX.read(buffer);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+      const dataRows = rawRows.slice(1).filter((row) => row.some((cell) => String(cell).trim() !== ""));
+
+      const newItems = await Promise.all(dataRows.map(async (row) => {
+        const [, partNoRaw, makeRaw, qtyRaw] = row;
+        const partNo = String(partNoRaw ?? "").trim();
+        const makeExcel = String(makeRaw ?? "").trim();
+        const qtyNum = parseFloat(qtyRaw);
+        const base = emptyTransferReqItem();
+
+        if (!partNo) {
+          return { ...base, importStatus: "error", importError: "Part No required" };
+        }
+
+        try {
+          const { data } = await api.get(`/transfer-requests/lookup/${encodeURIComponent(partNo)}`);
+          const list = data.makes || [];
+
+          if (list.length === 0) {
+            return { ...base, part_no: partNo, partLooked: true, importStatus: "error", importError: "No stock available" };
+          }
+
+          const matched = makeExcel ? list.find((m) => m.make.toLowerCase() === makeExcel.toLowerCase()) : null;
+          const auto = list.length === 1 ? list[0] : null;
+          const resolved = matched || auto;
+
+          if (!resolved) {
+            return {
+              ...base,
+              part_no: partNo, makes: list, partLooked: true,
+              model: data.model || "", description_1: data.description_1 || "",
+              quantity: isNaN(qtyNum) ? "" : String(Math.max(0, qtyNum)),
+              importStatus: "make-required", importError: "Select a make",
+            };
+          }
+
+          const available = resolved.available_qty || 0;
+          const qty = isNaN(qtyNum) ? 0 : qtyNum;
+
+          if (qty < 0) {
+            return {
+              ...base,
+              part_no: partNo, makes: list, partLooked: true,
+              model: data.model || "", description_1: data.description_1 || "",
+              make: resolved.make, available_qty: available,
+              available_locations: resolved.available_locations || [],
+              quantity: String(qty),
+              importStatus: "error", importError: "Quantity must be >= 0",
+            };
+          }
+
+          const importStatus = qty > available + 1e-6 ? "warning" : "ok";
+          const importError = qty > available + 1e-6 ? `Over stock: available ${available}` : "";
+
+          return {
+            ...base,
+            part_no: partNo, makes: list, partLooked: true,
+            model: data.model || "", description_1: data.description_1 || "",
+            make: resolved.make, available_qty: available,
+            available_locations: resolved.available_locations || [],
+            quantity: String(qty),
+            importStatus, importError,
+          };
+        } catch {
+          return { ...base, part_no: partNo, partLooked: true, importStatus: "error", importError: "Part No not found" };
+        }
+      }));
+
+      setItems(newItems.length ? newItems : [emptyTransferReqItem()]);
+      const errCount = newItems.filter((r) => r.importStatus === "error").length;
+      if (errCount > 0) {
+        toast.error(`${errCount} row${errCount > 1 ? "s" : ""} invalid. Please fix before saving.`);
+      } else {
+        toast.success(`${newItems.length} row${newItems.length !== 1 ? "s" : ""} imported successfully.`);
+      }
+    } catch {
+      toast.error("Failed to read Excel file. Please check the format.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const saveAndFinalize = async () => {
     if (!validateItems()) return;
     setFinalizing(true);
@@ -596,23 +723,39 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
     } finally { setFinalizing(false); }
   };
 
+  const hasImportErrors = items.some((it) => it.importStatus === "error");
+
   return (
     <div className="mt-4 space-y-6" data-testid="str-create-view">
-      <div className="flex items-center justify-between">
+      <input type="file" ref={fileInputRef} accept=".xlsx,.xls" className="hidden" onChange={handleFileChange} />
+      <div className="flex items-center">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="str-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <div className="flex items-center gap-2">
-          <Button onClick={save} disabled={saving || finalizing} variant="outline" className="rounded-sm border-slate-300" data-testid="str-save-button">
-            <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save as Draft"}
-          </Button>
-          <Button onClick={saveAndFinalize} disabled={saving || finalizing} className="rounded-sm bg-teal-700 hover:bg-teal-800" data-testid="str-finalize-button">
-            <Checks size={14} weight="bold" className="mr-2" /> {finalizing ? "Finalizing…" : "Finalize & Create Transfer Note"}
-          </Button>
-        </div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="col-span-2 lg:col-span-3 flex items-center gap-6 flex-wrap">
+          <Label className="label-sm">STR Type</Label>
+          <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-inter">
+            <input type="radio" name="str-type" value="INTER"
+              checked={strType === "INTER"} onChange={() => setStrType("INTER")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTER"); } }}
+              className="accent-blue-700" />
+            <span className="text-sm font-semibold text-slate-700">
+              <ArrowsLeftRight size={14} weight="bold" className="inline mr-1" /> Inter Godown
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-intra">
+            <input type="radio" name="str-type" value="INTRA"
+              checked={strType === "INTRA"} onChange={() => setStrType("INTRA")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTRA"); } }}
+              className="accent-blue-700" />
+            <span className="text-sm font-semibold text-slate-700">
+              <MapPin size={14} weight="bold" className="inline mr-1" /> Intra Godown
+            </span>
+          </label>
+        </div>
         <div>
           <Label className="label-sm">STR Date</Label>
           <Input value={strDate} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="str-date-input" />
@@ -636,28 +779,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
             </SelectContent>
           </Select>
         </div>
-        <div className="col-span-2 lg:col-span-3 flex items-center gap-6 flex-wrap">
-          <Label className="label-sm">STR Type</Label>
-          <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-inter">
-            <input type="radio" name="str-type" value="INTER"
-              checked={strType === "INTER"} onChange={() => setStrType("INTER")}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTER"); } }}
-              className="accent-blue-700" />
-            <span className="text-sm font-semibold text-slate-700">
-              <ArrowsLeftRight size={14} weight="bold" className="inline mr-1" /> Inter Godown
-            </span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-intra">
-            <input type="radio" name="str-type" value="INTRA"
-              checked={strType === "INTRA"} onChange={() => setStrType("INTRA")}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTRA"); } }}
-              className="accent-blue-700" />
-            <span className="text-sm font-semibold text-slate-700">
-              <MapPin size={14} weight="bold" className="inline mr-1" /> Intra Godown
-            </span>
-          </label>
-        </div>
-        <div className="col-span-2">
+        <div className="col-span-2 lg:col-span-3">
           <AssigneeSelect value={assignedToUserId} onChange={setAssignedToUserId} module="stock_transfer" testid="str-assignee" />
         </div>
       </div>
@@ -669,6 +791,13 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
             <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""} · FROM / TO locations are optional suggestions (Transfer Note can modify)</div>
           </div>
           <div className="flex items-center gap-2">
+            <Button onClick={downloadTemplate} variant="outline" size="sm" className="rounded-sm border-slate-300 h-9" data-testid="str-download-template">
+              <DownloadSimple size={13} weight="bold" className="mr-1.5" /> Download Template
+            </Button>
+            <Button onClick={() => fileInputRef.current?.click()} variant="outline" size="sm" disabled={importing} className="rounded-sm border-slate-300 h-9" data-testid="str-import-excel">
+              <ArrowsClockwise size={13} weight="bold" className={`mr-1.5 ${importing ? "animate-spin" : ""}`} />
+              {importing ? "Importing…" : "Import Excel"}
+            </Button>
             <Input type="number" min="2" max="500" value={addCount} onChange={(e) => setAddCount(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItems(); } }}
               placeholder="Count" className="rounded-sm font-mono h-9 w-24 text-center" data-testid="str-add-row-count" />
@@ -702,7 +831,11 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                 const srcKey = it.src_godown_id ? `${it.src_godown_id}|${it.src_rack_id}|${it.src_box_id || ""}` : undefined;
                 const hasSrcLocs = it.make && (it.available_locations || []).length > 0;
                 return (
-                  <tr key={idx} data-testid={`str-item-row-${idx}`} className={overStock ? "bg-red-50 align-top" : "align-top"}>
+                  <tr key={idx} data-testid={`str-item-row-${idx}`} className={
+                    it.importStatus === "make-required" ? "bg-yellow-50 align-top" :
+                    (it.importStatus === "error" || it.importStatus === "warning" || overStock) ? "bg-red-50 align-top" :
+                    "align-top"
+                  }>
                     <td className="font-mono text-slate-500 pt-2">{idx + 1}</td>
                     <td className="pt-2">
                       <Input value={it.model || ""} disabled
@@ -711,9 +844,14 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                     </td>
                     <td className="pt-2">
                       <Input value={it.part_no}
-                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", available_qty: 0, model: "", description_1: "", available_locations: [] })}
+                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", available_qty: 0, model: "", description_1: "", available_locations: [], importStatus: null, importError: "" })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
                         placeholder="Enter part no" className="rounded-sm font-mono h-8 w-32" data-testid={`str-part-no-${idx}`} />
+                      {it.importError && (
+                        <div className={`text-[10px] mt-0.5 font-semibold ${it.importStatus === "make-required" ? "text-amber-700" : "text-red-600"}`}>
+                          {it.importError}
+                        </div>
+                      )}
                     </td>
                     <td className="pt-2 max-w-[200px]">
                       <Input value={it.description_1 || ""} disabled
@@ -798,6 +936,27 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
               })}
             </tbody>
           </table>
+        </div>
+        <div className="p-4 border-t border-slate-200 flex items-start justify-between gap-6">
+          <div className="flex-1 max-w-lg">
+            <Label className="label-sm block mb-1.5">Narration / Notes</Label>
+            <textarea
+              value={narration}
+              onChange={(e) => setNarration(e.target.value)}
+              placeholder="Optional notes about this transfer request…"
+              rows={2}
+              className="w-full rounded-sm border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+              data-testid="str-narration"
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-6 shrink-0">
+            <Button onClick={save} disabled={saving || finalizing || hasImportErrors || importing} variant="outline" className="rounded-sm border-slate-300" data-testid="str-save-button">
+              <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save as Draft"}
+            </Button>
+            <Button onClick={saveAndFinalize} disabled={saving || finalizing || hasImportErrors || importing} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="str-finalize-button">
+              <Checks size={14} weight="bold" className="mr-2" /> {finalizing ? "Saving…" : "Save Final"}
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -1257,18 +1416,10 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   return (
     <div className="mt-4 space-y-6" data-testid="stn-edit-view">
       {/* Top action bar */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <div className="flex items-center gap-2">
-          <Button onClick={saveAsDraft} disabled={saving} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-save-draft-button">
-            <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save as Draft"}
-          </Button>
-          <Button onClick={saveFinal} disabled={saving} className="rounded-sm bg-emerald-700 hover:bg-emerald-800" data-testid="stn-save-final-button">
-            <CheckCircle size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save Final"}
-          </Button>
-        </div>
       </div>
 
       {/* STN + STR info header */}
@@ -1487,7 +1638,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
             <Button onClick={saveAsDraft} disabled={saving} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-save-draft-footer">
               <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save as Draft"}
             </Button>
-            <Button onClick={saveFinal} disabled={saving} className="rounded-sm bg-emerald-700 hover:bg-emerald-800" data-testid="stn-save-final-footer">
+            <Button onClick={saveFinal} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="stn-save-final-footer">
               <CheckCircle size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : "Save Final"}
             </Button>
           </div>
