@@ -113,13 +113,12 @@ function TransferRequestTab() {
   );
 }
 
-function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen, onFinalized }) {
+function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
   const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [finalizingId, setFinalizingId] = useState(null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef(null);
 
@@ -153,18 +152,6 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen, onFinalized 
       toast.success(`${s.str_no} deleted`);
       load();
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
-  };
-
-  const handleFinalize = async (r) => {
-    if (!window.confirm(`Finalize ${r.str_no}?\n\nThis will lock the Transfer Request and auto-create a Transfer Note for warehouse processing.`)) return;
-    setFinalizingId(r.id);
-    try {
-      const { data } = await api.post(`/transfer-requests/${r.id}/finalize`);
-      toast.success(`${r.str_no} finalized — Transfer Note ${data.stn_no} auto-created. Go to the Transfer Note tab to complete.`);
-      onFinalized?.();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not finalize");
-    } finally { setFinalizingId(null); }
   };
 
   const columns = useMemo(() => [
@@ -278,18 +265,6 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen, onFinalized 
                       data-testid={`str-delete-${r.str_no}`}>
                       <Trash size={14} />
                     </button>
-                    {isDraft && (
-                      <Button
-                        onClick={() => handleFinalize(r)}
-                        disabled={lockedToOther || finalizingId === r.id}
-                        size="sm"
-                        title={lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Finalize & create Transfer Note"}
-                        className="rounded-sm h-7 text-xs bg-teal-700 hover:bg-teal-800 text-white"
-                        data-testid={`str-finalize-${r.str_no}`}>
-                        <Checks size={12} weight="bold" className="mr-1" />
-                        {finalizingId === r.id ? "Finalizing…" : "Finalize"}
-                      </Button>
-                    )}
                   </td>
                 </tr>
               );
@@ -393,7 +368,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
   const [strNo, setStrNo] = useState("");
   const [strDate, setStrDate] = useState("");
   const [purpose, setPurpose] = useState("");
-  const [strType, setStrType] = useState("INTRA");
+  const [strType, setStrType] = useState("INTER");
   const [items, setItems] = useState([emptyTransferReqItem()]);
   const [addCount, setAddCount] = useState("");
   const [saving, setSaving] = useState(false);
@@ -466,6 +441,17 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
     setAddCount("");
   };
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
+  const insertItemAfter = (idx) => {
+    setItems((p) => {
+      const next = [...p];
+      next.splice(idx + 1, 0, emptyTransferReqItem());
+      return next;
+    });
+    setTimeout(() => {
+      const el = document.querySelector(`[data-testid="str-part-no-${idx + 1}"]`);
+      if (el) el.focus();
+    }, 50);
+  };
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
   const lookupMakes = async (i, partNo) => {
@@ -802,8 +788,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItems(); } }}
               placeholder="Count" className="rounded-sm font-mono h-9 w-24 text-center" data-testid="str-add-row-count" />
             <Button onClick={addItems} variant="outline" className="rounded-sm" data-testid="str-add-row-button">
-              <Plus size={14} weight="bold" className="mr-1" />
-              {addCount && parseInt(addCount, 10) > 1 ? `Add ${parseInt(addCount, 10) - 1} Row${parseInt(addCount, 10) - 1 > 1 ? "s" : ""}` : "Add Row"}
+              <Plus size={14} weight="bold" className="mr-1" /> Add Row{addCount && parseInt(addCount, 10) > 1 ? "s" : ""}
             </Button>
           </div>
         </div>
@@ -820,6 +805,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                 <th>FROM GODOWN (suggestion)</th>
                 <th>QTY</th>
                 <th>TO GODOWN (suggestion)</th>
+                <th className="w-10"></th>
                 <th className="w-10"></th>
               </tr>
             </thead>
@@ -846,6 +832,15 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                       <Input value={it.part_no}
                         onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", available_qty: 0, model: "", description_1: "", available_locations: [], importStatus: null, importError: "" })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
+                        onKeyDown={async (e) => {
+                          if (e.key === "Tab" && !e.shiftKey && e.target.value.trim() && !it.partLooked) {
+                            e.preventDefault();
+                            await lookupMakes(idx, e.target.value);
+                            setTimeout(() => {
+                              document.querySelector(`[data-testid="str-make-${idx}"]`)?.focus();
+                            }, 0);
+                          }
+                        }}
                         placeholder="Enter part no" className="rounded-sm font-mono h-8 w-32" data-testid={`str-part-no-${idx}`} />
                       {it.importError && (
                         <div className={`text-[10px] mt-0.5 font-semibold ${it.importStatus === "make-required" ? "text-amber-700" : "text-red-600"}`}>
@@ -925,6 +920,14 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                           {destBoxes.map((b) => <SelectItem key={b.id} value={b.id} className="font-mono">{b.box_no}</SelectItem>)}
                         </SelectContent>
                       </Select>
+                    </td>
+                    <td className="pt-2">
+                      <button onClick={() => insertItemAfter(idx)}
+                        className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-600"
+                        data-testid={`str-plus-${idx}`}
+                        title="Add row below">
+                        <Plus size={14} weight="bold" />
+                      </button>
                     </td>
                     <td className="pt-2">
                       <button onClick={() => removeItem(idx)} disabled={items.length === 1}

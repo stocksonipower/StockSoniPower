@@ -24,7 +24,8 @@
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\" -Directory)",
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\" -Recurse -File)",
       "Bash(Select-Object -First 50)",
-      "Bash(findstr /i \"database\\\\|server\\\\|db\\\\|main\")"
+      "Bash(findstr /i \"database\\\\|server\\\\|db\\\\|main\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\frontend\\\\src\\\\pages\" -Filter \"*.jsx\")"
     ]
   }
 }
