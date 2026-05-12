@@ -25,7 +25,8 @@
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\backend\" -Recurse -File)",
       "Bash(Select-Object -First 50)",
       "Bash(findstr /i \"database\\\\|server\\\\|db\\\\|main\")",
-      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\frontend\\\\src\\\\pages\" -Filter \"*.jsx\")"
+      "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\frontend\\\\src\\\\pages\" -Filter \"*.jsx\")",
+      "PowerShell(py \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\\\\_check_stock2.py\")"
     ]
   }
 }

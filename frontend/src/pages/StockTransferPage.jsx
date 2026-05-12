@@ -33,6 +33,17 @@ function fmtDate(iso) {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : iso;
 }
 
+function fmtDateTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const date = `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+  let h = d.getHours();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  const time = `${String(h).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")} ${ampm}`;
+  return `${date} ${time}`;
+}
+
 function Detail({ k, v }) {
   return (
     <div>
@@ -236,8 +247,9 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td>
                     {(() => {
                       const t = (r.str_type || "INTRA").toUpperCase();
-                      const cls = t === "INTER" ? "bg-purple-50 text-purple-800" : "bg-teal-50 text-teal-800";
-                      return <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-type-${r.str_no}`}>{t === "INTER" ? "Inter Godown" : "Intra Godown"}</span>;
+                      const cls = t === "INTER" ? "bg-purple-50 text-purple-800" : t === "BOTH" ? "bg-indigo-50 text-indigo-800" : "bg-teal-50 text-teal-800";
+                      const label = t === "INTER" ? "Inter Godown" : t === "BOTH" ? "Inter + Intra" : "Intra Godown";
+                      return <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-type-${r.str_no}`}>{label}</span>;
                     })()}
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.str_date)}</td>
@@ -297,54 +309,115 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
 }
 
 function TransferRequestDetailDialog({ s, onClose }) {
+  const handlePrint = () => {
+    const style = document.createElement("style");
+    style.id = "__str-print-style";
+    style.innerHTML = `
+      @media print {
+        body > *:not([data-radix-portal]) { display: none !important; }
+        [data-radix-dialog-overlay] { display: none !important; }
+        [data-radix-dialog-content] { box-shadow: none !important; position: static !important; max-width: 100% !important; transform: none !important; }
+      }
+    `;
+    document.head.appendChild(style);
+    window.print();
+    setTimeout(() => document.getElementById("__str-print-style")?.remove(), 500);
+  };
+
+  const strT = (s?.str_type || "INTRA").toUpperCase();
+  const strTypeLabel = strT === "INTER" ? "Inter Godown" : strT === "BOTH" ? "Inter + Intra" : "Intra Godown";
+  const strTypeCls = strT === "INTER" ? "bg-purple-50 text-purple-800" : strT === "BOTH" ? "bg-indigo-50 text-indigo-800" : "bg-teal-50 text-teal-800";
+
   return (
     <Dialog open={!!s} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-4xl rounded-sm" data-testid="str-detail-dialog">
+      <DialogContent className="max-w-5xl rounded-sm" data-testid="str-detail-dialog">
         {s && (
           <>
             <DialogHeader>
-              <DialogTitle className="text-2xl font-black font-mono">{s.str_no}</DialogTitle>
+              <div className="flex items-center justify-between">
+                <DialogTitle className="text-2xl font-black font-mono">{s.str_no}</DialogTitle>
+                <Button onClick={handlePrint} variant="outline" size="sm" className="rounded-sm border-slate-300 mr-6">
+                  <Printer size={13} weight="bold" className="mr-1.5" /> Print
+                </Button>
+              </div>
             </DialogHeader>
-            <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Request Date" v={fmtDate(s.str_date)} />
-              <Detail k="Status" v={strStatusLabel(s.status)} />
-              <Detail k="STR Type" v={(s.str_type || "INTRA") === "INTER" ? "Inter Godown" : "Intra Godown"} />
-              <Detail k="Purpose" v={s.purpose || "—"} />
-              <Detail k="Created By" v={s.created_by || "—"} />
-              <div className="col-span-2">
-                <div className="label-sm">Assigned To</div>
-                <div className="mt-1"><AssigneeBadge name={s.assigned_to_name} email={s.assigned_to_email} /></div>
+
+            {/* Header: left / right split */}
+            <div className="grid grid-cols-2 gap-x-8 gap-y-0 text-sm border-b border-slate-200 pb-4 mb-4">
+              {/* LEFT */}
+              <div className="space-y-3">
+                <div>
+                  <div className="label-sm">STR TYPE</div>
+                  <div className="mt-1">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${strTypeCls}`}>
+                      {strTypeLabel}
+                    </span>
+                  </div>
+                </div>
+                <Detail k="STR DATE" v={fmtDate(s.str_date)} />
+                <Detail k="STR NO" v={s.str_no} />
+                <Detail k="STR PURPOSE" v={s.purpose || "—"} />
+                <Detail k="NARRATION" v={s.narration || "—"} />
+              </div>
+
+              {/* RIGHT */}
+              <div className="space-y-3">
+                <Detail k="CREATED AT" v={fmtDateTime(s.created_at)} />
+                <Detail k="CREATED BY" v={s.created_by || "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO</div>
+                  <div className="mt-1"><AssigneeBadge name={s.assigned_to_name} email={s.assigned_to_email} /></div>
+                </div>
+                <div>
+                  <div className="label-sm">STATUS</div>
+                  <div className="mt-1">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${strStatusCls(s.status)}`}>
+                      {strStatusLabel(s.status)}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
-            <table className="data-table w-full text-xs">
-              <thead>
-                <tr>
-                  <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
-                  <th className="text-right">QTY</th><th>FROM (suggestion)</th><th>TO (suggestion)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(s.items || []).map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                    <td className="text-right font-mono font-bold">{it.quantity}</td>
-                    <td className="font-mono text-slate-600 text-xs">
-                      {it.src_godown_name || it.src_rack_no
-                        ? `${it.src_godown_name || "?"}/${it.src_rack_no || "?"}${it.src_box_no ? "/" + it.src_box_no : ""}`
-                        : "—"}
-                    </td>
-                    <td className="font-mono text-slate-600 text-xs">
-                      {it.dest_godown_name || it.dest_rack_no
-                        ? `${it.dest_godown_name || "?"}/${it.dest_rack_no || "?"}${it.dest_box_no ? "/" + it.dest_box_no : ""}`
-                        : "—"}
-                    </td>
+
+            {/* Items table */}
+            <div className="overflow-x-auto">
+              <table className="data-table w-full text-xs">
+                <thead>
+                  <tr>
+                    <th>SL NO</th>
+                    <th>MODEL</th>
+                    <th>PART NO</th>
+                    <th>DESCRIPTION 1</th>
+                    <th>MAKE</th>
+                    <th>FROM GODOWN</th>
+                    <th className="text-right">QTY</th>
+                    <th>TO GODOWN</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {(s.items || []).map((it, idx) => (
+                    <tr key={idx}>
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
+                      <td className="font-mono text-slate-700">{it.model || "—"}</td>
+                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                      <td className="text-slate-700 max-w-[220px] truncate">{it.description_1 || "—"}</td>
+                      <td>{it.make}</td>
+                      <td className="font-mono text-slate-600">
+                        {it.src_godown_name || it.src_rack_no
+                          ? [it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ")
+                          : "—"}
+                      </td>
+                      <td className="text-right font-mono font-bold">{it.quantity}</td>
+                      <td className="font-mono text-slate-600">
+                        {it.dest_godown_name || it.dest_rack_no
+                          ? [it.dest_godown_name, it.dest_rack_no, it.dest_box_no].filter(Boolean).join(" / ")
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
       </DialogContent>
@@ -495,11 +568,31 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
       return;
     }
     const loc = (items[i].available_locations || []).find((l) => `${l.godown_id}|${l.rack_id}|${l.box_id || ""}` === locKey);
-    if (loc) updateItem(i, {
-      src_godown_id: loc.godown_id, src_godown_name: loc.godown_name,
-      src_rack_id: loc.rack_id, src_rack_no: loc.rack_no,
-      src_box_id: loc.box_id || "", src_box_no: loc.box_no || "", src_box_category: loc.box_category || "",
-    });
+    if (loc) {
+      const destGid = items[i].dest_godown_id;
+      const destInvalid = destGid && (
+        (strType === "INTER" && destGid === loc.godown_id) ||
+        (strType === "INTRA" && destGid !== loc.godown_id)
+      );
+      updateItem(i, {
+        src_godown_id: loc.godown_id, src_godown_name: loc.godown_name,
+        src_rack_id: loc.rack_id, src_rack_no: loc.rack_no,
+        src_box_id: loc.box_id || "", src_box_no: loc.box_no || "", src_box_category: loc.box_category || "",
+        ...(destInvalid ? { dest_godown_id: "", dest_godown_name: "", dest_rack_id: "", dest_rack_no: "", dest_box_id: "", dest_box_no: "", dest_box_category: "" } : {}),
+      });
+    }
+  };
+
+  const onStrTypeChange = (type) => {
+    setStrType(type);
+    if (type === "BOTH") return;
+    setItems((prev) => prev.map((it) => {
+      if (!it.src_godown_id || !it.dest_godown_id) return it;
+      const sameGodown = it.src_godown_id === it.dest_godown_id;
+      const nowInvalid = type === "INTER" ? sameGodown : !sameGodown;
+      if (!nowInvalid) return it;
+      return { ...it, dest_godown_id: "", dest_godown_name: "", dest_rack_id: "", dest_rack_no: "", dest_box_id: "", dest_box_no: "", dest_box_category: "" };
+    }));
   };
 
   const onDestGodownChange = async (i, gid) => {
@@ -544,11 +637,54 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return false; }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return false; }
-      if (q > (it.available_qty || 0) + 1e-6) {
-        toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock`);
+      const srcLoc = it.src_godown_id
+        ? (it.available_locations || []).find(
+            (l) => l.godown_id === it.src_godown_id &&
+                   l.rack_id === it.src_rack_id &&
+                   (l.box_id || "") === (it.src_box_id || "")
+          )
+        : null;
+      const limit = srcLoc ? srcLoc.current_qty : (it.available_qty || 0);
+      if (q > limit + 1e-6) {
+        toast.error(srcLoc
+          ? `Row ${i + 1}: ${it.part_no}/${it.make} — only ${limit} available at the selected location`
+          : `Row ${i + 1}: ${it.part_no}/${it.make} — only ${limit} in stock`
+        );
+        return false;
+      }
+      if (it.src_godown_id && it.dest_godown_id) {
+        if (strType === "INTER" && it.src_godown_id === it.dest_godown_id) {
+          toast.error(`Row ${i + 1}: Inter Godown transfer — source and destination must be different godowns`);
+          return false;
+        }
+        if (strType === "INTRA" && it.src_godown_id !== it.dest_godown_id) {
+          toast.error(`Row ${i + 1}: Intra Godown transfer — source and destination must be the same godown`);
+          return false;
+        }
+      }
+    }
+    // Aggregate total qty per source location — catch multi-row over-requests from the same location
+    const locTotals = {};
+    for (const it of items) {
+      if (!it.src_godown_id) continue;
+      const locKey = `${it.src_godown_id}|${it.src_rack_id}|${it.src_box_id || ""}`;
+      if (!locTotals[locKey]) {
+        const loc = (it.available_locations || []).find(
+          (l) => l.godown_id === it.src_godown_id &&
+                 l.rack_id === it.src_rack_id &&
+                 (l.box_id || "") === (it.src_box_id || "")
+        );
+        locTotals[locKey] = { qty: 0, loc, label: loc ? `${loc.godown_name}/${loc.rack_no}${loc.box_no ? "/" + loc.box_no : ""}` : locKey };
+      }
+      locTotals[locKey].qty += parseFloat(it.quantity) || 0;
+    }
+    for (const { qty, loc, label } of Object.values(locTotals)) {
+      if (loc && qty > loc.current_qty + 1e-6) {
+        toast.error(`Total ${qty} requested from ${label} exceeds available ${loc.current_qty}`);
         return false;
       }
     }
+
     for (const [k, total] of Object.entries(requestedByKey)) {
       const [p, m] = k.split("||");
       const row = items.find((r) => r.part_no === p && r.make === m);
@@ -725,8 +861,8 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
           <Label className="label-sm">STR Type</Label>
           <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-inter">
             <input type="radio" name="str-type" value="INTER"
-              checked={strType === "INTER"} onChange={() => setStrType("INTER")}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTER"); } }}
+              checked={strType === "INTER"} onChange={() => onStrTypeChange("INTER")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onStrTypeChange("INTER"); } }}
               className="accent-blue-700" />
             <span className="text-sm font-semibold text-slate-700">
               <ArrowsLeftRight size={14} weight="bold" className="inline mr-1" /> Inter Godown
@@ -734,11 +870,20 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
           </label>
           <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-intra">
             <input type="radio" name="str-type" value="INTRA"
-              checked={strType === "INTRA"} onChange={() => setStrType("INTRA")}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setStrType("INTRA"); } }}
+              checked={strType === "INTRA"} onChange={() => onStrTypeChange("INTRA")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onStrTypeChange("INTRA"); } }}
               className="accent-blue-700" />
             <span className="text-sm font-semibold text-slate-700">
               <MapPin size={14} weight="bold" className="inline mr-1" /> Intra Godown
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer" data-testid="str-type-both">
+            <input type="radio" name="str-type" value="BOTH"
+              checked={strType === "BOTH"} onChange={() => onStrTypeChange("BOTH")}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onStrTypeChange("BOTH"); } }}
+              className="accent-blue-700" />
+            <span className="text-sm font-semibold text-slate-700">
+              <ArrowsLeftRight size={14} weight="bold" className="inline mr-0.5" /><MapPin size={14} weight="bold" className="inline mr-1" /> Both
             </span>
           </label>
         </div>
@@ -786,7 +931,7 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
             </Button>
             <Input type="number" min="2" max="500" value={addCount} onChange={(e) => setAddCount(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItems(); } }}
-              placeholder="Count" className="rounded-sm font-mono h-9 w-24 text-center" data-testid="str-add-row-count" />
+              placeholder="Qty" className="rounded-sm font-mono h-9 w-24 text-center" data-testid="str-add-row-count" />
             <Button onClick={addItems} variant="outline" className="rounded-sm" data-testid="str-add-row-button">
               <Plus size={14} weight="bold" className="mr-1" /> Add Row{addCount && parseInt(addCount, 10) > 1 ? "s" : ""}
             </Button>
@@ -811,7 +956,26 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const overStock = it.available_qty !== undefined && (parseFloat(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+                const srcLoc = it.src_godown_id
+                  ? (it.available_locations || []).find(
+                      (l) => l.godown_id === it.src_godown_id &&
+                             l.rack_id === it.src_rack_id &&
+                             (l.box_id || "") === (it.src_box_id || "")
+                    )
+                  : null;
+                const sameSrcTotal = it.src_godown_id
+                  ? items.reduce((sum, r) =>
+                      r.src_godown_id === it.src_godown_id &&
+                      r.src_rack_id === it.src_rack_id &&
+                      (r.src_box_id || "") === (it.src_box_id || "")
+                        ? sum + (parseFloat(r.quantity) || 0)
+                        : sum, 0)
+                  : 0;
+                const overStock = it.available_qty !== undefined && (
+                  srcLoc
+                    ? sameSrcTotal > srcLoc.current_qty + 1e-6
+                    : (parseFloat(it.quantity) || 0) > (it.available_qty || 0) + 1e-6
+                );
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
                 const destBoxes = boxesByRack[it.dest_rack_id] || [];
                 const srcKey = it.src_godown_id ? `${it.src_godown_id}|${it.src_rack_id}|${it.src_box_id || ""}` : undefined;
@@ -891,7 +1055,12 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                         data-testid={`str-qty-${idx}`} />
                       {it.make && (
                         <div className={`text-[10px] mt-0.5 ${overStock ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`str-avail-hint-${idx}`}>
-                          {overStock ? `Over ${it.quantity}/${it.available_qty}` : `Avail ${it.available_qty}`}
+                          {srcLoc
+                            ? (sameSrcTotal > srcLoc.current_qty + 1e-6
+                                ? `Over (total ${sameSrcTotal}/${srcLoc.current_qty} at loc)`
+                                : `Avail ${srcLoc.current_qty}`)
+                            : (overStock ? `Over ${it.quantity}/${it.available_qty}` : `Avail ${it.available_qty}`)
+                          }
                         </div>
                       )}
                     </td>
@@ -901,7 +1070,12 @@ function TransferRequestForm({ editing, onCancel, onSaved, onFinalized }) {
                           <SelectValue placeholder="Godown" />
                         </SelectTrigger>
                         <SelectContent>
-                          {godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
+                          {(strType === "INTRA" && it.src_godown_id
+                            ? godowns.filter((g) => g.id === it.src_godown_id)
+                            : strType === "INTER" && it.src_godown_id
+                            ? godowns.filter((g) => g.id !== it.src_godown_id)
+                            : godowns
+                          ).map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
                         </SelectContent>
                       </Select>
                       <Select disabled={!it.dest_godown_id} value={it.dest_rack_id || undefined} onValueChange={(v) => onDestRackChange(idx, v)}>

@@ -246,6 +246,29 @@ def _validate_transfer_request_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
 
 
+def _validate_str_type_godowns(str_type: str, items):
+    """INTER = different godowns required; INTRA = same godown required.
+    Only enforced when both src_godown_id and dest_godown_id are provided on an item."""
+    t = (str_type or "INTRA").upper()
+    if t == "BOTH":
+        return
+    for idx, it in enumerate(items, start=1):
+        src = (it.src_godown_id or "").strip()
+        dst = (it.dest_godown_id or "").strip()
+        if not src or not dst:
+            continue
+        if t == "INTER" and src == dst:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Row {idx}: Inter Godown transfer requires source and destination to be different godowns",
+            )
+        if t == "INTRA" and src != dst:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Row {idx}: Intra Godown transfer requires source and destination to be the same godown",
+            )
+
+
 async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = None):
     """Block requesting more than current stock total for any (part,make)."""
     from helpers.stock_helpers import _stock_total_for

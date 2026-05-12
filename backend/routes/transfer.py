@@ -12,6 +12,7 @@ from helpers.note_helpers import current_fy_label, _alloc_serial, _key
 from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _transfer_other_src_loc_qty
 from helpers.validation import (
     _validate_transfer_request_items, _validate_transfer_request_qty,
+    _validate_str_type_godowns,
     _validate_transfer_note_items, _validate_transfer_note_items_draft,
     _validate_transfer_note_constraints, _box_id_required_for_rack,
 )
@@ -149,6 +150,7 @@ async def next_transfer_request_no(user=Depends(get_current_user)):
 @router.post("/transfer-requests", response_model=TransferRequest)
 async def create_transfer_request(payload: TransferRequestCreate, user=Depends(get_current_user)):
     _validate_transfer_request_items(payload.items)
+    _validate_str_type_godowns(payload.str_type, payload.items)
     await _validate_transfer_request_qty(payload.items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_transfer")
     today = datetime.now(timezone.utc)
@@ -246,6 +248,7 @@ async def update_transfer_request(str_id: str, payload: TransferRequestCreate, u
     if existing.get("status", "") != "DRAFT":
         raise HTTPException(status_code=409, detail="Cannot edit — Transfer Request has been finalized. Only DRAFT requests can be edited.")
     _validate_transfer_request_items(payload.items)
+    _validate_str_type_godowns(payload.str_type, payload.items)
     await _validate_transfer_request_qty(payload.items, exclude_str_id=str_id)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_transfer")
     update = {
@@ -501,11 +504,7 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
         )
         if same_loc:
             continue  # no-op — no stock movement, skip balance check
-        bal = await db.transactions.aggregate([
-            {"$match": {"part_no": it["part_no"], "make": it["make"], "box_id": src_box}},
-            {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
-        ]).to_list(1)
-        avail = (bal[0]["q"] if bal else 0)
+        avail = await _get_balance(it["part_no"], it["make"], it["src_godown_id"], it["src_rack_id"], src_box)
         if avail < it["quantity"] - 1e-6:
             raise HTTPException(status_code=400, detail=(
                 f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at source "
