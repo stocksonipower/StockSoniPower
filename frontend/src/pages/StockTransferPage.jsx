@@ -1382,6 +1382,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([]);
   const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
+  const [strType, setStrType] = useState("INTER");
 
   // Pending / requested qty per "part_no||make" key — fetched from prepare endpoint
   const [pendingByKey, setPendingByKey] = useState({});
@@ -1423,6 +1424,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
 
     api.get(`/transfer-notes/prepare/${strId}`, { params: { exclude_stn_id: editing.id } })
       .then((r) => {
+        setStrType(r.data.transfer_request?.str_type || "INTER");
         const prepareMap = {};
         (r.data.items || []).forEach((p) => {
           prepareMap[`${p.part_no}||${p.make}`] = p;
@@ -1534,7 +1536,30 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       src_rack_id: loc.rack_id, src_rack_no: loc.rack_no,
       src_box_id: loc.box_id || "", src_box_no: loc.box_no || "",
       src_box_category: loc.box_category || "",
+      quantity: loc.available_qty ?? loc.current_qty ?? 0,
     });
+  };
+
+  const onSrcLocChange = (idx, locKey) => {
+    if (!locKey) {
+      updateItem(idx, {
+        src_godown_id: "", src_godown_name: "",
+        src_rack_id: "", src_rack_no: "",
+        src_box_id: "", src_box_no: "", src_box_category: "",
+      });
+      return;
+    }
+    const loc = (items[idx].available_locations || []).find(
+      (l) => `${l.godown_id}|${l.rack_id}|${l.box_id || ""}` === locKey
+    );
+    if (loc) {
+      updateItem(idx, {
+        src_godown_id: loc.godown_id, src_godown_name: loc.godown_name,
+        src_rack_id: loc.rack_id, src_rack_no: loc.rack_no,
+        src_box_id: loc.box_id || "", src_box_no: loc.box_no || "", src_box_category: loc.box_category || "",
+        quantity: loc.available_qty ?? loc.current_qty ?? 0,
+      });
+    }
   };
 
   const buildPayload = () => ({
@@ -1568,6 +1593,34 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   };
 
   const saveFinal = async () => {
+    // Cross-row same-source-location aggregation check
+    const locTotals = {};
+    for (const it of items) {
+      if (!it.src_godown_id || !it.src_rack_id) continue;
+      const locKey = `${it.part_no}||${it.make}||${it.src_godown_id}|${it.src_rack_id}|${it.src_box_id || ""}`;
+      if (!locTotals[locKey]) {
+        const loc = (it.available_locations || []).find(
+          (l) => l.godown_id === it.src_godown_id &&
+                  l.rack_id === it.src_rack_id &&
+                  (l.box_id || "") === (it.src_box_id || "")
+        );
+        locTotals[locKey] = {
+          qty: 0,
+          avail: loc != null ? (loc.current_qty ?? loc.available_qty ?? 0) : null,
+          label: it.src_godown_name
+            ? `${it.src_godown_name}/${it.src_rack_no}${it.src_box_no ? "/" + it.src_box_no : ""}`
+            : locKey,
+          part: `${it.part_no}/${it.make}`,
+        };
+      }
+      locTotals[locKey].qty += parseFloat(it.quantity) || 0;
+    }
+    for (const { qty, avail, label, part } of Object.values(locTotals)) {
+      if (avail !== null && qty > avail + 1e-6) {
+        toast.error(`${part} — total ${qty} from ${label} exceeds available ${avail}`);
+        return;
+      }
+    }
     setSaving(true);
     try {
       await api.put(`/transfer-notes/${editing.id}`, buildPayload());
@@ -1627,18 +1680,22 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
         <div className="p-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
           <Package size={16} weight="bold" className="text-slate-500" />
           <div className="label-sm">Items to Transfer</div>
-          <span className="text-xs text-slate-500">({items.length} rows) · Use <span className="font-semibold">+</span> or <span className="font-semibold">Split</span> to add multiple source rows per item. Same src = dest is allowed.</span>
+          <span className="text-xs text-slate-500">({items.length} rows) · Use <span className="font-semibold">Split</span> to add multiple source rows per item. Same src = dest is allowed.</span>
         </div>
         <div className="overflow-x-auto">
           <table className="data-table w-full text-xs">
             <thead>
               <tr>
-                <th className="w-10">SL</th>
-                <th>PART / MAKE</th>
-                <th className="text-right w-36">REQ · PEND / QTY</th>
-                <th>FROM (source)</th>
-                <th>TO (destination)</th>
-                <th className="w-20 text-center">ACTIONS</th>
+                <th className="w-10">SL NO</th>
+                <th>MODEL</th>
+                <th>PART NO</th>
+                <th>DESCRIPTION 1</th>
+                <th>MAKE</th>
+                <th>EXISTING LOCATIONS</th>
+                <th className="text-right w-32">QTY</th>
+                <th>FROM SOURCE</th>
+                <th>TO DESTINATION</th>
+                <th className="w-16 text-center">ACTIONS</th>
               </tr>
             </thead>
             <tbody>
@@ -1650,73 +1707,56 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                 const overAllocated = allocated > pendingForKey + 1e-6;
                 const canDelete = (countByKey[k] || 1) > 1;
 
-                const srcRacks = racksByGodown[it.src_godown_id] || [];
-                const srcBoxes = boxesByRack[it.src_rack_id] || [];
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
                 const destBoxes = boxesByRack[it.dest_rack_id] || [];
 
+                const srcLocs = (it.available_locations || []).filter((L) => (L.available_qty ?? L.current_qty ?? 0) > 0);
+                const srcLocKey = it.src_godown_id
+                  ? `${it.src_godown_id}|${it.src_rack_id}|${it.src_box_id || ""}`
+                  : undefined;
+
+                const filteredDestGodowns = strType === "INTRA" && it.src_godown_id
+                  ? godowns.filter((g) => g.id === it.src_godown_id)
+                  : strType === "INTER" && it.src_godown_id
+                  ? godowns.filter((g) => g.id !== it.src_godown_id)
+                  : godowns;
+
                 return (
                   <tr key={idx} data-testid={`stn-item-row-${idx}`} className={overAllocated ? "bg-red-50 align-top" : "align-top"}>
-                    {/* SL */}
+                    {/* SL NO */}
                     <td className="font-mono text-slate-400 pt-3 text-center">{idx + 1}</td>
 
-                    {/* Part / Make / Description */}
-                    <td className="pt-3 min-w-[160px]">
+                    {/* MODEL */}
+                    <td className="pt-2">
+                      <Input value={it.model || ""} disabled
+                        className="rounded-sm font-mono h-8 bg-slate-50 text-slate-600 w-24" placeholder="—"
+                        data-testid={`stn-model-${idx}`} />
+                    </td>
+
+                    {/* PART NO */}
+                    <td className="pt-3 min-w-[120px]">
                       <div className="font-mono font-semibold text-slate-900 text-xs">
                         <PartNoLink partNo={it.part_no} make={it.make} />
                       </div>
-                      <div className="text-slate-500 text-[11px]">{it.make}</div>
-                      {it.description_1 && (
-                        <div className="text-[10px] text-slate-400 mt-0.5 max-w-[220px] truncate">{it.description_1}</div>
-                      )}
                     </td>
 
-                    {/* Qty with req/pend context */}
-                    <td className="pt-3 text-right pr-2">
-                      <div className="text-[10px] text-slate-500 mb-1">
-                        req <b className="text-slate-700">{reqForKey}</b> · pend <b className="text-slate-700">{pendingForKey}</b>
-                      </div>
-                      <Input
-                        type="number" min="0" step="any"
-                        value={it.quantity}
-                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-right w-24 ml-auto ${overAllocated ? "border-red-400" : ""}`}
-                        data-testid={`stn-qty-${idx}`}
-                      />
-                      <div className={`text-[10px] mt-0.5 text-right ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`}>
-                        {overAllocated
-                          ? `over ${allocated}/${pendingForKey}`
-                          : `alloc ${allocated} / pend ${pendingForKey}`}
-                      </div>
+                    {/* DESCRIPTION 1 */}
+                    <td className="pt-3 max-w-[180px]">
+                      <div className="text-[10px] text-slate-500 truncate">{it.description_1 || "—"}</div>
                     </td>
 
-                    {/* FROM (source) with chips */}
-                    <td className="space-y-1 pt-2 min-w-[180px]">
-                      <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
-                        <MapPin size={9} weight="bold" className="inline mr-0.5" /> From
-                      </div>
-                      <Select value={it.src_godown_id || undefined} onValueChange={(v) => onLocChange(idx, "src", "godown", v)}>
-                        <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-src-godown-${idx}`}>
-                          <SelectValue placeholder="Godown" />
-                        </SelectTrigger>
-                        <SelectContent>{godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}</SelectContent>
-                      </Select>
-                      <Select disabled={!it.src_godown_id} value={it.src_rack_id || undefined} onValueChange={(v) => onLocChange(idx, "src", "rack", v)}>
-                        <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-src-rack-${idx}`}>
-                          <SelectValue placeholder="Rack" />
-                        </SelectTrigger>
-                        <SelectContent>{srcRacks.map((r) => <SelectItem key={r.id} value={r.id} className="font-mono">{r.rack_no}</SelectItem>)}</SelectContent>
-                      </Select>
-                      <Select disabled={!it.src_rack_id || srcBoxes.length === 0} value={it.src_box_id || undefined} onValueChange={(v) => onLocChange(idx, "src", "box", v)}>
-                        <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-src-box-${idx}`}>
-                          <SelectValue placeholder={srcBoxes.length === 0 ? "—" : "Box"} />
-                        </SelectTrigger>
-                        <SelectContent>{srcBoxes.map((b) => <SelectItem key={b.id} value={b.id} className="font-mono">{b.box_no}</SelectItem>)}</SelectContent>
-                      </Select>
-                      {/* Available location chips */}
-                      {(it.available_locations || []).filter((L) => (L.available_qty ?? L.current_qty ?? 0) > 0).length > 0 && (
-                        <div className="flex flex-wrap gap-1 pt-0.5">
-                          {(it.available_locations || []).filter((L) => (L.available_qty ?? L.current_qty ?? 0) > 0).slice(0, 4).map((L, li) => {
+                    {/* MAKE */}
+                    <td className="pt-3">
+                      <div className="text-xs text-slate-700 font-mono">{it.make}</div>
+                    </td>
+
+                    {/* EXISTING LOCATIONS */}
+                    <td className="pt-2 min-w-[160px]">
+                      {srcLocs.length === 0 ? (
+                        <span className="text-[10px] text-slate-400">No stock</span>
+                      ) : (
+                        <div className="flex flex-col gap-1">
+                          {srcLocs.map((L, li) => {
                             const isCurrent = L.godown_id === it.src_godown_id && L.rack_id === it.src_rack_id && (L.box_id || "") === (it.src_box_id || "");
                             return (
                               <button key={li} type="button" onClick={() => applySrcChip(idx, L)}
@@ -1731,16 +1771,48 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                       )}
                     </td>
 
-                    {/* TO (destination) */}
-                    <td className="space-y-1 pt-2 min-w-[180px]">
-                      <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
-                        <MapPin size={9} weight="bold" className="inline mr-0.5" /> To
+                    {/* QTY */}
+                    <td className="pt-2 w-32">
+                      <div className="text-[10px] text-slate-500 mb-1">
+                        req <b className="text-slate-700">{reqForKey}</b> · pend <b className="text-slate-700">{pendingForKey}</b>
                       </div>
+                      <Input
+                        type="number" min="0" step="any"
+                        value={it.quantity}
+                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
+                        className={`rounded-sm font-mono h-8 text-right w-full ${overAllocated ? "border-red-400" : ""}`}
+                        data-testid={`stn-qty-${idx}`}
+                      />
+                      <div className={`text-[10px] mt-0.5 text-right ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`}>
+                        {overAllocated
+                          ? `over ${allocated}/${pendingForKey}`
+                          : `alloc ${allocated} / pend ${pendingForKey}`}
+                      </div>
+                    </td>
+
+                    {/* FROM SOURCE — flat dropdown (only locations with stock) */}
+                    <td className="pt-2 min-w-[180px]">
+                      <Select value={srcLocKey} onValueChange={(v) => onSrcLocChange(idx, v)}>
+                        <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-src-loc-${idx}`}>
+                          <SelectValue placeholder={srcLocs.length === 0 ? "No stock available" : "Select source location"} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {srcLocs.map((L) => {
+                            const key = `${L.godown_id}|${L.rack_id}|${L.box_id || ""}`;
+                            const label = `${L.godown_name} / ${L.rack_no}${L.box_no ? " / " + L.box_no : ""} (${L.available_qty ?? L.current_qty})`;
+                            return <SelectItem key={key} value={key} className="font-mono text-xs">{label}</SelectItem>;
+                          })}
+                        </SelectContent>
+                      </Select>
+                    </td>
+
+                    {/* TO DESTINATION — cascading, filtered by strType */}
+                    <td className="space-y-1 pt-2 min-w-[180px]">
                       <Select value={it.dest_godown_id || undefined} onValueChange={(v) => onLocChange(idx, "dest", "godown", v)}>
                         <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-dest-godown-${idx}`}>
                           <SelectValue placeholder="Godown" />
                         </SelectTrigger>
-                        <SelectContent>{godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}</SelectContent>
+                        <SelectContent>{filteredDestGodowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}</SelectContent>
                       </Select>
                       <Select disabled={!it.dest_godown_id} value={it.dest_rack_id || undefined} onValueChange={(v) => onLocChange(idx, "dest", "rack", v)}>
                         <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-dest-rack-${idx}`}>
@@ -1756,17 +1828,9 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                       </Select>
                     </td>
 
-                    {/* Row actions */}
+                    {/* ACTIONS — Split + Trash only */}
                     <td className="pt-3 text-center">
                       <div className="flex items-center justify-center gap-0.5">
-                        <button
-                          type="button"
-                          onClick={() => splitRow(idx)}
-                          title="Add another source row for this item"
-                          className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-600"
-                          data-testid={`stn-plus-${idx}`}>
-                          <Plus size={13} weight="bold" />
-                        </button>
                         <button
                           type="button"
                           onClick={() => splitRow(idx)}
@@ -1791,7 +1855,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
               })}
               {items.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="text-center py-8 text-slate-400">No items to display.</td>
+                  <td colSpan={10} className="text-center py-8 text-slate-400">No items to display.</td>
                 </tr>
               )}
             </tbody>

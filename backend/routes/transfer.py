@@ -378,6 +378,7 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
         "transfer_request": {
             "id": s["id"], "str_no": s["str_no"], "str_date": s["str_date"],
             "purpose": s.get("purpose", ""), "status": s.get("status"),
+            "str_type": s.get("str_type", "INTER"),
         },
         "items": items_out,
     }
@@ -493,22 +494,32 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
         if not (it.get("dest_box_id") or "").strip() and await _box_id_required_for_rack(it.get("dest_rack_id", "")):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
 
-    # Real-time source balance check (only for rows where src != dest)
-    for idx, it in enumerate(items, start=1):
-        src_box = it.get("src_box_id", "")
-        dest_box = it.get("dest_box_id", "")
+    # Real-time source balance check — aggregate across rows sharing the same source location
+    loc_totals: dict = {}
+    for it in items:
+        src_box = it.get("src_box_id", "") or ""
         same_loc = (
             it.get("src_godown_id") == it.get("dest_godown_id") and
             it.get("src_rack_id") == it.get("dest_rack_id") and
-            src_box == dest_box
+            src_box == (it.get("dest_box_id", "") or "")
         )
         if same_loc:
-            continue  # no-op — no stock movement, skip balance check
-        avail = await _get_balance(it["part_no"], it["make"], it["src_godown_id"], it["src_rack_id"], src_box)
-        if avail < it["quantity"] - 1e-6:
+            continue
+        loc_key = (it["part_no"], it["make"], it["src_godown_id"], it["src_rack_id"], src_box)
+        if loc_key not in loc_totals:
+            loc_totals[loc_key] = {"qty": 0, "meta": it}
+        loc_totals[loc_key]["qty"] += it["quantity"]
+
+    for loc_key, entry in loc_totals.items():
+        part_no, make, src_godown_id, src_rack_id, src_box = loc_key
+        total_needed = entry["qty"]
+        it = entry["meta"]
+        avail = await _get_balance(part_no, make, src_godown_id, src_rack_id, src_box)
+        if avail < total_needed - 1e-6:
             raise HTTPException(status_code=400, detail=(
-                f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at source "
-                f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: have {avail}, need {it['quantity']}"
+                f"Insufficient stock for {part_no}/{make} at "
+                f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: "
+                f"have {avail}, total needed across rows {total_needed}"
             ))
 
     now = now_iso()
