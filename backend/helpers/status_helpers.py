@@ -414,7 +414,11 @@ async def _transfer_other_src_loc_qty(exclude_stn_id: Optional[str] = None) -> d
     sums = {}
     async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
         for it in stn.get("items", []):
-            loc_key = f"{it.get('part_no','')}||{it.get('make','')}||{it.get('src_box_id','') or ''}"
+            loc_key = (
+                f"{it.get('part_no','')}||{it.get('make','')}||"
+                f"{it.get('src_godown_id','') or ''}||{it.get('src_rack_id','') or ''}||"
+                f"{it.get('src_box_id','') or ''}"
+            )
             sums[loc_key] = sums.get(loc_key, 0) + (it.get("quantity") or 0)
     return sums
 

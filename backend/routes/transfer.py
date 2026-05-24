@@ -347,7 +347,10 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         locs = await _stock_locations_for(part_no, make)
         for L in locs:
-            reserved = other_loc_sums.get(f"{part_no}||{make}||{L['box_id']}", 0)
+            reserved = other_loc_sums.get(
+                f"{part_no}||{make}||{L.get('godown_id','') or ''}||{L.get('rack_id','') or ''}||{L.get('box_id','') or ''}",
+                0,
+            )
             L["available_qty"] = max(0, L["current_qty"] - reserved)
 
         items_out.append({

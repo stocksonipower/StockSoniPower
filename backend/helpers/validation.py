@@ -339,8 +339,12 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
         k = _key(it.part_no, it.make)
         qty = it.quantity or 0
         new_sums[k] = new_sums.get(k, 0) + qty
-        if qty > 0 and (it.src_box_id or it.src_rack_id):
-            loc_key = f"{it.part_no}||{it.make}||{it.src_box_id or ''}"
+        if qty > 0 and (it.src_godown_id or it.src_rack_id):
+            loc_key = (
+                f"{it.part_no}||{it.make}||"
+                f"{it.src_godown_id or ''}||{it.src_rack_id or ''}||"
+                f"{it.src_box_id or ''}"
+            )
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + qty
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
@@ -363,11 +367,16 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     # Per-source-location stock check (strict mode only)
     loc_cache = {}
     for k_full, new_q in new_loc_sums.items():
-        part_no, make, box_id = k_full.split("||", 2)
+        part_no, make, godown_id, rack_id, box_id = k_full.split("||", 4)
         if (part_no, make) not in loc_cache:
             loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
         locs = loc_cache[(part_no, make)]
-        loc = next((L for L in locs if (L.get("box_id") or "") == box_id), None)
+        loc = next((
+            L for L in locs
+            if (L.get("godown_id") or "") == godown_id
+            and (L.get("rack_id") or "") == rack_id
+            and (L.get("box_id") or "") == box_id
+        ), None)
         if not loc:
             raise HTTPException(status_code=400, detail=f"{part_no} / {make}: no stock at the chosen source location")
         already_pending_here = other_loc_sums.get(k_full, 0)
