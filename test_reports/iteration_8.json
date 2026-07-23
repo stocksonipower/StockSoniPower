@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 8 — Issue Note enhancement (lookup endpoint + Make-before-Quantity + qty-vs-stock validation). Backend: 5/5 PASS (1 skipped, no zero-stock makes in current data) in /app/backend/tests/test_issue_note_lookup.py — GET /api/issue-notes/lookup/3911560 returns ONLY positive-stock makes (CSP=26, GATES=10) with {make, available_qty}; lookup for unknown part returns {makes: []}; POST rejects qty>available with 400 + 'cannot issue X — only Y in stock'; PUT same validation; boundary qty==avail accepted. Frontend: 8/8 PASS — Issue Note create form shows column order SL/PART NO/MAKE/QUANTITY, Qty input disabled until Make picked, dropdown options render 'CSP avail 26' and 'GATES avail 10' inline, after picking CSP the Qty enables and 'Available 26' hint shows, entering qty=126 turns row red with 'Over 126/26' indicator + red border + bg-red-50 row, save attempt shows toast 'Row 1: 3911560/CSP — only 26 in stock, cannot issue 126' and POST is NOT submitted (still on form), entering an unknown part_no disables the Make dropdown with placeholder 'No stock available'. Existing 100% Picking Note flow from iter 7 unchanged. 0 page errors.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "tested_scenarios": [
+    {"id": "be_lookup_only_positive_stock_makes", "result": "PASS", "detail": "GET /api/issue-notes/lookup/3911560 -> CSP=26, GATES=10, no others"},
+    {"id": "be_lookup_unknown_part_empty", "result": "PASS", "detail": "{makes: []}"},
+    {"id": "be_lookup_zero_balance_excluded", "result": "SKIP", "detail": "No zero-stock (part,make) in current data — graceful skip"},
+    {"id": "be_post_rejects_overstock_400", "result": "PASS", "detail": "msg contains 'cannot issue X — only Y in stock'"},
+    {"id": "be_put_rejects_overstock_400", "result": "PASS"},
+    {"id": "be_post_qty_equal_avail_boundary_ok", "result": "PASS"},
+    {"id": "fe_column_order_part_make_qty", "result": "PASS", "detail": "['SL','PART NO','MAKE','QUANTITY']"},
+    {"id": "fe_qty_disabled_until_make_selected", "result": "PASS"},
+    {"id": "fe_make_options_show_avail_inline", "result": "PASS", "detail": "'CSP avail 26' + 'GATES avail 10'"},
+    {"id": "fe_qty_enables_after_make_selected", "result": "PASS"},
+    {"id": "fe_avail_hint_renders", "result": "PASS", "detail": "in-avail-hint-0 = 'Available 26'"},
+    {"id": "fe_overstock_red_indicator_and_border", "result": "PASS", "detail": "'Over 126/26' + border-red-400 + bg-red-50 on row"},
+    {"id": "fe_save_blocked_with_toast_on_overstock", "result": "PASS", "detail": "toast 'only 26 in stock, cannot issue 126'; POST not submitted"},
+    {"id": "fe_no_stock_part_disables_make_with_placeholder", "result": "PASS", "detail": "Make trigger disabled, placeholder='No stock available'"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_issue_note_lookup.py",
+    "/app/test_reports/pytest/issue_note_lookup_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_stock_total_for and the lookup aggregation correctly sum IN-OUT across all locations (no per-location filter) — matches spec.",
+    "_validate_issue_qty_against_stock aggregates same (part_no, make) qtys across multiple rows in payload before comparing to live stock — prevents users splitting a single (part,make) into two rows to bypass the cap. Good.",
+    "Frontend's overStock check is computed per row (not aggregated across rows for same part+make). If user adds two rows for 3911560/CSP with qty=20 each (total 40 > avail 26), neither row turns red individually but the backend will reject. Recommend mirroring the backend's aggregation in client check + 'Avail hint' to surface the breach earlier — minor UX gap, not a correctness bug.",
+    "Console warning 'Select is changing from uncontrolled to controlled' fires when make is reset (part_no edited) — caused by passing `value={it.make || undefined}` then later setting it to ''. Recommend always passing `value={it.make ?? ''}` consistently or use defaultValue. Cosmetic React warning only, no user-visible impact.",
+    "Lookup uses GET /api/issue-notes/lookup/{part_no} which is invoked on input blur — fine; consider debounced onChange in future for live reactivity, but blur is acceptable for v1."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_issue_note_lookup.py (new — 6 tests; 5 PASS, 1 SKIP)"
+  ],
+  "success_rate": {"backend": "100% (5/5 executed; 1 skipped by design)", "frontend": "100% (8/8 directly-verified scenarios)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working)",
+  "seed_data_creation": "Two transient Issue Notes were created and DELETED inside test fixtures (TEST_QA_put_overstock and TEST_QA_boundary). No DB residue. Existing IN/26-27/001 + PN/26-27/001 from iter 7 untouched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All Issue Note iter 8 testids verified working: in-make-{idx}, in-make-{idx}-option-{MAKE}, in-avail-hint-{idx}, in-qty-{idx}, in-item-row-{idx}. Make options render as '<MAKE> avail <N>' (no space between MAKE token and label-span; both are inside the same <SelectItem>). Save button text is 'Save Issue Note'. Backend endpoint /api/issue-notes/lookup/{part_no} returns {makes: [{make, available_qty}, ...]} sorted by make ASC. Boundary qty==avail is accepted (>1e-6 tolerance). Single-make auto-select code path exists (lookupMakes onBlur sets make to the sole entry) but was NOT directly UI-tested in this iter — spot-check next iter if a part with single positive-stock make is available.",
+  "rca_of_the_issue": "N/A — feature working as designed. Minor React 'controlled→uncontrolled' Select warning observed (cosmetic) and a UX-aggregation suggestion captured in critical_code_review_comments."
+}

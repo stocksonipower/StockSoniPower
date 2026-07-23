@@ -1,0 +1,33 @@
+{
+  "summary": "Frontend-only UI testing for Stock Management System UI improvements (Sl No, Export rename, Excel-style sort/filter, Totals row at top, Refresh buttons). All 11 listed scenarios verified end-to-end on the live preview URL with admin login. All targeted data-testids resolve and behave correctly. No regressions observed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "StockBalancePage.jsx is 437 lines and ColumnFilter is duplicated logic vs DataTable.jsx ColumnHeader; consider unifying both to a single reusable component to follow DRY and ease maintenance.",
+    "StockInPage.jsx (~570+ lines), StockOutPage.jsx, StockTransferPage.jsx — each contains multiple list components plus modals. Files exceed 700-line guideline; recommend splitting *List components into separate files (e.g., ReceiptNoteList.jsx, IssueNoteList.jsx).",
+    "Sl No is computed via filteredRows.indexOf(r)+1 inside a column value() lambda — O(n^2) per render; fine for current data sizes but should be precomputed if list grows.",
+    "Stock Summary totals row uses sticky top-0 inside an overflow-x-auto container; works but verify vertical sticky behavior when table is tall enough to scroll inside its container."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100%"},
+  "test_credentials": "admin@stockmgmt.com / admin123",
+  "seed_data_creation": "None — used existing seeded data",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Stock Summary route is /balance (not /stock-balance). Login at /login, then nav via sidebar 'Stock Summary'. Key testids verified: users-export-button, low-stock-export-button, transactions-export-button (all show 'Export' text); totals-row, totals-total_quantity, totals-reorder_level, filter-trigger-{label-kebab}, sort-asc, sort-desc on StockBalancePage; rn-export-button/rn-refresh-button, rkn-export-button/rkn-refresh-button, in-export-button/in-refresh-button, pn-export-button/pn-refresh-button, str-export-button/str-refresh-button, stn-export-button/stn-refresh-button on Stock In/Out/Transfer list views. Each list table uses ColumnHeader (data-testid='{testid}-sort' and '{testid}-filter') from DataTable.jsx. Verified: (1) Export downloads correctly named xlsx files, (2) Refresh triggers /api/<resource> request, (3) Stock Summary totals row IS the first <tr> in <tbody> (data-testid first-tbody-row == 'totals-row'), (4) totals update when filter applied (664 → 20 after filtering Godown), (5) Numeric columns show 'Smallest → Largest' label and text columns show 'A → Z'. Existing functionality (filter-all/in/out tabs in Transactions, Receipt/Racking/Issue/Picking/Transfer-Request/Transfer-Note sub-tabs) continues to load.",
+  "evidence": {
+    "stock_summary_totals": {"qty_total_unfiltered": "664", "reorder_total": "226", "qty_total_after_godown_filter": "20", "first_tbody_row_testid_after_filter": "totals-row"},
+    "exports_downloaded": ["Receipt_Notes_2026-04-25.xlsx", "Issue_Notes_2026-04-25.xlsx", "Transfer_Requests_2026-04-25.xlsx", "Users_2026-04-25.xlsx"],
+    "refresh_api_call": "GET /api/receipt-notes?page=1&page_size=5000 fired on rn-refresh-button click",
+    "users_first_header": "Sl No (sequential 1,2,3...) — Export button text 'Export'",
+    "transactions_subtabs_first_header": "Sl No on All / Stock In / Stock Out",
+    "stock_in_tabs": ["Receipt Note", "Racking Note"],
+    "rn_columnheader_counts": {"sort_buttons": 8, "filter_buttons": 8}
+  }
+}

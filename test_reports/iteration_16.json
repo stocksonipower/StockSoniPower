@@ -1,0 +1,42 @@
+{
+  "summary": "Image storage migration & 5-image stock master + Stock Summary Export — backend (13 pytest) and frontend (Playwright) end-to-end testing complete. All scenarios pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_image_storage.py",
+    "/app/test_reports/pytest/image_storage_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py line ~1107 — invalid content_type returns 400 ('Unsupported image type: ...'). The review_request mentioned 415 as acceptable. Current 400 is consistent with empty-file/oversize handling. Acceptable but consider using 415 specifically for unsupported media types per HTTP semantics.",
+    "server.py /api/files/{path:path} — GET via query-param token (?auth=) bypasses HttpOnly-cookie protections that <img> tags can't carry. Token in URL may end up in browser history / referrer headers. Acceptable trade-off but consider short-lived signed URLs for hardening.",
+    "stock-balance only emits rows for items with positive transactions; items created via Stock Master that have NO IN transaction won't appear in /balance regardless of their `images` array. Verified by direct test — schema includes `images: []` field but newly-created items aren't surfaced. Document this behaviour for users who upload images then expect to see them in Stock Summary.",
+    "StockMasterImageUploader — when 5 slots are full, the dropzone + 'Choose files' (form-images-pick) still allow re-triggering the file input; uploader correctly toasts 'You can upload a maximum of 5 images. 0 slot(s) left.' Consider disabling the pick button visually when full for clearer UX.",
+    "AuthImage component fetches each image as a blob via axios — for tables with many images this means N parallel requests with no caching. Consider cache or service-worker for thumbnails."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_image_storage.py (new)"
+  ],
+  "success_rate": {"backend": "100% (13/13)", "frontend": "100% (all listed scenarios)"},
+  "test_credentials": "admin@stockmgmt.com / admin123",
+  "seed_data_creation": "Created one TEST_ stock-master item via UI (PT_TEST_54F1 / TESTMAKE) with 4 images. Backend pytest creates+deletes its own TEST_IMG_* items per test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest fixtures: fixtures `token`, `auth_headers`, `uploaded_path` (module-scoped). Stock Master required fields: part_no + make (NOT item_code as primary key — that's optional). Form testid uses dashes: `form-part-no` (NOT `form-part_no`). 5-slot uploader testids: form-images-{dropzone,input,pick,empty-N,thumb-N,slot-N,view-N,remove-N}. ImageViewerDialog testids: image-viewer-{dialog,close,prev,next,label}. The prev/next arrows are HIDDEN (count=0), not just disabled, on first/last image respectively. Stock Master table image cell testid: image-cell-{id} (clickable container) and image-thumb-{id} (the AuthImage), with image-count-{id} badge for items with >1 image. Stock Balance table image cell: balance-image-{rowIdx}. balance-export-button downloads xlsx via blob; filename pattern Stock_Summary_YYYY-MM-DD.xlsx. Verified file size shrinks when search filter applied (34080 → 21741 bytes for BELT filter, 7 rows).",
+  "evidence": {
+    "backend_pytest": "13 passed in 3.62s",
+    "frontend_5slot_upload": "thumb-0..thumb-4 visible after 5 uploads, empty-buttons=0",
+    "toast_on_6th": "You can upload a maximum of 5 images. 0 slot(s) left.",
+    "remove_x": "thumbs went 5→4 after clicking form-images-remove-0",
+    "save_and_table": "image-cell rows=1, +N badge='+3' (4 total images)",
+    "image_viewer_labels": ["Image 1/4 (first)", "Image 2/4 (after next)", "Image 4/4 (last)"],
+    "viewer_arrow_visibility": {"first_image": "prev=0, next=1", "last_image": "next=0, prev=1"},
+    "esc_closes_viewer": "dialog count=0 after Escape",
+    "stock_summary_export_unfiltered": "Stock_Summary_2026-04-25.xlsx, 34080 bytes",
+    "stock_summary_export_filtered_BELT": "Stock_Summary_2026-04-25.xlsx, 21741 bytes (7 rows)"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "summary": "Verified iter-21 HIGH-priority fix: SRN/ERN edit + finalize handlers now propagate status to parent RN via _recompute_rn_status. Re-ran the previously-failing test and the entire iter21 suite. All 17 tests pass (100% success).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter21_status_workflow.py",
+    "/app/test_reports/pytest/iter22_iter21_suite.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix verified: update_short_received_note, finalize_short_received_note, update_extra_received_note, finalize_extra_received_note all now call await _recompute_rn_status(parent_rn_id) after the SRN/ERN racking_status recompute, ensuring RN.FULLY_RACKED correctly accounts for descendant SRN.fulfilled and ERN.accepted states.",
+    "Test runner needs REACT_APP_BACKEND_URL exported into shell env (test asserts it). Consider adding a conftest.py to load /app/frontend/.env automatically so pytest can be invoked without manual export."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md, used by suite)",
+  "seed_data_creation": "None - existing iter21 test fixtures used.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter22 confirmed iter21 HIGH-priority bug fix. Targeted test TestRnFullyRackedRequiresAllDescendants::test_rn_not_fully_racked_when_srn_unracked PASSED. Full iter21 suite (17/17) PASSED. Note: must export REACT_APP_BACKEND_URL=https://inventory-ops-dash.preview.emergentagent.com before running pytest, otherwise the suite errors at collection.",
+  "rca of the issue": "Original RCA (iter-21): The four PUT/finalize handlers for SRN and ERN updated SRN.racking_status / ERN.racking_status via _recompute_*_racking_status helpers but never recomputed the parent RN status. Since RN.FULLY_RACKED depends on (RN.received fully racked) AND (all descendant SRNs fulfilled) AND (all descendant ERNs accepted/decided), edits or finalizations of SRN/ERN that should flip the parent RN's status left it stale. Fix: appended `await _recompute_rn_status(parent_rn_id)` after each _recompute_*_racking_status call in all four handlers. Verified now via dedicated regression test + full suite."
+}

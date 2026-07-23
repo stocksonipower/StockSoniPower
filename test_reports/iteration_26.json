@@ -1,0 +1,28 @@
+{
+  "summary": "Iter-26 verification re-run of /app/backend/tests/test_iter25_inline_child_workflow.py after main agent applied the `{child_srn_no:path}` / `{child_ern_no:path}` route fix on server.py lines 4293, 4372, 4694, 4757. RESULT: 14/14 PASS in 4.89s. The 4 previously-failing tests (TC4 EditChild, TC5 EditDeleteBlockedByRkn, TC6 DeleteChild, TC9 ErnEditDeleteBlocked) all now pass — confirming the slash-in-child-id 404 issue is fully resolved. No regressions detected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter25_inline_child_workflow.py",
+    "/app/test_reports/pytest/iter25_inline_child_rerun.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix verified: 4 routes (PUT/DELETE /short-received-notes/{srn_id}/children/{child_srn_no:path} and ERN equivalents) now correctly match child ids that contain '/' (e.g. 'SRN/26-27/001-A'). The `:path` converter consumes the rest of the URL path which is the standard FastAPI pattern for ids containing slashes.",
+    "All 14 TC1-TC12 scenarios green: inline-child append, alphabetic suffix allocation, pending overflow guard, edit/delete with RKN-block, ERN parallel flow, racking-sources rackable_qty derivation (received-only / accepted-only), RN→FULLY_RACKED end-to-end, legacy /fulfill removal."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (14/14)",
+    "frontend": "N/A (skipped per request)"
+  },
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each test creates fresh TESTPN_<uuid8> stock_master rows + one TEST_GD/TR/TB godown/rack/box per session. No reliance on pre-seeded data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter-25 inline-child workflow is fully green. Active suite for the inline-child SRN/ERN model is /app/backend/tests/test_iter25_inline_child_workflow.py. No outstanding bugs from this thread. Re-run command: `pytest /app/backend/tests/test_iter25_inline_child_workflow.py -v` — completed in <5s.",
+  "rca of the issue": "Resolved: Original 404 root cause was FastAPI's default str path-converter matching only one URL segment, while uvicorn decodes %2F before route matching, causing child ids containing '/' to never match. Fix applied (one-character change per route: `{child_srn_no}` → `{child_srn_no:path}` x2 and `{child_ern_no}` → `{child_ern_no:path}` x2). Re-run confirms all PUT/DELETE child endpoints now reachable; status recompute, RKN-edit-block, and parent items[] mutation all behave correctly."
+}

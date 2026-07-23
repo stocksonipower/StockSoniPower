@@ -1,0 +1,129 @@
+{
+  "summary": "Comprehensive read-only audit of Stock Management backend + Stock In / Racking Note frontend after user's manual edits to /app/backend/server.py and /app/frontend/src/pages/StockInPage.jsx. Found 1 CRITICAL backend bug that breaks the Racking Note creation/edit UX, plus several minor issues, edge-case validation gaps, and performance suggestions. No code changes made (audit-only as requested).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/racking-notes/prepare/{rn_id}",
+        "issue": "Endpoint returns the literal JSON `null` (HTTP 200, body `null`) for any non-FULLY_RACKED RN. ROOT CAUSE: in /app/backend/server.py the function body of `prepare_racking_note` (declared at line 2468) was destructively spliced — it ends at line 2476 (`other_sums = await _aggregate_other_rkn_qty(...)`) with NO return statement. Helper functions `_no_future_date` (2478), `_qty_diff` (2491), `_rn_items_have_all_received` (2498), `_next_serial` (2514) were inserted in the middle. The intended body of prepare_racking_note (lines 2519–2582 — `items_out = []` loop, master/location lookup, final `return {...}`) is now ORPHAN code sitting INSIDE `_next_serial` after its `return` statement (line 2517) and is therefore unreachable dead code. Confirmed via curl: GET /api/racking-notes/prepare/<draft_rn_id> -> 200 `null`. Confirmed via UI: dialog shows 'No racking-pending receipt notes' and `Pick a Receipt Note above to load its items`; if a pending RN existed, its items would never load (frontend RackingNoteTab.jsx line 408 awaits the prepare response and uses data.items). FIX: move lines 2519–2582 back inside `prepare_racking_note` (right after `other_sums = await _aggregate_other_rkn_qty(...)`) and ensure it returns `{rn:{...}, items: items_out}` as RackingNoteTab.jsx expects. The four helpers should remain at module scope (they are referenced by other endpoints).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/receipt-notes",
+        "issue": "Allows duplicate (part_no, make) rows in a single RN payload (e.g. two rows for 3401544/CSP with qty 3 and qty 2 both saved). No de-dup or aggregation. Causes downstream cumulative-quantity validation to count both rows separately and may confuse Racking Note prepare which groups by (part_no, make). Recommend either (a) reject 400 with 'Duplicate part_no+make row' or (b) auto-merge invoice_qty + received_qty."
+      },
+      {
+        "endpoint": "Many list endpoints",
+        "issue": "Default `page_size` is 5000 (receipt-notes, racking-notes) and 10000 (transactions). Client always fetches everything (frontend calls `?page=1&page_size=5000`). Acceptable now (~20 docs) but will not scale past a few thousand notes. Recommend a sane default of 50–100 with a UI 'Load all' opt-in."
+      },
+      {
+        "endpoint": "GET /api/racking-notes (frontend behaviour)",
+        "issue": "Frontend issues `/api/racking-notes?status=DRAFT&page_size=1` TWICE on tab open and `/api/racking-notes?page=1&page_size=5000` TWICE on tab open (observed via response listener). Looks like an effect/dependency double-fire in RackingNoteTab. Wasteful — debounce or React StrictMode double-effect to be addressed."
+      },
+      {
+        "endpoint": "POST /api/receipt-notes (DRAFT)",
+        "issue": "Date validation runs `_no_future_date` on raw payload BEFORE strip(); empty string '' passes (good), but a malformed date like '2026-13-99' is caught only inside `_no_future_date` via fromisoformat — returns 400 with the cryptic message 'Invalid date format'. Acceptable but unify with field name in error context."
+      },
+      {
+        "endpoint": "POST /api/stock-in",
+        "issue": "Does NOT enforce module access — any authenticated user can hit /api/stock-in regardless of `module_access.stock_in`. Receipt-note endpoints rely on `_resolve_assignee` for assignee gating but not module gating. Verify the `get_current_user` dependency or add an explicit `_require_module(user, 'stock_in')` check (review request explicitly asks for 403 on non-admin without `stock_in` access)."
+      },
+      {
+        "endpoint": "GET /api/locations",
+        "issue": "Review request mentions /api/locations as a hierarchy endpoint; actual API exposes only /api/godowns, /api/racks, /api/boxes. /api/locations -> 404. Either ship a unified hierarchy endpoint or update the request/spec doc."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "RackingNoteTab > Create New Racking Note dialog",
+        "issue": "Receipt Note dropdown loads pending RNs but selecting one will NOT populate items, because backend `/api/racking-notes/prepare/{rn_id}` returns null (see backend critical issue). All current RNs happen to be FULLY_RACKED so the dropdown is currently empty — bug masked. Reproduce: create a draft RN via UI, finalize it, switch to Racking Note tab, click 'Create New Racking Note', pick the new pending RN — no items will load.",
+        "selector": "RackingNoteTab.jsx:408",
+        "priority": "CRITICAL (downstream of backend prepare bug)"
+      },
+      {
+        "component": "RackingNoteTab > Edit existing draft Racking Note",
+        "issue": "Editing a DRAFT racking note also fetches /racking-notes/prepare/{rn}?exclude_rkn_id=... at line 359 — same null breakage. Editing a draft RKN to add/swap items is broken.",
+        "selector": "RackingNoteTab.jsx:359",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Racking Note: prepare items by RN",
+        "issue": "Frontend awaits prepare data and reads .items / .rn — backend returns null causing TypeError 'cannot read property items of null' if defensive check is missing. Add a null-check + toast on the frontend AND fix backend.",
+        "affected_selectors": ["[data-testid='rkn-items-table']", "[data-testid='rkn-receipt-note-select']"]
+      },
+      {
+        "flow": "Stock In tab open",
+        "issue": "Duplicate API calls to /api/racking-notes on every tab switch (observed twice). Cache or guard with a ref."
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "Stock In > Receipt Note create dialog",
+        "issues": [
+          "Native browser date picker is used (mm/dd/yyyy) for Invoice Date and Goods Received Date instead of shadcn Calendar component used elsewhere — inconsistent UX.",
+          "Auto-filled Receipt Note No (RN/26-27/023) is shown disabled but visually identical to invoice-no input — could mislead users into thinking it's editable."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_receipt_notes.py",
+    "/app/backend/tests/test_racking_notes.py",
+    "/app/backend/tests/test_partial_racking.py",
+    "/app/test_reports/pytest/iter18_existing.xml"
+  ],
+  "action_items": [
+    "PRIORITY-1: Fix /api/racking-notes/prepare/{rn_id} — restore the function body (lines 2519–2582 of server.py belong inside prepare_racking_note, not _next_serial). Add a unit/integration test that asserts the response is an object with non-empty items.",
+    "PRIORITY-2: Add `null` defensive check + toast in RackingNoteTab.jsx (lines 359 & 408) so the UI surfaces a clean error instead of silently breaking.",
+    "PRIORITY-3: Apply `_require_module(user, 'stock_in')` (or equivalent) on POST/PUT/DELETE/finalize routes for receipt-notes, racking-notes, and stock-in — review request explicitly tests 403 for non-admin without stock_in access.",
+    "PRIORITY-4: Decide policy on duplicate (part_no, make) rows in a single RN — reject or auto-merge.",
+    "PRIORITY-5: Eliminate duplicate /api/racking-notes calls on tab open (effect dependency or StrictMode double-fire).",
+    "PRIORITY-6: Lower default page_size on list endpoints from 5000 to 100; expose pagination UI."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 4725 lines — exceeds 700-line guideline by ~6x. Split into routers: stock_in, racking, masters, locations, dashboard, files, auth. Strongly recommended.",
+    "_no_future_date / _qty_diff / _rn_items_have_all_received / _next_serial are referenced by code BEFORE their definitions (line 2169 calls _no_future_date defined at 2478). Works due to Python's name-binding at call-time, but is a clear sign the file was hand-edited and helpers got displaced. Move helpers to top of file or a utils module.",
+    "Orphan unreachable code lives inside _next_serial (lines 2519–2582). Even if the prepare bug is fixed, that dead block must be removed.",
+    "Mongo aggregations for stock_in_lookup and prepare iterate per-item (one aggregate per part). For a 50-row RN that's 50 round-trips. Use a single aggregate with `$match: {$or: [...pairs]}` and `$group` by (part_no, make, godown, rack, box). Big win.",
+    "MISSING DB INDEXES (likely): receipt_notes.fy+serial (for next-no max), receipt_notes.status, racking_notes.receipt_note_id, transactions.(part_no, make, godown_id, rack_id, box_id), transactions.created_at desc. Verify with db.<coll>.getIndexes(); add at startup.",
+    "_enrich_items issues a 4-collection lookup per call. Cache stock_master (and godowns/racks/boxes) in-memory with short TTL; they change infrequently. Eliminates dozens of mongo reads per list call.",
+    "POST /api/receipt-notes uses `for _ in range(5)` retry loop on DuplicateKeyError but `_next_serial` is just `max+1` — under concurrent creates, two writers can pick the same serial despite a unique index. Better: use a counters collection with findOneAndUpdate({_id: 'rn_'+fy}, {$inc:{seq:1}}, upsert=true) for atomic FY-scoped serials.",
+    "Frontend StockInPage.jsx is 1264 lines — split into RNListView, RNCreateDialog, RNRow, useReceiptNotes hook, etc. Same applies to RackingNoteTab (717 lines).",
+    "DataTable.jsx and useTableSortFilter not reviewed in detail; multiple memo deps may cause re-renders on every keystroke in the column-filter inputs — measure with React Profiler."
+  ],
+  "performance_suggestions": [
+    "Add MongoDB indexes (see review note 5) — likely 5–10x speedup on list endpoints once data grows.",
+    "Replace per-item aggregations in stock_in_lookup and prepare_racking_note with single batched aggregate using `$or` + `$group`.",
+    "Cache stock_master / godowns / racks / boxes (mtime-keyed, 30-second TTL) — _enrich_items + lookup endpoints become near-zero-cost.",
+    "Reduce default page_size from 5000 to 100; the UI already paginates client-side via DataTable.",
+    "Frontend: dedupe the duplicate /api/racking-notes calls on tab open using a ref-guard or React Query.",
+    "Frontend: lazy-load RackingNoteTab and Short/Extra Received tabs (React.lazy + Suspense) — they're ~700 lines each and not needed on initial mount.",
+    "Backend: gzip middleware (FastAPI: `from starlette.middleware.gzip import GZipMiddleware`) — list responses are 100KB+ JSON, will compress 5–10x.",
+    "Use `projection={...}` instead of fetching whole docs and stripping fields client-side.",
+    "Add HTTP cache headers (ETag / Last-Modified) on /api/stock-master and /api/godowns endpoints — these change rarely."
+  ],
+  "betterment_suggestions": [
+    "Centralise audit fields (created_by, created_at, updated_at) via a Pydantic mixin or pre-save hook.",
+    "Standardise error response shape: currently mixed `{detail: '...'}` and occasionally `{detail: [...]}` from Pydantic 422 — frontend `formatApiError` handles both but is brittle.",
+    "Add an OpenAPI tag-per-feature (stock_in, racking, masters) so /docs is navigable.",
+    "Replace the home-grown `current_fy_label` with a single source-of-truth utility used by all FY-scoped collections.",
+    "Add a global request-id correlation header for log tracing.",
+    "Add structured logging (loguru / structlog) and log slow Mongo queries (>200ms).",
+    "Frontend: introduce React Query (TanStack Query) for cache + dedupe + background refetch — eliminates manual loading/error states across the 1264-line StockInPage.",
+    "Add data-testid coverage on the RackingNoteTab create form fields (currently sparse vs. RN dialog which is well-tagged).",
+    "Add a confirmation dialog before deleting a DRAFT RN — current impl deletes on single click."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "~88% (1 CRITICAL prepare-endpoint bug; CRUD, finalize, validation edge cases all pass)", "frontend": "~92% (Receipt Note flow OK; Racking Note creation broken downstream of backend prepare bug)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (admin role bypasses module checks)",
+  "seed_data_creation": "Created and finalized DRAFT RN id=inventory-ops-dash (RN/26-27/022) + RKN/26-27/023 to validate flow. Created+deleted DRAFT id=f4f22963 for duplicate-row test (cleaned up).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "After main agent restores the prepare_racking_note function body (move lines 2519–2582 back inside the function, replace the bare `other_sums = await _aggregate_other_rkn_qty(...)` ending with the items-building loop and a `return {rn: {...subset...}, items: items_out}`), retest by: (1) creating a fresh draft RN with 1 item via UI, finalize it, then go to Racking Note tab > Create New > pick that RN — items should auto-populate; (2) curl GET /api/racking-notes/prepare/<that_rn_id> — should return JSON with non-empty `items`; (3) re-run /app/backend/tests/test_partial_racking.py and /app/backend/tests/test_racking_notes.py (currently 11 errors / many failures pivot on prepare returning null). Most existing pytest failures in test_receipt_notes.py / test_receipt_notes_v2.py are schema-drift in test fixtures (KeyError 'rn_id', 'id' — tests expect old payload keys); main agent should update those tests to use `rn_no` / `id` from current API. /api/locations 404 is expected (not implemented); update test_credentials.md if needed.",
+  "rca of the issue": "ROOT CAUSE — Manual edit splice error in /app/backend/server.py: the function `prepare_racking_note` declared at line 2468 has its body cut off at line 2476 (with `other_sums = await _aggregate_other_rkn_qty(rn_id, exclude_rkn_id)` and no return). Four helper-function definitions (_no_future_date, _qty_diff, _rn_items_have_all_received, _next_serial) were inserted at lines 2478–2517. The intended body of prepare_racking_note (an `items_out = []` loop that builds the response with master fields, existing locations, prefill, pending qty) survives at lines 2519–2582 but is now orphan code inside `_next_serial`'s scope, AFTER `_next_serial`'s `return` on line 2517 — therefore unreachable. Net effect: prepare_racking_note has no return and Python returns None → FastAPI serialises that as JSON null. Reproduction: POST /api/receipt-notes (draft), POST /api/receipt-notes/{id}/finalize, GET /api/racking-notes/prepare/{id} → 200 `null`. Mitigation: cut lines 2519–2582 from inside `_next_serial`, reinsert directly after line 2476 (still inside prepare_racking_note), prefix with proper indentation, and ensure trailing `return {rn: {...}, items: items_out}` matches what RackingNoteTab.jsx consumes (it reads .items and .rn). Also delete the now-empty stub between lines 2517 and the next def. Add a regression test asserting prepare returns object-with-items."
+}

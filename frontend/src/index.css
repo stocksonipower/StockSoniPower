@@ -1,0 +1,87 @@
+@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: #FFFFFF;
+    color: #0F172A;
+}
+
+h1, h2, h3, h4, h5 {
+    font-family: 'Chivo', sans-serif;
+    letter-spacing: -0.02em;
+}
+
+.font-mono, code, .part-no {
+    font-family: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 222 47% 11%;
+        --card: 0 0% 100%;
+        --card-foreground: 222 47% 11%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222 47% 11%;
+        --primary: 224 76% 48%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 210 40% 96%;
+        --secondary-foreground: 222 47% 11%;
+        --muted: 210 40% 96%;
+        --muted-foreground: 215 16% 47%;
+        --accent: 210 40% 96%;
+        --accent-foreground: 222 47% 11%;
+        --destructive: 0 72% 51%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 214 32% 91%;
+        --input: 214 32% 91%;
+        --ring: 224 76% 48%;
+        --radius: 0.125rem;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+/* Sharp, Swiss design overrides */
+.btn-sharp {
+    @apply rounded-sm border border-slate-900;
+}
+
+table {
+    border-collapse: collapse;
+}
+
+.data-table th {
+    @apply text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500 bg-slate-50 border-b border-slate-200 px-3 py-2 text-left;
+}
+
+.data-table td {
+    @apply px-3 py-2 text-sm text-slate-800 border-b border-slate-100;
+}
+
+.data-table tr:hover td {
+    @apply bg-slate-50;
+}
+
+.label-sm {
+    @apply text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500;
+}
+
+::selection {
+    background: #1D4ED8;
+    color: #fff;
+}
