@@ -155,7 +155,7 @@ export default function StockMasterPage() {
   const [loading, setLoading] = useState(false);
   const [colFilters, setColFilters] = useState({});
   const [sort, setSort] = useState({ key: null, dir: null });
-  const PAGE_SIZE = 1000;
+  const PAGE_SIZE = 250;
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const excelInput = useRef(null);
@@ -522,63 +522,31 @@ export default function StockMasterPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, [exportMenuOpen]);
 
-  // Fetch every page from the server. If `useCurrentView` is true, also forward
-  // the active search, column filters, and sort.
-  const fetchAllPages = async (useCurrentView, label) => {
-    const all = [];
-    let pageNum = 1;
-    while (true) {
-      const sp = new URLSearchParams();
-      sp.set("page", String(pageNum));
-      sp.set("page_size", String(PAGE_SIZE));
-      if (useCurrentView) {
-        if (search) sp.set("search", search);
-        if (sort.key && sort.dir) {
-          sp.set("sort_by", sort.key);
-          sp.set("sort_dir", sort.dir);
-        }
-        Object.entries(colFilters).forEach(([key, set]) => {
-          if (!set || set.size === 0) return;
-          for (const v of set) sp.append(`filter[${key}]`, v);
-        });
-      }
-      const res = await api.get(`/stock-master?${sp.toString()}`);
-      all.push(...res.data);
-      const totalCount = parseInt(res.headers["x-total-count"], 10) || all.length;
-      setExportProgress({ loaded: all.length, total: totalCount, label });
-      if (all.length >= totalCount || res.data.length === 0) break;
-      pageNum += 1;
-    }
-    return all;
+  const downloadExportBlob = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
   };
 
-  // Build a real .xlsx file with one worksheet and trigger a download
-  const buildAndDownloadXlsx = (rows, filename) => {
-    const data = rows.map((r, idx) => ({
-      "SL NO": idx + 1,
-      "MODEL": r.model || "",
-      "PART NO": r.part_no || "",
-      "OLD PART NO": r.old_part_no || "",
-      "NEW PART NO": r.new_part_no || "",
-      "MAKE PART NO": r.make_part_no || "",
-      "DESCRIPTION 1": r.description_1 || "",
-      "DESCRIPTION 2": r.description_2 || "",
-      "OEM": r.remarks_oem || "",
-      "REMARKS": r.remarks_others || "",
-      "MAKE": r.make || "",
-      "ITEM CATEGORY": r.item_category || "",
-      "UNIT": r.unit || "",
-      "REORDER LEVEL": r.reorder_level || 0,
-    }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    ws["!cols"] = [
-      { wch: 6 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
-      { wch: 30 }, { wch: 30 }, { wch: 22 }, { wch: 22 }, { wch: 14 },
-      { wch: 18 }, { wch: 10 }, { wch: 14 },
-    ];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Stock Master");
-    XLSX.writeFile(wb, filename);
+  const buildExportParams = (useCurrentView) => {
+    const sp = new URLSearchParams();
+    if (useCurrentView) {
+      if (search) sp.set("search", search);
+      if (sort.key && sort.dir) {
+        sp.set("sort_by", sort.key);
+        sp.set("sort_dir", sort.dir);
+      }
+      Object.entries(colFilters).forEach(([key, set]) => {
+        if (!set || set.size === 0) return;
+        for (const v of set) sp.append(`filter[${key}]`, v);
+      });
+    }
+    return sp.toString();
   };
 
   const saveColumnSettings = async (next) => {
@@ -597,14 +565,12 @@ export default function StockMasterPage() {
  const exportFullStockMaster = async () => {
     setExportMenuOpen(false);
     setExporting(true);
-    setExportProgress({ loaded: 0, total: 0, label: "Fetching all items…" });
+    setExportProgress({ loaded: 0, total: 0, label: "Preparing backend export…" });
     try {
-      const all = await fetchAllPages(false, "Fetching all items…");
-      if (!all.length) { toast.error("No items to export"); return; }
-      setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
+      const res = await api.get("/stock-master/download/export", { responseType: "blob" });
       const ts = new Date().toISOString().slice(0, 10);
-      buildAndDownloadXlsx(all, `stock_master_full_${ts}.xlsx`);
-      toast.success(`Exported ${all.length.toLocaleString()} item(s)`);
+      downloadExportBlob(res.data, `stock_master_full_${ts}.csv`);
+      toast.success("Full stock master export downloaded");
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Export failed");
     } finally {
@@ -615,14 +581,13 @@ export default function StockMasterPage() {
   const exportCurrentView = async () => {
     setExportMenuOpen(false);
     setExporting(true);
-    setExportProgress({ loaded: 0, total: 0, label: "Fetching matching items…" });
+    setExportProgress({ loaded: 0, total: 0, label: "Preparing filtered backend export…" });
     try {
-      const all = await fetchAllPages(true, "Fetching matching items…");
-      if (!all.length) { toast.error("Nothing matches the current view"); return; }
-      setExportProgress({ loaded: all.length, total: all.length, label: "Generating Excel file…" });
+      const params = buildExportParams(true);
+      const res = await api.get(`/stock-master/download/export${params ? `?${params}` : ""}`, { responseType: "blob" });
       const ts = new Date().toISOString().slice(0, 10);
-      buildAndDownloadXlsx(all, `stock_master_view_${ts}.xlsx`);
-      toast.success(`Exported ${all.length.toLocaleString()} item(s)`);
+      downloadExportBlob(res.data, `stock_master_view_${ts}.csv`);
+      toast.success("Current stock master view exported");
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Export failed");
     } finally {

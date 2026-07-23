@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from deps import db, get_current_user, _notify, now_iso
 from models import StockMaster, StockMasterCreate
-from routes._helpers import _csv_response, _normalize_col
+from routes._helpers import _csv_response, _csv_safe_value, _csv_streaming_response, _normalize_col
 
 router = APIRouter()
 
@@ -51,60 +51,46 @@ _FILTERABLE_FIELDS = {
 # Sentinel used by frontend to represent "blank/empty" cells in column filters
 _BLANK_TOKEN = "(Blanks)"
 
+_SEARCH_FIELDS = [
+    "model",
+    "part_no",
+    "old_part_no",
+    "new_part_no",
+    "make_part_no",
+    "description_1",
+    "description_2",
+    "remarks_oem",
+    "remarks_others",
+    "make",
+    "item_category",
+    "unit",
+]
 
-@router.get("/stock-master", response_model=List[StockMaster])
-async def list_stock_master(
-    request: Request,
-    response: Response,
-    search: Optional[str] = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(5000, ge=1, le=5000),
-    sort_by: Optional[str] = None,
-    sort_dir: Optional[str] = None,   # "asc" | "desc"
-    user=Depends(get_current_user),
-):
-    """List stock master items.
 
-    Supports:
-      - `search` (free text across multiple fields)
-      - `page` / `page_size` (pagination)
-      - `sort_by` / `sort_dir` (server-side sort on a whitelisted field)
-      - `filter[<field>]` repeated query params for column filters, e.g.
-            ?filter[make]=Cummins&filter[make]=Tata
-        A value of "(Blanks)" matches empty/missing values.
-    """
+def _build_stock_master_query(request: Request, search: Optional[str] = None) -> dict:
     query: dict = {}
 
-    # Free-text search across many fields
     if search:
         s = search.strip()
-        query["$or"] = [
-            {"part_no": {"$regex": s, "$options": "i"}},
-            {"old_part_no": {"$regex": s, "$options": "i"}},
-            {"new_part_no": {"$regex": s, "$options": "i"}},
-            {"make_part_no": {"$regex": s, "$options": "i"}},
-            {"description_1": {"$regex": s, "$options": "i"}},
-            {"description_2": {"$regex": s, "$options": "i"}},
-            {"remarks_oem": {"$regex": s, "$options": "i"}},
-            {"remarks_others": {"$regex": s, "$options": "i"}},
-            {"make": {"$regex": s, "$options": "i"}},
-            {"item_category": {"$regex": s, "$options": "i"}},
-        ]
+        search_clauses = [{field: {"$regex": s, "$options": "i"}} for field in _SEARCH_FIELDS]
+        try:
+            numeric_search = int(float(s))
+            if float(s) == numeric_search:
+                search_clauses.append({"reorder_level": numeric_search})
+        except Exception:
+            pass
+        query["$or"] = search_clauses
 
-    # Per-column filters: ?filter[make]=A&filter[make]=B  → make ∈ {A, B}
-    # Also accept the "images" virtual filter: filter[images]=Has image / No image
     column_clauses: list = []
     for raw_key, raw_val in request.query_params.multi_items():
         if not (raw_key.startswith("filter[") and raw_key.endswith("]")):
             continue
         field = raw_key[len("filter["):-1]
-        # Collect all values for this field (multi-select)
         values = request.query_params.getlist(raw_key)
         if not values:
             continue
 
         if field == "images":
-            # Special case: "Has image" => images array non-empty OR legacy image set
             wants_has = "Has image" in values
             wants_none = "No image" in values
             sub = []
@@ -129,14 +115,13 @@ async def list_stock_master(
             continue
 
         if field not in _FILTERABLE_FIELDS:
-            continue  # silently ignore unknown fields
+            continue
 
         concrete = [v for v in values if v != _BLANK_TOKEN]
         wants_blank = _BLANK_TOKEN in values
 
         sub = []
         if concrete:
-            # For numeric reorder_level we need to coerce to int when possible
             if field == "reorder_level":
                 ints = []
                 for v in concrete:
@@ -158,11 +143,36 @@ async def list_stock_master(
             column_clauses.append({"$or": sub} if len(sub) > 1 else sub[0])
 
     if column_clauses:
-        # Combine column filters with each other (AND), then with any existing query (AND)
         if len(column_clauses) == 1:
             query.update(column_clauses[0])
         else:
             query.setdefault("$and", []).extend(column_clauses)
+
+    return query
+
+
+@router.get("/stock-master", response_model=List[StockMaster])
+async def list_stock_master(
+    request: Request,
+    response: Response,
+    search: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(5000, ge=1, le=5000),
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,   # "asc" | "desc"
+    user=Depends(get_current_user),
+):
+    """List stock master items.
+
+    Supports:
+      - `search` (free text across multiple fields)
+      - `page` / `page_size` (pagination)
+      - `sort_by` / `sort_dir` (server-side sort on a whitelisted field)
+      - `filter[<field>]` repeated query params for column filters, e.g.
+            ?filter[make]=Cummins&filter[make]=Tata
+        A value of "(Blanks)" matches empty/missing values.
+    """
+    query = _build_stock_master_query(request, search)
 
     # Sort: default is created_at desc; otherwise whitelisted field
     if sort_by and sort_by in _FILTERABLE_FIELDS:
@@ -257,28 +267,60 @@ async def download_template_route():
 
 
 @router.get("/stock-master/download/export")
-async def export_stock_master(user=Depends(get_current_user)):
-    items = await db.stock_master.find({}, {"_id": 0}).sort("created_at", 1).to_list(100000)
-    rows = []
-    for idx, it in enumerate(items, start=1):
-        rows.append([
-            idx,
-            it.get("model", ""),
-            it.get("part_no", ""),
-            it.get("old_part_no", ""),
-            it.get("new_part_no", ""),
-            it.get("make_part_no", ""),
-            it.get("description_1", ""),
-            it.get("description_2", ""),
-            it.get("remarks_oem", ""),
-            it.get("remarks_others", ""),
-            it.get("make", ""),
-            it.get("item_category", ""),
-            it.get("unit", ""),
-            it.get("reorder_level", 0) or 0,
-        ])
+async def export_stock_master(
+    request: Request,
+    search: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    query = _build_stock_master_query(request, search)
+    if sort_by and sort_by in _FILTERABLE_FIELDS:
+        direction = -1 if (sort_dir or "asc").lower() == "desc" else 1
+        sort_spec = [(sort_by, direction), ("created_at", 1)]
+    else:
+        sort_spec = [("created_at", 1)]
+
+    cursor = db.stock_master.find(query, {"_id": 0}).sort(sort_spec)
+
+    export_fields = [
+        "id",
+        "created_at",
+        "model",
+        "part_no",
+        "old_part_no",
+        "new_part_no",
+        "make_part_no",
+        "description_1",
+        "description_2",
+        "remarks_oem",
+        "remarks_others",
+        "make",
+        "item_category",
+        "unit",
+        "reorder_level",
+        "image",
+        "images",
+    ]
+
+    extras = set()
+    async for doc in db.stock_master.find(query, {"_id": 0}):
+        extras.update(k for k in doc.keys() if k not in export_fields)
+
+    header = ["sl_no", *export_fields, *sorted(extras)]
+
+    async def row_generator():
+        idx = 1
+        async for item in cursor:
+            yield [
+                idx,
+                *[_csv_safe_value(item.get(field, "")) for field in export_fields],
+                *[_csv_safe_value(item.get(field, "")) for field in sorted(extras)],
+            ]
+            idx += 1
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return _csv_response(rows, TEMPLATE_COLUMNS, f"stock_master_export_{ts}.csv")
+    return _csv_streaming_response(row_generator(), header, f"stock_master_export_{ts}.csv")
 
 
 # ============================================================================

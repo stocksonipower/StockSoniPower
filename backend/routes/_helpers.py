@@ -4,6 +4,7 @@ Extracted from server.py with zero logic changes.
 """
 import io
 import csv
+import json
 
 import pandas as pd
 from fastapi import HTTPException, UploadFile
@@ -26,6 +27,38 @@ def _csv_response(rows: list, header: list, filename: str) -> StreamingResponse:
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _csv_streaming_response(row_iter, header: list, filename: str) -> StreamingResponse:
+    async def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(header)
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        async for row in row_iter:
+            writer.writerow(row)
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _csv_safe_value(value):
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=True)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    if value is None:
+        return ""
+    return value
 
 
 async def _read_file_to_df(file: UploadFile):
