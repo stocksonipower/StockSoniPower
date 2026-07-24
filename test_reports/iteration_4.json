@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 4 — Stock In Receipt Note refinements (DD-MM-YYYY dates, ITEMS right-align, TOTAL QUANTITY column, Edit+Delete buttons, max-serial+1 algorithm, PUT/DELETE endpoints). Backend: 11/11 pytest cases PASS. Frontend: full e2e flow PASS — list dates DD-MM-YYYY, headers right-aligned, edit prefill + Update label + multi-make dropdown, save round-trip, create-then-delete preview rollback (RN/26-27/005 created then deleted, preview returned from 006 to 005), toast 'RN/26-27/005 deleted'. 0 console/page errors.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tested_scenarios": [
+    {"id": "be_max_serial_plus_one", "result": "PASS", "detail": "GET /api/receipt-notes/next-no returns max(serial in current FY) + 1 — confirmed max=4 in DB + next_serial=5"},
+    {"id": "be_create_then_delete_reverts_serial", "result": "PASS", "detail": "POST -> serial N, next_serial=N+1; DELETE -> next_serial drops back to N (max+1 algorithm, no counter)"},
+    {"id": "be_put_updates_mutables", "result": "PASS", "detail": "PUT updates invoice_no, invoice_date, items; rn_no/rn_date/serial/fy preserved. _id excluded."},
+    {"id": "be_put_validation_empty_items_400", "result": "PASS"},
+    {"id": "be_put_validation_qty_zero_400", "result": "PASS"},
+    {"id": "be_put_validation_empty_part_400", "result": "PASS"},
+    {"id": "be_put_validation_empty_make_400", "result": "PASS"},
+    {"id": "be_put_unknown_id_404", "result": "PASS"},
+    {"id": "be_delete_unknown_id_404", "result": "PASS"},
+    {"id": "fe_list_dates_ddmmyyyy", "result": "PASS", "detail": "RN dates [25-04-2026, 25-04-2026]; Invoice dates [20-04-2026, 25-02-2026]"},
+    {"id": "fe_items_header_right_aligned", "result": "PASS", "detail": "ITEMS th has class 'text-right'; cell has 'text-right font-mono text-slate-600'"},
+    {"id": "fe_total_quantity_column", "result": "PASS", "detail": "TOTAL QUANTITY column after ITEMS, right-aligned, values 30/10 (sum of items.quantity)"},
+    {"id": "fe_edit_delete_buttons", "result": "PASS", "detail": "rn-edit-{rn_no} + rn-delete-{rn_no} present under ACTIONS column for every row"},
+    {"id": "fe_detail_dialog_dates_ddmmyyyy", "result": "PASS", "detail": "Detail dialog shows rn_date=25-04-2026 and invoice_date=20-04-2026 in DD-MM-YYYY"},
+    {"id": "fe_edit_flow_prefill", "result": "PASS", "detail": "Edit opens form with rn_no=RN/26-27/004 (disabled), rn_date=2026-04-25 (disabled), inv_no=ABC/26-27/1234, inv_date=2026-04-20; Save button label='Update Receipt Note'"},
+    {"id": "fe_edit_make_dropdown_all_makes", "result": "PASS", "detail": "In edit mode for part_no=3922900 row, Make dropdown shows ['CSP','TATA','+ Create New Master'] — all current makes from stock_master, not just saved make"},
+    {"id": "fe_edit_save_roundtrip", "result": "PASS", "detail": "Updated invoice_no -> Click Update -> back to list -> new invoice_no visible in row"},
+    {"id": "fe_create_then_delete_preview_drops", "result": "PASS", "detail": "End-to-end UI verification: preview RN/26-27/005 -> create -> next preview RN/26-27/006 -> delete 005 -> preview drops to RN/26-27/005 again"},
+    {"id": "fe_delete_toast_and_row_removal", "result": "PASS", "detail": "window.confirm -> DELETE -> toast 'RN/26-27/005 deleted' -> row disappears from list"},
+    {"id": "fe_console_errors", "result": "PASS", "detail": "0 console errors, 0 page errors"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_receipt_notes_v2.py",
+    "/app/test_reports/pytest/receipt_notes_v2_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Receipt Note next-no algorithm correctly switched from counter to max(serial)+1 within current FY. Race condition is mitigated by unique (fy, serial) compound index + DuplicateKeyError retry on POST — good.",
+    "PUT /api/receipt-notes/{id} correctly preserves immutable fields (rn_no, rn_date, serial, fy). Validation reuses the same item validator as POST — no duplication.",
+    "fmtDate helper at top of StockInPage.jsx is purely string-based (regex on YYYY-MM-DD prefix); avoids Date timezone bugs. Used consistently in list AND detail dialog.",
+    "ReceiptNoteCreate handles edit-mode initialization correctly: hydrates items + re-fetches makes per-row from /stock-master/lookup/makes so dropdown shows all current options including '+ Create New Master'.",
+    "StockInPage.jsx is now ~640 lines — still under the 700-line guideline but trending up; consider splitting components (ReceiptNoteList, ReceiptNoteCreate, MakeDropdown, CreateMasterDialog) into separate files when next change adds >50 lines.",
+    "DELETE handler uses window.confirm; consider a shadcn AlertDialog for consistency with the rest of the app, but acceptable for now."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_receipt_notes_v2.py (new, 11 tests for max-serial+1 + PUT + DELETE)"
+  ],
+  "success_rate": {"backend": "100% (11/11 new + 14/14 existing = 25/25 cumulative)", "frontend": "100% (20/20 scenarios)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working)",
+  "seed_data_creation": "Tests created and cleaned up TEST_AGENT_INV_DEL, TEST_AGENT_INV_UPD/UPD_v2, TEST_PUT_*, TEST_DEL_* RNs. Final DB state: 2 receipt notes (RN/26-27/001, RN/26-27/004 with invoice_no updated to TEST_PUT_<ts>). Note: invoice_no on RN/26-27/004 was changed during edit-flow testing — main agent may want to revert this seed value if needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Receipt Note feature with all iteration-4 refinements is fully working. Active data-testids: rn-list-view, rn-create-view, rn-detail-dialog, create-rn-button, rn-back-button, rn-save-button (label 'Save Receipt Note' or 'Update Receipt Note'), rn-add-row-button, rn-date-input, rn-no-input, rn-invoice-date-input, rn-invoice-no-input, rn-row-{rn_no}, rn-open-{rn_no}, rn-edit-{rn_no}, rn-delete-{rn_no}, rn-part-no-{idx}, rn-qty-{idx}, rn-make-{idx} (with options rn-make-{idx}-option-create / rn-make-{idx}-option-{makeName}), rn-item-row-{idx}, rn-remove-row-{idx}, create-master-dialog + cm-* fields. fmtDate helper (lines 23-29 of StockInPage.jsx) handles YYYY-MM-DD -> DD-MM-YYYY safely. Backend endpoints: GET/POST/PUT/DELETE /api/receipt-notes with max-serial+1 + DuplicateKey retry.",
+  "rca_of_the_issue": "N/A — feature working as designed. One minor flake during initial test: page.text_content() returned empty for radix Dialog content when read immediately after wait_for_selector; switching to eval_on_selector with element.innerText (which forces a layout) resolved this — pure test-side issue, not an app bug."
+}

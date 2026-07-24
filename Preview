@@ -1,0 +1,6 @@
+//For frontend starting
+// cmd.exe /c "cd /d d:\GitHubRepo\01-STOCK-APP-SS1\frontend && npm start"
+
+//For backend starting
+// cd d:\GitHubRepo\01-STOCK-APP-SS1\backend
+// py -m uvicorn server:app --reload --host 0.0.0.0 --port 8000

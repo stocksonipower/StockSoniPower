@@ -1,0 +1,77 @@
+{
+  "summary": "Phase 2 In-App Notifications & Activity Log tested end-to-end. BACKEND: 13/14 PASS in /app/backend/tests/test_notifications.py (covers list/sort/limit, unread-count, mark-read for specific ids/null/empty/idempotent, triggers for auth.login/auth.lockout/user.created/user.reactivated/stock_master.created/stock_master.deleted, and visibility rules for staff). FRONTEND: NotificationBell fully verified — bell visible in topbar, badge='3' after admin login, dropdown opens with 18 items (correct icons, colors, timeAgo, title, message), click an item decrements badge (3→2), Mark-all-read clears all and disables itself, click-outside closes dropdown, all data-testids present. ONE BACKEND BUG: DELETE /api/users/{id} does NOT fire any notification — spec requires audience=admin, type=user.deactivated. The endpoint at server.py L636-645 (deactivate_user) is missing the _notify(...) call entirely, so admins never see user-deletion events in their feed.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "DELETE /api/users/{user_id}",
+        "issue": "Missing notification trigger. Spec requires _notify(type='user.deactivated', audience='admin') on soft-delete, but the deactivate_user handler (server.py L636-645) only updates is_active=false and returns {ok:true} — no _notify call. As a result admins never see user-deactivation events in the activity feed. Note: PUT /api/users/{id} with is_active=false DOES correctly emit user.deactivated (L619-626), so a workaround is to use PUT, but the DELETE trigger spec'd in the requirements is broken.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "tested_scenarios": [
+    {"id": "be_list_returns_items_and_unread_count", "result": "PASS"},
+    {"id": "be_unread_count_endpoint", "result": "PASS"},
+    {"id": "be_items_sorted_desc_by_created_at", "result": "PASS"},
+    {"id": "be_limit_param_respected", "result": "PASS", "detail": "limit=2 returns <=2 items"},
+    {"id": "be_trigger_auth_login", "result": "PASS", "detail": "admin login produces type=auth.login, audience=admin"},
+    {"id": "be_trigger_auth_lockout", "result": "PASS", "detail": "5 failed logins → type=auth.lockout, audience=admin, message contains email"},
+    {"id": "be_trigger_user_created", "result": "PASS"},
+    {"id": "be_trigger_user_deactivated_via_DELETE", "result": "FAIL", "detail": "DELETE /api/users/{id} does NOT fire user.deactivated. PUT is_active=false would, but DELETE handler is missing _notify call entirely."},
+    {"id": "be_trigger_user_reactivated", "result": "PASS", "detail": "PUT is_active=true → user.reactivated"},
+    {"id": "be_trigger_stock_master_created", "result": "PASS", "detail": "audience=module, module=stock_master"},
+    {"id": "be_trigger_stock_master_deleted", "result": "PASS"},
+    {"id": "be_trigger_receipt_note_created", "result": "NOT_TESTED", "detail": "Skipped due to seed-data complexity in API-only test; trigger code present at server.py L1638; rely on frontend prior session showing notifications."},
+    {"id": "be_trigger_stock_in_recorded", "result": "NOT_TESTED", "detail": "code at L2154"},
+    {"id": "be_trigger_issue_note_created", "result": "NOT_TESTED", "detail": "code at L2256"},
+    {"id": "be_trigger_stock_out_recorded", "result": "NOT_TESTED", "detail": "code at L2717"},
+    {"id": "be_visibility_staff_hides_admin_audience_notifs", "result": "PASS", "detail": "staff with stock_in:true,stock_out:false sees no auth.* or user.* notifs"},
+    {"id": "be_visibility_staff_hides_disabled_module_notifs", "result": "PASS", "detail": "staff w/ stock_master:false does NOT see stock_master.created"},
+    {"id": "be_visibility_staff_unread_count_subset_of_admin", "result": "PASS"},
+    {"id": "be_mark_read_specific_ids", "result": "PASS"},
+    {"id": "be_mark_read_idempotent", "result": "PASS"},
+    {"id": "be_mark_read_ids_null_marks_all_visible", "result": "PASS", "detail": "unread_count → 0 after"},
+    {"id": "be_mark_read_ids_empty_list_marks_all_visible", "result": "PASS"},
+    {"id": "fe_bell_visible_in_topbar", "result": "PASS"},
+    {"id": "fe_unread_badge_renders_count", "result": "PASS", "detail": "badge='3' immediately after admin login"},
+    {"id": "fe_dropdown_opens_on_click", "result": "PASS", "detail": "18 items rendered with title/message/timeAgo + icons + colors"},
+    {"id": "fe_click_item_marks_one_read", "result": "PASS", "detail": "badge 3 → 2"},
+    {"id": "fe_mark_all_read_clears_badge_and_disables_button", "result": "PASS", "detail": "badge node removed; button disabled=true after click"},
+    {"id": "fe_click_outside_closes_dropdown", "result": "PASS"},
+    {"id": "fe_polling_30s_and_window_focus_handlers", "result": "CODE_VERIFIED", "detail": "NotificationBell.jsx L67-73 sets setInterval(load,30000) + window 'focus' listener; not waited 30s in test, but logic is correct."}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_notifications.py",
+    "/app/test_reports/pytest/notifications_results.xml"
+  ],
+  "action_items": [
+    "HIGH: Fix DELETE /api/users/{user_id} (deactivate_user, server.py L636-645) to call _notify(actor=admin, type='user.deactivated', title='User deactivated', message=f\\\"{admin.get('email')} deactivated {target.get('email')}.\\\", audience='admin', ref_collection='users', ref_id=user_id) right before returning. The PUT path already does this correctly at L619-626; mirror that block.",
+    "OPTIONAL: Add backend tests for receipt_note.created, stock_in.recorded, issue_note.created, stock_out.recorded triggers (the trigger code is present and correct, but not covered by current test suite). They require seeding stock-master + locations + GRN/IN flow which is in test_receipt_notes.py — could be combined with notification assertions in a follow-up."
+  ],
+  "critical_code_review_comments": [
+    "_notif_visibility_filter (server.py L654-668): clean and correct — admins get {} (everything), staff get $or of audience=user+target_user_id OR audience=module+module∈allowed. audience='admin' rows are correctly invisible to staff. ✅",
+    "_notify (server.py L131-165) correctly swallows exceptions so a notification failure can never break the underlying business operation. ✅",
+    "BUG (HIGH): deactivate_user (DELETE /users/{id}, L636-645) is missing the _notify call — inconsistent with the matching PUT path at L619-626. Spec explicitly lists this trigger.",
+    "GET /api/notifications applies visibility filter twice — once for items, once for unread count (L696 + L700). For better DRY/perf, compute the filter once and reuse. Minor; not blocking.",
+    "MarkReadRequest treats both `ids=None` and `ids=[]` as 'mark all visible'. This matches the spec ('with {ids:null} or {ids:[]} marks ALL'). Verified in tests. ✅",
+    "NotificationBell.jsx polls every 30s + on window focus, properly cleans up listeners on unmount, and uses click-outside via mousedown — all correct patterns. ✅",
+    "_notif_to_public correctly excludes Mongo `_id` (already excluded by find projection {_id:0} on L699). ✅",
+    "The X-Unread-Count response header is set on GET /notifications and exposed via Access-Control-Expose-Headers (L701-702) — nice touch for cheap polling, but the frontend currently doesn't use it (it parses the JSON body instead). Either remove the header or wire it into a HEAD-style endpoint to save bandwidth."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_notifications.py (NEW — 14 tests, 13 PASS / 1 FAIL exposing the DELETE bug)"
+  ],
+  "success_rate": {"backend": "93% (13/14 — single fail is the DELETE-user notification bug)", "frontend": "100% (all NotificationBell flows verified)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working)",
+  "seed_data_creation": "Created ~5 TEST_* users and 2 TEST_VIS_* / TEST_PN_* stock-master items during testing. All users soft-deactivated and all stock-master items deleted in fixture teardown except where deletion was the test subject (already deleted).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Notifications backend is solid (13/14 PASS). After main agent adds the missing _notify call to DELETE /api/users/{id}, re-run only the failing test: `pytest backend/tests/test_notifications.py::TestNotificationTriggers::test_user_created_and_deactivated_triggers -v` — should flip to PASS. Frontend NotificationBell needs no further work. Optional follow-up: extend test_notifications.py to cover the 4 stock-flow triggers (receipt_note.created, stock_in.recorded, issue_note.created, stock_out.recorded). NotificationBell polls every 30s; auto-refresh-after-receipt-note was not directly waited-for in this run but the polling+focus logic is verified by code-review.",
+  "rca_of_the_issue": "Bug: DELETE /api/users/{id} doesn't emit user.deactivated notification. Reproduction: (1) Login admin; (2) POST /api/users to create a user; (3) DELETE /api/users/{id}; (4) GET /api/notifications — there is NO row with type='user.deactivated' for that user_id. Direct cause: deactivate_user() at server.py L636-645 only does db.users.update_one(...is_active:false...) and returns {ok:True} without ever calling _notify(). The PUT update_user() handler does emit the notification (L619-626) when is_active flips. Mitigation: Append a _notify(actor=admin, type='user.deactivated', title='User deactivated', message=f\\\"{admin.get('email')} deactivated {target.get('email')}.\\\", audience='admin', ref_collection='users', ref_id=user_id) call at the bottom of deactivate_user, right before `return {ok: True, deactivated: True}`. After fix, re-run pytest backend/tests/test_notifications.py to confirm 14/14."
+}

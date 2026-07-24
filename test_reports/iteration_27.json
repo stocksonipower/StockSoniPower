@@ -1,0 +1,39 @@
+{
+  "summary": "P0 server.py refactor regression sweep. Wrote /app/backend/tests/test_iter27_refactor_regression.py covering every endpoint group called out in the review request (auth, users, /meta/modules, notifications, stock-master CRUD+downloads+column-settings+lookups, locations CRUD+range+bulk-delete, uploads, stock-in/out, receipt-notes create+finalize, all *-notes next-no/list, issue/transfer-request lookups, item-details, and module-access middleware). Result: 30/30 PASS in 10.87s after one tiny test fix and one one-line storage.py fix. Legacy regression suites (iter25, user_management, notifications, image_storage) re-run clean: 56/57 pass — the only failure is a stale test asserting 7 modules instead of the now-required 9 (test_user_management.py::test_modules_returns_seven_keys). One real refactor regression was found and fixed: storage.py was reading EMERGENT_LLM_KEY at module-import time, but the new server.py imports `storage` BEFORE `deps.load_dotenv()` runs, so all uploads were 502'ing at startup — fixed by reading the env var inside init_storage() at call time.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/uploads/image", "issue": "FIXED in this iter: storage.py captured EMERGENT_LLM_KEY at module-import time which was None because server.py imports `storage` before deps.load_dotenv() runs in the new layout; switched to call-time os.environ read inside init_storage()."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter27_refactor_regression.py",
+    "/app/test_reports/pytest/iter27_results.xml"
+  ],
+  "action_items": [
+    "Optional: update /app/backend/tests/test_user_management.py::TestMetaModules::test_modules_returns_seven_keys — it asserts the old 7-module set; the API (per spec & deps.APP_MODULES) now exposes 9 modules including 'stock_transfer' and 'item_details'. Either rename to ...returns_nine_keys or delete.",
+    "Optional: update /app/memory/test_credentials.md line 20 — it still says 'returns 7 module keys', should say 9.",
+    "No business-logic changes needed; refactor verified."
+  ],
+  "critical_code_review_comments": [
+    "Refactor regression caught: storage.py read EMERGENT_LLM_KEY at import time. Server.py now does `from storage import …` BEFORE `from deps import …` (which calls load_dotenv). Fixed by reading env at call time. Recommend adding a startup smoke that exercises object storage init to catch this kind of import-order bug earlier.",
+    "deps.py duplicates `bcrypt`, `jwt`, `motor`, `HTTPBearer` imports already present in server.py — both modules instantiate their own logger / load .env. Not a bug today, but the duplicate `bearer_scheme = HTTPBearer(...)` exists in both files; recommend server.py drop its duplicates and import from deps for true single-source-of-truth.",
+    "server.py still 5362 lines after extracting only ~1.3k lines into 5 route files. The interlinked stock_master/locations/uploads/stock-in/stock-out/receipt-notes/SRN/ERN/racking/issue/picking/transfer routes remain monolithic. Plan a phase-2 split by feature (locations.py, uploads.py, stock_master.py) — they're self-contained.",
+    "Tests folder has zero conftest.py — every legacy test re-implements REACT_APP_BACKEND_URL loading and several fail collection without an explicit `export`. Recommend a single conftest.py that does `load_dotenv('/app/frontend/.env')` once."
+  ],
+  "updated_files": [
+    "/app/backend/storage.py (one-liner: read EMERGENT_LLM_KEY at call time inside init_storage())",
+    "/app/backend/tests/test_iter27_refactor_regression.py (new — 30 regression tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (30/30 on iter27 sweep; 56/57 across legacy + iter27 with the lone failure being a stale 7-vs-9 module assertion in test_user_management.py)",
+    "frontend": "N/A (skipped per request)"
+  },
+  "test_credentials": "admin@stockmgmt.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each test session creates one TESTPN_<uuid8> stock_master row + TEST_GD/TR/TB godown/rack/box. Disposable users are created with TEST_ prefix and soft-deleted at end of test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter-27 ratifies the model/deps/routes extraction. The single refactor-introduced bug (storage.py import-order) is fixed in this iteration. test_iter27_refactor_regression.py is the live-fire regression sweep for ANY future refactor of server.py — re-run with `cd /app/backend && python -m pytest tests/test_iter27_refactor_regression.py -v`. Don't forget /app/frontend/.env is loaded inside the test so no `export` is needed. The legacy test_user_management.py asserts 7 modules and will fail until updated to 9 — flag for main agent to update or delete.",
+  "rca of the issue": "Refactor regression: storage.py read `EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')` at module-import time (line 14). New server.py top-of-file does `from storage import …` (line 19) BEFORE `from deps import …` (line 22). deps.py is what calls load_dotenv at import. So when storage.py was imported, .env had not been loaded yet, EMERGENT_LLM_KEY was None, the captured `EMERGENT_KEY` constant was None, and every call to init_storage() raised RuntimeError → 502 'Image upload failed'. Mitigation: replaced module-level constant with a `_emergent_key()` helper that reads os.environ at call time. Verified by re-running test_iter27 (image upload + serve now 200/200) and test_image_storage.py (all green)."
+}

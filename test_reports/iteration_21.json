@@ -1,0 +1,54 @@
+{
+  "summary": "Iter-21 backend regression for the new Stock-In status workflow (SRN COMPLETE rename, RACKING_NOTE_DRAFT, FULLY_RACKED considers all descendants). 16/17 tests PASS. 1 CRITICAL functional bug found: editing an SRN's fulfilled_qty (or an ERN's accepted_qty) AFTER its parent RN has reached FULLY_RACKED does NOT re-trigger _recompute_rn_status(parent_rn_id) -> RN incorrectly stays at FULLY_RACKED even though new descendant rackable qty just appeared. This violates the new rule the main agent set: 'RN reaches FULLY_RACKED only when RN.received + ALL descendant SRN.fulfilled + ALL descendant ERN.accepted is fully racked.' All other 7 acceptance criteria validated end-to-end (SRN auto-create on shortfall, ERN auto-create on overage, status PENDING/PARTIALLY_RECEIVED/COMPLETE for SRN, PENDING/PARTIALLY_ACCEPTED/COMPLETE for ERN, draft RKN against RN OR against SRN descendant flips RN to RACKING_NOTE_DRAFT, RECORDED RKN drives RN to PARTIALLY_RACKED/FULLY_RACKED, legacy 'FULLY_RECEIVED' migration confirmed - 0 rows remain). Backend is live and healthy at REACT_APP_BACKEND_URL.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/short-received-notes/{srn_id} and POST /api/short-received-notes/{srn_id}/finalize (also PUT/finalize on /api/extra-received-notes/{ern_id})",
+        "issue": "After SRN.fulfilled_qty (or ERN.accepted_qty) is edited/finalized, the parent RN's status is NOT recomputed. If the parent RN had already reached FULLY_RACKED based on RN.received only, it stays at FULLY_RACKED forever even after a descendant SRN/ERN gains new rackable qty. This breaks the new rule that 'RN reaches FULLY_RACKED only when RN.received + ALL descendant SRN.fulfilled + ALL descendant ERN.accepted is fully racked'. RCA in update_short_received_note (line ~3994) and finalize_short_received_note (line ~4044) and update_extra_received_note (line ~4187) and finalize_extra_received_note (line ~4237): they call _recompute_srn_racking_status / _recompute_ern_racking_status only - they never call _recompute_rn_status(parent_rn_id) (or walk parent_srn_id / parent_ern_id chains to the ultimate RN). Reproduced by test TestRnFullyRackedRequiresAllDescendants::test_rn_not_fully_racked_when_srn_unracked.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/short-received-notes/{srn_id}/finalize",
+        "issue": "When user PUT-s the SRN with fulfilled_qty == short_qty for every row, the PUT itself sets status to COMPLETE via _compute_srn_status. The subsequent finalize call then 409s with 'already fully received'. Functionally correct (data is consistent), but UX-wise the explicit /finalize button users press becomes a 409 in this happy-path. Either the /finalize handler should be idempotent (200 with the existing COMPLETE doc) or the PUT should leave status as PARTIALLY_RECEIVED until /finalize is explicitly invoked. Same applies to ERN PUT->/finalize."
+      },
+      {
+        "endpoint": "(carry-over from iter-20) PUT /api/stock-master/{id}",
+        "issue": "Still requires full StockMasterCreate body (not partial). Not blocking since FE always sends full doc."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter21_status_workflow.py",
+    "/app/test_reports/pytest/iter21_status.xml"
+  ],
+  "action_items": [
+    "(HIGH) In update_short_received_note (~line 3994) AND finalize_short_received_note (~line 4044): after _recompute_srn_racking_status, also call _recompute_rn_status(srn['parent_rn_id']) so the ultimate RN is re-evaluated against the new descendant rackable qty. If the SRN itself has parent_srn_id (chained), walk up to the RN before recomputing.",
+    "(HIGH) Same fix in update_extra_received_note (~line 4187) AND finalize_extra_received_note (~line 4237) for ERN -> RN.",
+    "(MED) Make /short-received-notes/{id}/finalize and /extra-received-notes/{id}/finalize idempotent on already-COMPLETE rows (return 200 with the doc instead of 409) - so the FE 'Final Save' button never blows up after PUT auto-completes the row.",
+    "(LOW) Optional: have _recompute_rn_status emit a notification when status transitions to PARTIALLY_RACKED from FULLY_RACKED (going 'backwards') so users notice."
+  ],
+  "critical_code_review_comments": [
+    "_recompute_rn_status (line 2887) correctly walks SRN+ERN descendant trees to compute rackable totals and detect any DRAFT RKN -> RACKING_NOTE_DRAFT. Logic is correct WHEN it gets called. The bug is that SRN/ERN edit handlers never call it.",
+    "_recompute_source_status_after_rkn (line 3252) DOES call _recompute_rn_status(ultimate_rn_id) when source is SRN/ERN. So racking-note-side edits propagate properly. Only SRN/ERN-side edits miss the propagation.",
+    "Status string 'COMPLETE' is now used by both SRN and ERN. Frontend should distinguish them by entity type when displaying. Minor consistency win: consider 'FULLY_RECEIVED' (kept just for legacy DB rows) is no longer in any code path -- safe to delete the legacy compat check in update_short_received_note line 3951 and finalize line 4008 in a future cleanup.",
+    "Legacy 'FULLY_RECEIVED' -> 'COMPLETE' startup migration (line 5815) is one-shot updateMany; OK. Verified 0 SRNs remain on legacy status after server start.",
+    "No issues found with ERN PARTIALLY_REJECTED state, but no test in this iteration triggered it (extra=3, all-rejected case). Suggest adding to next regression run."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter21_status_workflow.py (NEW: 17 tests across 7 classes covering auth + SRN flow + ERN flow + RKN against RN + RN-with-descendant-qty rule + legacy migration + smoke list endpoints)"
+  ],
+  "success_rate": {"backend": "94% (16/17 pass; 1 fail = real backend bug)", "frontend": "skipped per request"},
+  "test_credentials": "admin@stockmgmt.com / admin123",
+  "seed_data_creation": "Each test creates fresh stock_master rows with TESTPN_<uuid8>/TESTMK and a TEST_GD_/TR/TB godown+rack+box triplet. Multiple RN/SRN/ERN/RKN docs created. No cleanup performed - docs remain in DB but are isolated by unique part_no so they don't conflict with other suites.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "After main agent fixes the SRN/ERN -> RN status propagation bug (action item HIGH), re-run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/test_iter21_status_workflow.py::TestRnFullyRackedRequiresAllDescendants -v. The fix should make test_rn_not_fully_racked_when_srn_unracked pass. The other 16 tests are already green and serve as a regression net for the rest of the new status workflow. If main agent also makes /finalize idempotent on COMPLETE rows (MED action), update test_full_fulfillment_marks_complete_not_legacy_label and test_fully_decided_ern_marks_complete to assert 200 instead of 409 on the second finalize call.",
+  "rca of the issue": "The critical bug stems from incomplete wiring of the new 'RN status considers all descendants' rule. _recompute_rn_status(rn_id) DOES walk SRN+ERN descendants and sum their fulfilled/accepted qty into rackable - the math is right. The handlers _recompute_source_status_after_rkn (called from RKN create/update/delete/record paths) DO bubble up to the ultimate RN. But the SRN-edit and ERN-edit handlers only recompute the SRN/ERN's own racking_status - they never bubble up to the ultimate RN. So the bug surfaces in this exact sequence: (1) finalize RN with shortfall -> SRN PENDING; (2) record RKN against RN for full received_qty -> RN becomes FULLY_RACKED (correct, SRN.fulfilled is still 0); (3) PUT SRN with new fulfilled_qty>0 -> SRN.racking_status recomputes to PARTIALLY_RACKED, but the RN is NOT recomputed and stays FULLY_RACKED. Fix: in the four handlers (PUT/finalize on /short-received-notes and /extra-received-notes) add an extra `await _recompute_rn_status(parent_rn_id)` call after the existing `_recompute_*_racking_status` call. For chained SRN/ERN (parent_srn_id / parent_ern_id), walk the chain to the ultimate parent_rn_id first (the prepare-source code already has the helper pattern at line 3252)."
+}

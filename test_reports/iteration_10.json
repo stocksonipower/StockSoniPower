@@ -1,0 +1,70 @@
+{
+  "summary": "Iteration 10 — Phase 1 User Management & Auth Security. BACKEND: 16/16 PASS in /app/backend/tests/test_user_management.py covering login lockout (5-fail → 423), last_login update, deactivated-user 403, /api/auth/register removed (404), full /api/users CRUD with module_access + force_password_reset, admin-only RBAC (staff gets 403 on /users), reactivation clears lockout_until, soft-delete, /api/auth/me self-service (clears force_password_reset on password change), /api/meta/modules returns exactly 7 keys, module-level RBAC middleware (staff with stock_master=False gets 403 on GET/POST /api/stock-master, transactions still allowed, admin always allowed). FRONTEND: Admin login + Users page list + New-User dialog + module checkboxes + edit dialog all render OK with correct data-testids. Layout sidebar correctly hides nav-users for staff and shows for admin; nav-profile present for both. Staff with stock_master=False: /users → access-denied page rendered (test partially blocked by next bug — see below). CRITICAL FRONTEND BUG FOUND: a user with force_password_reset=True logs in, URL correctly redirects to /profile?reset=1, route-guard correctly bounces /​→ /profile?reset=1, BUT the ProfilePage renders BLANK (white screen). data-testid='profile-page' and 'force-reset-banner' are not present in the DOM. User cannot complete the mandatory password change → user is locked out of the entire app. RCA: ProfilePage early-returns null when useAuth().user is falsy (line 61 of ProfilePage.jsx); the user state appears to be null/loading on this navigation path even though /api/auth/login responded with the user object containing force_password_reset=true.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ProfilePage.jsx", "issue": "After login with force_password_reset=true, redirect to /profile?reset=1 succeeds but the page renders blank — neither profile-page wrapper nor force-reset-banner is in the DOM. User is locked out of the entire app and cannot reset password.", "selector": "[data-testid='profile-page']", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "force_password_reset enforcement", "issue": "Auth context does not hydrate user on the post-login /profile?reset=1 navigation, so ProfilePage's `if (!user) return null;` fires and renders nothing. Login API returns user object correctly (verified — backend test_self_update_name_and_password_clears_force_reset PASSES with the same user). The redirect itself works (route-guard bounces / → /profile?reset=1), implying auth state IS read for the guard but not propagated to ProfilePage.", "affected_selectors": ["[data-testid='profile-page']", "[data-testid='force-reset-banner']", "[data-testid='profile-password']"]}
+    ],
+    "design_issues": [
+      {"screen": "UserDialog (UsersPage.jsx)", "issues": ["Console warning: Missing `Description` or `aria-describedby={undefined}` for {DialogContent} — add DialogDescription for a11y."]}
+    ]
+  },
+  "tested_scenarios": [
+    {"id": "be_modules_seven_keys", "result": "PASS"},
+    {"id": "be_register_removed", "result": "PASS", "detail": "404"},
+    {"id": "be_admin_list_users", "result": "PASS"},
+    {"id": "be_create_staff_with_module_access_and_force_reset", "result": "PASS"},
+    {"id": "be_create_duplicate_email_rejected", "result": "PASS", "detail": "400"},
+    {"id": "be_create_short_password_rejected", "result": "PASS", "detail": "400"},
+    {"id": "be_staff_cannot_list_or_create_users", "result": "PASS", "detail": "403 on GET and POST /api/users"},
+    {"id": "be_update_user_module_access_and_password", "result": "PASS"},
+    {"id": "be_delete_soft_deactivates", "result": "PASS", "detail": "is_active=false; record retained"},
+    {"id": "be_login_success_updates_last_login", "result": "PASS"},
+    {"id": "be_lockout_after_5_failed_attempts_returns_423", "result": "PASS", "detail": "PUT is_active=true clears lockout_until and login resumes"},
+    {"id": "be_deactivated_user_login_403", "result": "PASS"},
+    {"id": "be_self_update_clears_force_password_reset", "result": "PASS", "detail": "name + password update via PUT /api/auth/me; re-login returns force_password_reset=false"},
+    {"id": "be_self_update_short_password_rejected", "result": "PASS"},
+    {"id": "be_module_rbac_staff_blocked_on_disabled_stock_master", "result": "PASS", "detail": "GET + POST /api/stock-master = 403; transactions still allowed"},
+    {"id": "be_module_rbac_admin_always_allowed", "result": "PASS"},
+    {"id": "fe_admin_login_redirects_to_root", "result": "PASS"},
+    {"id": "fe_admin_sidebar_shows_nav_users_and_nav_profile", "result": "PASS"},
+    {"id": "fe_users_page_loads_and_lists_rows", "result": "PASS", "detail": "After mount load completes, 26 user rows visible"},
+    {"id": "fe_users_new_dialog_create_user", "result": "PASS", "detail": "Dialog opens, accepts name/email/password/role/module checkboxes, submit closes dialog"},
+    {"id": "fe_users_edit_dialog_opens", "result": "PASS", "detail": "Edit dialog opens; module checkboxes (incl. user-form-module-stock_master) render"},
+    {"id": "fe_force_password_reset_redirect_to_profile", "result": "PASS", "detail": "URL changes to /profile?reset=1 after login"},
+    {"id": "fe_force_password_reset_locks_navigation", "result": "PASS", "detail": "Navigating to / bounces back to /profile?reset=1"},
+    {"id": "fe_force_password_reset_banner_renders", "result": "FAIL", "detail": "ProfilePage renders blank — neither [data-testid='profile-page'] nor [data-testid='force-reset-banner'] is present in DOM. Cannot complete password reset."},
+    {"id": "fe_profile_password_save_clears_force_reset", "result": "BLOCKED", "detail": "Blocked by previous failure — no profile form to interact with."},
+    {"id": "fe_staff_nav_filters_users_link_hidden", "result": "PARTIAL", "detail": "Verified in earlier run: nav-users is null for staff. Subsequent verification was blocked by stale auth state from the white-screen flow."},
+    {"id": "fe_staff_users_page_access_denied", "result": "PARTIAL/PASS", "detail": "Confirmed in initial run: navigating to /users as staff renders [data-testid='access-denied']."}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_user_management.py",
+    "/app/test_reports/pytest/user_management_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix ProfilePage blank-screen on /profile?reset=1 immediately after login. Likely root cause: useAuth().user is null at first render of ProfilePage on the post-login navigation path, so `if (!user) return null;` renders nothing. Suggested fix options: (a) in lib/auth.jsx, ensure that the user state is set synchronously before nav('/') in login(), and that ProtectedRoute waits for user-loading to settle; (b) replace `if (!user) return null;` in ProfilePage with a lightweight loading state and rely on useAuth's loading flag; (c) verify that AuthProvider re-fetches /api/auth/me on mount so refresh after redirect populates user. Until fixed, any user with force_password_reset=true is permanently locked out of the app.",
+    "Add DialogDescription (or aria-describedby) to UserDialog to remove the Radix accessibility console warning."
+  ],
+  "critical_code_review_comments": [
+    "Backend lockout logic (server.py L400-414): correctly resets failed_login_attempts to 0 and stores lockout_until on the 5th failure; on reactivation (PUT is_active=true) it $unsets lockout_until — verified end-to-end.",
+    "Module RBAC middleware (server.py L2793-2810) does an extra DB read on every request hitting one of the 13 prefix paths. With current scale this is fine, but consider caching the user.module_access in the JWT claims at login time to avoid the per-request lookup if QPS grows.",
+    "ProfilePage early-return `if (!user) return null;` is a UX foot-gun on the force-password-reset redirect path — this is the root cause of the blank-screen bug. Replace with explicit loading skeleton or guard.",
+    "register endpoint correctly returns 404 (route is removed). LoginPage.jsx still defaults email/password fields to admin@stockmgmt.com / admin123 — fine for dev, should be removed before production.",
+    "UsersPage data-testids (users-new-button, user-form-module-{key}, user-toggle-{id}, user-unlock-{id}, user-edit-{id}) all correctly present and discoverable — good for downstream regression testing.",
+    "RegisterPage.jsx file still exists in /app/frontend/src/pages/ even though backend register endpoint is removed; verify it is not routable from App.js (consider deleting the file)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_user_management.py (NEW — 16 tests, all PASS)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "75% (admin Users CRUD UI + force-reset redirect/route-lock OK; force-reset BANNER + password-save BLOCKED by blank-screen bug)"},
+  "test_credentials": "admin@stockmgmt.com / admin123 (working)",
+  "seed_data_creation": "Created 25 TEST_*/test_fe_* users during testing, ALL deactivated (soft-deleted) at the end. No active residue. Admin user untouched.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "Backend auth+user-management is solid (16/16 PASS, see /app/backend/tests/test_user_management.py — re-runnable as regression). The ONE critical bug to retest after fix is: login as a user with force_password_reset=true → /profile?reset=1 must render the form + banner, not a blank page. Quick repro: (1) admin POST /api/users {email, password, force_password_reset:true}; (2) login with that user via UI; (3) expect [data-testid='force-reset-banner'] visible and [data-testid='profile-password'] fillable. The redirect-and-lock mechanism itself is already working correctly — only the render is broken. Also re-verify staff RBAC end-to-end (initial run showed nav-users hidden + /users → access-denied for staff, but second verification was blocked).",
+  "rca_of_the_issue": "Bug: ProfilePage renders blank when entering via /profile?reset=1 directly after login. Reproduction: (1) Admin sets force_password_reset=true on a user; (2) That user logs in via /login; (3) login() in lib/auth.jsx calls nav('/'), but somewhere a redirect sends the user to /profile?reset=1 (correct); (4) ProfilePage mounts, useAuth().user is null at first render, `if (!user) return null;` returns null → blank page; (5) After mount the auth context never causes a re-render that brings user into ProfilePage scope on this path. Mitigation: replace the null early-return with a loading skeleton, or ensure AuthProvider sets user synchronously inside login() before navigation, or have ProtectedRoute defer rendering children until !loading && !!user."
+}

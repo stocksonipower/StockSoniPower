@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="5" skipped="0" tests="17" time="5.303" timestamp="2026-04-28T21:54:05.813848+00:00" hostname="agent-env-5354b8b7-a329-4906-935a-e5096a32ae7b"><testcase classname="backend.tests.test_iter21_status_workflow.TestAuth" name="test_admin_login" time="0.503" /><testcase classname="backend.tests.test_iter21_status_workflow.TestSRNFlow" name="test_rn_with_shortfall_creates_pending_srn" time="0.280" /><testcase classname="backend.tests.test_iter21_status_workflow.TestSRNFlow" name="test_partial_fulfillment_marks_srn_partially_received" time="0.346"><failure message="AssertionError: expected PARTIALLY_RECEIVED got PENDING&#10;assert 'PENDING' == 'PARTIALLY_RECEIVED'&#10;  &#10;  - PARTIALLY_RECEIVED&#10;  + PENDING">backend/tests/test_iter21_status_workflow.py:165: in test_partial_fulfillment_marks_srn_partially_received
+    assert body["status"] == "PARTIALLY_RECEIVED", \
+E   AssertionError: expected PARTIALLY_RECEIVED got PENDING
+E   assert 'PENDING' == 'PARTIALLY_RECEIVED'
+E     
+E     - PARTIALLY_RECEIVED
+E     + PENDING</failure></testcase><testcase classname="backend.tests.test_iter21_status_workflow.TestSRNFlow" name="test_full_fulfillment_marks_complete_not_legacy_label" time="0.385"><failure message="AssertionError: NEW status must be 'COMPLETE' (got 'PENDING'). 'FULLY_RECEIVED' is legacy.&#10;assert 'PENDING' == 'COMPLETE'&#10;  &#10;  - COMPLETE&#10;  + PENDING">backend/tests/test_iter21_status_workflow.py:182: in test_full_fulfillment_marks_complete_not_legacy_label
+    assert body["status"] == "COMPLETE", \
+E   AssertionError: NEW status must be 'COMPLETE' (got 'PENDING'). 'FULLY_RECEIVED' is legacy.
+E   assert 'PENDING' == 'COMPLETE'
+E     
+E     - COMPLETE
+E     + PENDING</failure></testcase><testcase classname="backend.tests.test_iter21_status_workflow.TestSRNFlow" name="test_finalize_partial_keeps_partially_received_and_spawns_child" time="0.401"><failure message="AssertionError: unexpected SRN status after partial finalize: PENDING&#10;assert 'PENDING' in ('PARTIALLY_RECEIVED', 'COMPLETE')">backend/tests/test_iter21_status_workflow.py:205: in test_finalize_partial_keeps_partially_received_and_spawns_child
+    assert body["status"] in ("PARTIALLY_RECEIVED", "COMPLETE"), \
+E   AssertionError: unexpected SRN status after partial finalize: PENDING
+E   assert 'PENDING' in ('PARTIALLY_RECEIVED', 'COMPLETE')</failure></testcase><testcase classname="backend.tests.test_iter21_status_workflow.TestERNFlow" name="test_rn_with_overage_creates_pending_ern" time="0.262" /><testcase classname="backend.tests.test_iter21_status_workflow.TestERNFlow" name="test_partial_accept_marks_partially_accepted" time="0.318"><failure message="AssertionError: expected PARTIALLY_ACCEPTED got PENDING&#10;assert 'PENDING' == 'PARTIALLY_ACCEPTED'&#10;  &#10;  - PARTIALLY_ACCEPTED&#10;  + PENDING">backend/tests/test_iter21_status_workflow.py:234: in test_partial_accept_marks_partially_accepted
+    assert body["status"] == "PARTIALLY_ACCEPTED", \
+E   AssertionError: expected PARTIALLY_ACCEPTED got PENDING
+E   assert 'PENDING' == 'PARTIALLY_ACCEPTED'
+E     
+E     - PARTIALLY_ACCEPTED
+E     + PENDING</failure></testcase><testcase classname="backend.tests.test_iter21_status_workflow.TestERNFlow" name="test_fully_decided_ern_marks_complete" time="0.311"><failure message="AssertionError: expected COMPLETE got PARTIALLY_REJECTED&#10;assert 'PARTIALLY_REJECTED' == 'COMPLETE'&#10;  &#10;  - COMPLETE&#10;  + PARTIALLY_REJECTED">backend/tests/test_iter21_status_workflow.py:248: in test_fully_decided_ern_marks_complete
+    assert r.json()["status"] == "COMPLETE", \
+E   AssertionError: expected COMPLETE got PARTIALLY_REJECTED
+E   assert 'PARTIALLY_REJECTED' == 'COMPLETE'
+E     
+E     - COMPLETE
+E     + PARTIALLY_REJECTED</failure></testcase><testcase classname="backend.tests.test_iter21_status_workflow.TestRackingFlowAgainstRN" name="test_draft_rkn_against_rn_flips_rn_to_racking_note_draft" time="0.530" /><testcase classname="backend.tests.test_iter21_status_workflow.TestRackingFlowAgainstRN" name="test_record_rkn_yields_partially_or_fully_racked" time="0.607" /><testcase classname="backend.tests.test_iter21_status_workflow.TestRnFullyRackedRequiresAllDescendants" name="test_rn_not_fully_racked_when_srn_unracked" time="0.486" /><testcase classname="backend.tests.test_iter21_status_workflow.TestRnFullyRackedRequiresAllDescendants" name="test_draft_rkn_against_srn_descendant_flips_rn_to_racking_note_draft" time="0.425" /><testcase classname="backend.tests.test_iter21_status_workflow.TestLegacyMigration" name="test_no_srn_with_fully_received_status" time="0.069" /><testcase classname="backend.tests.test_iter21_status_workflow.TestExistingEndpointsHealthy" name="test_list_endpoint_ok[/api/short-received-notes]" time="0.068" /><testcase classname="backend.tests.test_iter21_status_workflow.TestExistingEndpointsHealthy" name="test_list_endpoint_ok[/api/extra-received-notes]" time="0.062" /><testcase classname="backend.tests.test_iter21_status_workflow.TestExistingEndpointsHealthy" name="test_list_endpoint_ok[/api/racking-notes]" time="0.065" /><testcase classname="backend.tests.test_iter21_status_workflow.TestExistingEndpointsHealthy" name="test_list_endpoint_ok[/api/receipt-notes]" time="0.066" /></testsuite></testsuites>

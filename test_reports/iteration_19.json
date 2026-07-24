@@ -1,0 +1,82 @@
+{
+  "summary": "Iter-19 stabilization. Started with backend in crash-loop due to 2 SyntaxErrors + 3 IndentationErrors introduced by user's manual edits. Fixed all 5 issues surgically. Also found a production-breaking data bug: `_alloc_serial` counter collection was introduced but never seeded from existing max-serials in each note collection, causing ALL creates (receipt-notes, racking-notes, issue-notes, picking-notes, transfer-*) to 500 with E11000 duplicate-key errors. Back-filled the `counters` collection from each coll's max(serial). After fixes: 10/10 new regression tests pass including the iter-18 critical prepare_racking_note bug (now returns {receipt_note, items}), full RN->RKN->stock-balance flow, and frontend E2E (login -> Stock In -> Racking Note tab -> Create dialog -> select RN -> items auto-populate) with ZERO console errors.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "startup (module import)",
+        "issue": "server.py failed to import with SyntaxError at line 3147 and 3186: missing closing paren on `Depends(_module_dep(\"stock_in\"))`. Backend was in crash-loop (502 from ingress). FIXED by adding the missing `)` on both lines.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "startup (module import)",
+        "issue": "server.py had IndentationError at lines 2937, 3620, 4208: after inserting `serial = await _alloc_serial(...)` inside `for _ in range(5):` loops, the line was indented with 6 or 7 spaces while the rest of the block used 8. Python could not parse. FIXED at 3 sites (racking-notes, picking-notes, transfer-notes creation).",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/receipt-notes, /api/racking-notes, /api/issue-notes, /api/picking-notes, /api/transfer-requests, /api/transfer-notes",
+        "issue": "ALL create endpoints returned HTTP 500 with `E11000 duplicate key error ... dup key: { fy: \"26-27\", serial: N }`. ROOT CAUSE: the new atomic-counter helper `_alloc_serial(series, fy)` starts counters from 0 via `findOneAndUpdate({_id: 'rn:26-27'}, {$inc: {value:1}}, upsert=true)`. But the existing collections already have serials up to 22 (rn), 23 (rkn), 9 (in), 11 (pn), 5 (str/stn). The counter therefore issued serials 1..N that collided with the unique (fy, serial) index. The 5-iteration retry loop in each create route is insufficient to catch up. MITIGATION applied: ran a one-off mongosh script that set counters.{series}:{fy}.value = max(serial from corresponding coll) for each active FY. PERMANENT FIX NEEDED: on server startup, call a `_init_counters()` coroutine that back-fills each counter to max(serial) — or make `_alloc_serial` fall back to `max(serial)+1` when DuplicateKeyError is raised.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "counters collection",
+        "issue": "Legacy/unused doc `{_id:'rn_26-27', value:4}` (underscore instead of colon). Safe to drop; not read by current code."
+      },
+      {
+        "endpoint": "GET /api/racking-notes / receipt-notes on tab open",
+        "issue": "Still double-fires (iter-18 finding carried over). Frontend effect in RackingNoteTab dispatches same GET twice. Low impact — cosmetic."
+      },
+      {
+        "endpoint": "POST /api/receipt-notes (finalize)",
+        "issue": "Requires `goods_received_date`; returns 400 'Goods Received Date is required for Final Save' if missing. Tests must supply it (documented in regression test)."
+      },
+      {
+        "endpoint": "POST /api/receipt-notes (duplicate part_no+make rows)",
+        "issue": "Iter-18 finding: still allows duplicate (part_no, make) rows in a single RN — no de-dup or aggregation. Business policy decision pending."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Racking Note > Create New dialog",
+        "issue": "Previously CRITICAL (iter-18): items did not load because backend returned null. After user's backend fix + my syntax/indent fixes + counter back-fill, the dialog now correctly populates the items table (verified E2E: selected a FINAL RN, 1 row appeared with part/qty/pending, 0 console errors).",
+        "affected_selectors": ["[data-testid='rkn-receipt-note-select']"]
+      }
+    ],
+    "design_issues": [
+      {"screen": "Stock In > Receipt Note create dialog", "issues": ["Still uses native browser date picker (mm/dd/yyyy) instead of shadcn Calendar — inconsistent UX (carried from iter-18)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter19_regression.py",
+    "/app/test_reports/pytest/iter19_regression.xml"
+  ],
+  "action_items": [
+    "PRIORITY-1: Add `_init_counters()` called from FastAPI startup event that scans each note collection, computes max(serial) per fy, and upserts counters[{series}:{fy}] = max. Without this, any fresh DB / missing counter doc will re-trigger the 500 E11000 loop. (I did a one-off mongosh back-fill but that is not persistent.)",
+    "PRIORITY-2: Also drop legacy counter doc `{_id:'rn_26-27'}` (old underscore format) to prevent confusion.",
+    "PRIORITY-3: (Carried from iter-18) Enforce `_require_module(user, 'stock_in')` on POST/PUT/DELETE/finalize routes for receipt-notes / racking-notes / stock-in.",
+    "PRIORITY-4: (Carried from iter-18) Decide policy on duplicate (part_no, make) rows in a single RN — reject vs auto-merge.",
+    "PRIORITY-5: (Carried from iter-18) De-dupe duplicate /api/racking-notes calls on tab open; replace native date picker with shadcn Calendar for consistency."
+  ],
+  "critical_code_review_comments": [
+    "server.py is still 4753 lines. Strong recommendation to split into routers.",
+    "_alloc_serial has a documented retry-loop mental model but assumes counter starts equal-to-or-above max(serial) — the assumption is silently violated when the counter doc is created fresh. Add self-healing: on DuplicateKeyError, re-fetch max(serial) for (coll, fy) and `$max` the counter before retrying.",
+    "5 recent edits to server.py introduced both a missing-paren SyntaxError twice and a misaligned indent 3 times. Suggest running `python -c 'import ast; ast.parse(open(\"server.py\").read())'` in CI / pre-commit — would have caught all 5 in <1s.",
+    "Helpers `_no_future_date`, `_qty_diff`, `_rn_items_have_all_received`, `_alloc_serial` are defined at line 2544+ but referenced as early as line 2198. Works thanks to Python late-binding but violates top-down readability. Move to top of module or a utils file.",
+    "Use `from pymongo import ReturnDocument` and pass `return_document=ReturnDocument.AFTER` in `_alloc_serial` instead of `return_document=True` — the latter happens to equal AFTER today but is undocumented and fragile across motor/pymongo versions."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (3 indentation fixes at lines 2937, 3620, 4208; 2 missing-paren fixes at lines 3147, 3186)",
+    "/app/backend/tests/test_iter19_regression.py (NEW regression suite, 10 tests)"
+  ],
+  "success_rate": {"backend": "100% (10/10 iter19 regression tests pass after fixes)", "frontend": "100% (login, Stock In nav, Racking Note tab, Create dialog, RN dropdown, items populate, 0 console errors)"},
+  "test_credentials": "admin@stockmgmt.com / admin123",
+  "seed_data_creation": "Each test run creates TEST_PN_<uuid6>/TESTMK stock_master rows and TEST_INV_<uuid6> receipt notes. Not deleted (admin only; can be cleaned manually). mongosh back-fill wrote counters: rn:26-27=22, rkn:26-27=23, in:26-27=9, pn:26-27=11, str:26-27=5, stn:26-27=5.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "If main agent adds a startup `_init_counters()` hook, re-run `REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/test_iter19_regression.py -v`. If a fresh DB / data re-seed is done, the counters must be seeded BEFORE any note creation or the same 500 E11000 loop will return. E2E smoke: login as admin -> Stock In -> Racking Note tab -> Create New Racking Note -> pick an RN from dropdown -> items table should populate with at least one row (this validates the iter-18 critical prepare-null bug is gone).",
+  "rca of the issue": "Two compounded regressions from user's manual edits between iter-18 and iter-19: (A) `_alloc_serial` atomic-counter helper was correctly added at line 2580 and is called from 6 places (rn, rkn, in, pn, str, stn), but (i) at 3 of the 6 call sites the new line was indented 6 or 7 spaces inside a `for _ in range(5):` block whose body used 8 — SyntaxError, (ii) 2 existing `@api_router.get(...)` endpoints lost their trailing `)` on the `user=Depends(...)` argument — SyntaxError. Net: backend did not import → 502 on all /api/*. (B) The new counters-collection design requires back-filling from existing max(serial) per collection+fy; nobody did. Each atomic `findOneAndUpdate({_id: 'rn:26-27'}, {$inc:{value:1}}, upsert=true)` therefore returned 1..5 on a fresh counter doc, all of which collide with the existing unique index on receipt_notes.(fy, serial) since serials 1..22 are already used. The 5-retry loop exhausts and returns 500. Mitigation applied: fixed all 5 syntax/indent issues in server.py (now `python -m py_compile server.py` clean) and ran a mongosh one-off to set each counter = max(existing serial). Permanent fix needed in code: add a `@app.on_event('startup')` handler that initialises every (series, fy) counter to the max existing serial before the app serves requests."
+}
