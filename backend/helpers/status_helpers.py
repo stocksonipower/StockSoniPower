@@ -14,15 +14,20 @@ def _compute_srn_status(srn: dict) -> str:
     items = srn.get("items") or []
     total_short = 0.0
     total_decided = 0.0
-    has_children = False
+    has_activity = False
     for it in items:
         total_short += float(it.get("short_qty") or 0)
-        for c in (it.get("children") or []):
-            has_children = True
-            total_decided += float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
+        children = it.get("children") or []
+        if children:
+            for c in children:
+                has_activity = True
+                total_decided += float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
+        elif it.get("fulfilled_qty") is not None:
+            has_activity = True
+            total_decided += float(it.get("fulfilled_qty") or 0)
     if total_short <= 0:
         return "PENDING"
-    if not has_children or total_decided <= 0:
+    if not has_activity or total_decided <= 0:
         return "PENDING"
     if total_decided + 1e-6 >= total_short:
         return "COMPLETE"
@@ -44,17 +49,23 @@ def _compute_ern_status(ern: dict) -> str:
     total_extra = 0.0
     total_acc = 0.0
     total_rej = 0.0
-    has_children = False
+    has_activity = False
     for it in items:
         total_extra += float(it.get("extra_qty") or 0)
-        for c in (it.get("children") or []):
-            has_children = True
-            total_acc += float(c.get("accepted_qty") or 0)
-            total_rej += float(c.get("rejected_qty") or 0)
+        children = it.get("children") or []
+        if children:
+            for c in children:
+                has_activity = True
+                total_acc += float(c.get("accepted_qty") or 0)
+                total_rej += float(c.get("rejected_qty") or 0)
+        elif it.get("accepted_qty") is not None or it.get("rejected_qty") is not None:
+            has_activity = True
+            total_acc += float(it.get("accepted_qty") or 0)
+            total_rej += float(it.get("rejected_qty") or 0)
     if total_extra <= 0:
         return "PENDING"
     decided = total_acc + total_rej
-    if not has_children or decided <= 0:
+    if not has_activity or decided <= 0:
         return "PENDING"
     if decided + 1e-6 >= total_extra:
         return "COMPLETE"

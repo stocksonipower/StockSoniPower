@@ -65,6 +65,27 @@ export default function StockTransactionPage({ type = "IN" }) {
     setBoxCategory(b?.box_category || "");
   }, [boxId, boxes]);
 
+  if (!isOut) {
+    return (
+      <div className="p-8 max-w-[900px] mx-auto" data-testid="stock-in-direct-disabled-page">
+        <div className="bg-white border border-slate-200 rounded-sm p-6">
+          <div className="label-sm mb-2">Stock In</div>
+          <h1 className="text-3xl font-black text-slate-900 mb-3">Use Receipt Notes</h1>
+          <p className="text-sm text-slate-600 mb-5">
+            Direct Stock In is disabled. Create a Receipt Note, complete the Racking Note, and record Stock In from the racking workflow.
+          </p>
+          <Button
+            onClick={() => { window.location.href = "/stock-in"; }}
+            className="rounded-sm bg-green-700 hover:bg-green-800 text-white font-semibold"
+            data-testid="go-to-stock-in-workflow"
+          >
+            Open Stock In Workflow
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   const submit = async () => {
     if (!partNo || !make || !quantity || !godownId || !rackId || !boxId) {
       toast.error("Please fill all required fields"); return;
@@ -72,8 +93,7 @@ export default function StockTransactionPage({ type = "IN" }) {
     if (parseInt(quantity) <= 0) { toast.error("Quantity must be > 0"); return; }
     setSubmitting(true);
     try {
-      const url = isOut ? "/stock-out" : "/stock-in";
-      await api.post(url, {
+      await api.post("/stock-out", {
         part_no: partNo.trim(), make, quantity: parseInt(quantity),
         godown_id: godownId, rack_id: rackId, box_id: boxId,
       });

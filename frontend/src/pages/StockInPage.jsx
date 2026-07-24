@@ -1203,6 +1203,7 @@ const validateBaseRows = () => {
       if (inv == null || inv <= 0) { toast.error(`Row ${idx + 1}: Invoice Qty must be > 0`); return false; }
     }
     const rec = toNum(it.received_qty);
+    if (isGeneral && (rec == null || rec <= 0)) { toast.error(`Row ${idx + 1}: Received Qty must be > 0`); return false; }
     if (rec != null && rec < 0) { toast.error(`Row ${idx + 1}: Received Qty cannot be negative`); return false; }
   }
   return true;
@@ -1252,6 +1253,7 @@ const allMakesFilled = useMemo(
 // (or empty, treated as 0). Dates + invoice_no are all optional.
 const canFinalize = useMemo(() => {
   if (!allMakesFilled || !allReceivedValid) return false;
+  if (isGeneral && !items.every((it) => (toNum(it.received_qty) || 0) > 0)) return false;
   if (!isGeneral) {
     if (!items.every((it) => (toNum(it.invoice_qty) || 0) > 0)) return false;
   }

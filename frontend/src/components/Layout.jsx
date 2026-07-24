@@ -163,7 +163,7 @@ export default function Layout({ children }) {
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Stock Master</div>
-            <div className="font-bold text-slate-900 text-sm">Warehouse Control</div>
+            <div className="font-bold text-slate-900 text-sm">Soni Power</div>
           </div>
         </div>
 

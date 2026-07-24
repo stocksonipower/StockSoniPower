@@ -137,7 +137,7 @@ class StockOutCreate(BaseModel):
 class ReceiptNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: float                       # what the invoice claims (== received_qty for GENERAL stock-in)
+    invoice_qty: Optional[float] = None      # what the invoice claims; omitted for GENERAL stock-in
     received_qty: Optional[float] = None     # what physically arrived (None on draft)
     description_1: Optional[str] = ""        # denormalized from stock_master.description_1 (read-only display)
     # Legacy alias — kept so existing racking code keeps working without changes.
@@ -527,5 +527,4 @@ class TransferNote(BaseModel):
     recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
-
 

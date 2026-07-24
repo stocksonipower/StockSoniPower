@@ -11,7 +11,7 @@ Coverage (one-liner per area):
                   + bulk-preview + column-settings GET/PUT
   - locations: godown/rack/box CRUD + range + bulk-delete
   - uploads: POST /uploads/image + GET /files/{path}
-  - stock_in / stock_out: raw-txn endpoints, stock-balance & low-stock & dashboard
+  - stock_in / stock_out: direct stock-in disabled, stock-balance & low-stock & dashboard
   - receipt-notes: create draft, list, finalize
   - SRN/ERN: list endpoints (next-no)
   - racking-notes: next-no + list
@@ -319,23 +319,16 @@ class TestUploads:
 # ===================== STOCK IN / OUT + balance/low-stock/dashboard =====================
 
 class TestTransactions:
-    def test_stock_in_and_balance_and_out(self, H, seed):
+    def test_direct_stock_in_disabled_and_balance_available(self, H, seed):
         sm = seed["stock_master"]
-        # IN +10
         r = requests.post(API("/stock-in"), headers=H, json={
             "part_no": sm["part_no"], "make": sm["make"], "quantity": 10,
             "godown_id": seed["godown"]["id"], "rack_id": seed["rack"]["id"], "box_id": seed["box"]["id"],
         }, timeout=20)
-        assert r.status_code == 200, r.text
+        assert r.status_code == 410, r.text
         # balance
         b = requests.get(API("/stock-balance"), headers=H, timeout=20)
         assert b.status_code == 200
-        # OUT -3
-        o = requests.post(API("/stock-out"), headers=H, json={
-            "part_no": sm["part_no"], "make": sm["make"], "quantity": 3,
-            "godown_id": seed["godown"]["id"], "rack_id": seed["rack"]["id"], "box_id": seed["box"]["id"],
-        }, timeout=20)
-        assert o.status_code == 200, o.text
 
     def test_low_stock(self, H):
         r = requests.get(API("/low-stock"), headers=H, timeout=20)
