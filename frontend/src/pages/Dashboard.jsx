@@ -73,17 +73,17 @@ export default function Dashboard() {
         setStockIn((prev) => ({ ...prev, rackingDraft: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /racking-notes failed:", e); }),
 
-      // Issue notes pending = anything not FULLY_PICKED
+      // Issue notes pending = anything not completed
       api.get("/issue-notes", {
-        params: { not_status: "FULLY_PICKED", page_size: 1 }
+        params: { not_status: "FULLY_PICKED,COMPLETED", page_size: 1 }
       }).then((r) => {
         const total = r.headers["x-total-count"];
         setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /issue-notes failed:", e); }),
 
-      // Picking notes DRAFT — server-side filter (status=DRAFT) using x-total-count
+      // Picking notes pending/draft — server-side filter using x-total-count
       api.get("/picking-notes", {
-        params: { status: "DRAFT", page_size: 1 }
+        params: { status: "PENDING,DRAFT", page_size: 1 }
       }).then((r) => {
         const total = r.headers["x-total-count"];
         setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));

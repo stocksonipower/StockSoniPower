@@ -31,6 +31,16 @@ function fmtDate(iso) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
+function hasCompleteRackingLocations(rkn) {
+  const items = rkn?.items || [];
+  return items.length > 0 && items.every((it) =>
+    (it.godown_id || "").trim() &&
+    (it.rack_id || "").trim() &&
+    (it.box_id || "").trim() &&
+    (parseFloat(it.quantity) || 0) > 0
+  );
+}
+
 // Phase 2: source-type badge colours (RN=blue, SRN=amber, ERN=purple)
 const SRC_TYPE_STYLES = {
   RN:  { badge: "bg-blue-100 text-blue-800 border-blue-200",       label: "RN"  },
@@ -141,6 +151,10 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   };
 
   const handleRecord = async (rkn) => {
+    if (!hasCompleteRackingLocations(rkn)) {
+      toast.error("Complete Godown, Rack, Box and Qty before recording Stock In");
+      return;
+    }
     if (!window.confirm(`Record ${rkn.rkn_no} as Stock In?\n\nThis will add ${rkn.items.length} stock-in transaction(s) and mark the linked Receipt Note (${rkn.receipt_note_no}) as RACKED. This cannot be undone.`)) return;
     setRecordingId(rkn.id);
     try {
@@ -237,12 +251,15 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               const assigneeEmail = r.parent_assigned_to_email;
               const isLockedToOther = !!assigneeId && assigneeId !== me?.id && !isAdmin;
               const lock = recorded || isLockedToOther;
+              const locationsComplete = hasCompleteRackingLocations(r);
+              const recordDisabled = lock || !locationsComplete || recordingId === r.id;
               const editTitle = recorded ? "Cannot edit — already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
               const deleteTitle = recorded ? "Cannot delete — already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Delete");
               const recordTitle = recorded ? "Already recorded"
-                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Record as Stock In");
+                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}`
+                  : (!locationsComplete ? "Complete Godown, Rack, Box and Qty before recording" : "Record as Stock In"));
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -305,10 +322,10 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </button>
                       <Button
                         onClick={() => handleRecord(r)}
-                        disabled={lock || recordingId === r.id}
+                        disabled={recordDisabled}
                         size="sm"
                         title={recordTitle}
-                        className={`rounded-sm h-7 text-xs ml-1 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                        className={`rounded-sm h-7 text-xs ml-1 ${recordDisabled ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
                         data-testid={`rkn-record-${r.rkn_no}`}
                       >
                         <CheckCircle size={12} weight="bold" className="mr-1" />
@@ -623,8 +640,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       if (!it.godown_id || !it.rack_id) {
         toast.error(`Row ${i + 1}: pick Godown / Rack`); return;
       }
-      const hasBoxesForRack = (boxesByRack[it.rack_id] || []).length > 0;
-      if (hasBoxesForRack && !it.box_id) {
+      if (!it.box_id) {
         toast.error(`Row ${i + 1}: pick Box`); return;
       }
       const q = parseFloat(it.quantity);
@@ -811,7 +827,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td>
                       <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id || boxes.length === 0}>
                         <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}>
-                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes — skip" : "Box")} />
+                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes configured" : "Box")} />
                         </SelectTrigger>
                         <SelectContent>
                           {boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}

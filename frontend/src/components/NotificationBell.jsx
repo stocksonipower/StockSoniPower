@@ -96,6 +96,16 @@ export default function NotificationBell() {
     } finally { setLoading(false); }
   };
 
+  const clearNotifications = async () => {
+    if (items.length === 0) return;
+    if (!window.confirm("Clear all visible notifications?")) return;
+    setLoading(true);
+    try {
+      await api.post("/notifications/clear", { ids: null });
+      await load();
+    } finally { setLoading(false); }
+  };
+
   const markOneRead = async (id) => {
     if (items.find((i) => i.id === id)?.read) return;
     try {
@@ -128,19 +138,31 @@ export default function NotificationBell() {
           className="absolute right-0 mt-2 w-[380px] max-h-[520px] bg-white border border-slate-200 rounded-sm shadow-xl z-50 flex flex-col"
           data-testid="notification-dropdown"
         >
-          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div className="px-4 py-3 border-b border-slate-200">
             <div>
               <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Activity</div>
               <div className="font-bold text-slate-900 text-sm">Notifications</div>
             </div>
+          </div>
+
+          <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex items-center gap-2">
             <button
               onClick={markAllRead}
               disabled={loading || unread === 0}
-              className="text-xs font-semibold text-blue-700 hover:underline disabled:text-slate-400 disabled:no-underline"
+              className="h-8 px-3 rounded-sm border border-slate-200 bg-white text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
               data-testid="notification-mark-all-read"
             >
               <CheckCircle size={12} weight="bold" className="inline mr-1" />
               Mark all read
+            </button>
+            <button
+              onClick={clearNotifications}
+              disabled={loading || items.length === 0}
+              className="h-8 px-3 rounded-sm border border-red-200 bg-white text-xs font-semibold text-red-700 hover:bg-red-50 disabled:text-slate-400 disabled:border-slate-200 disabled:bg-slate-100 disabled:cursor-not-allowed"
+              data-testid="notification-clear"
+            >
+              <Trash size={12} weight="bold" className="inline mr-1" />
+              Clear notifications
             </button>
           </div>
 
