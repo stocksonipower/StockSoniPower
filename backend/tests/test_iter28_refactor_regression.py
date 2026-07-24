@@ -275,16 +275,16 @@ class TestStockMasterRouterNewSurfaces:
 # wasn't accidentally broken by the iter-28 split.
 
 class TestKeptInServerWorkflow:
-    def test_full_stock_in_then_receipt_note_finalize(self, H, seed):
+    def test_direct_stock_in_disabled_then_receipt_note_finalize(self, H, seed):
         sm = seed["stock_master"]
 
-        # 1. Direct stock-in raw txn
+        # 1. Direct stock-in raw txn is disabled; stock must enter through RKN.
         r = requests.post(API("/stock-in"), headers=H, timeout=20, json={
             "part_no": sm["part_no"], "make": sm["make"], "quantity": 7,
             "godown_id": seed["godown"]["id"], "rack_id": seed["rack"]["id"],
             "box_id": seed["box"]["id"],
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 410, r.text
 
         # 2. Create RN draft + finalize → must transition status without 5xx
         c = requests.post(API("/receipt-notes"), headers=H, timeout=20, json={

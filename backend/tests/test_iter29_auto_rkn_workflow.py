@@ -27,9 +27,21 @@ ADMIN = ("admin@stockmgmt.com", "admin123")
 
 
 def _login():
-    r = requests.post(f"{API}/api/auth/login", json={"email": ADMIN[0], "password": ADMIN[1]})
-    r.raise_for_status()
-    return r.json()["token"]
+    credentials = [
+        (os.environ.get("ADMIN_EMAIL", ""), os.environ.get("ADMIN_PASSWORD", "")),
+        ADMIN,
+        ("admin@stock.com", "admin123"),
+    ]
+    last = None
+    for email, password in credentials:
+        if not email or not password:
+            continue
+        last = requests.post(f"{API}/api/auth/login", json={"email": email, "password": password})
+        if last.status_code == 200:
+            return last.json()["token"]
+    if last is not None:
+        last.raise_for_status()
+    raise AssertionError("No admin credentials configured")
 
 
 def _h(token):

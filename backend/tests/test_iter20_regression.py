@@ -162,7 +162,7 @@ class TestReceiptNoteOptionalFields:
         f = client.post(f"{API}/receipt-notes/{rn_id}/finalize", timeout=20)
         assert f.status_code == 200, f.text
         body = f.json()
-        assert body.get("status") == "FINAL", f"expected FINAL with blank invoice fields, got: {body}"
+        assert body.get("status") == "RACKING_NOTE_DRAFT", f"expected RACKING_NOTE_DRAFT with blank invoice fields, got: {body}"
 
     def test_list_filters_and_pagination(self, client):
         r = client.get(f"{API}/receipt-notes?status=DRAFT&page=1&page_size=5", timeout=15)

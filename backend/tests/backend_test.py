@@ -146,32 +146,31 @@ class TestLocationsAndTransactions:
         r = requests.get(f"{BASE_URL}/api/boxes", params={"rack_id": rid}, headers=auth_headers, timeout=30)
         assert r.status_code == 200 and all(x["rack_id"] == rid for x in r.json())
 
-    def test_stock_in(self, auth_headers):
+    def test_direct_stock_in_disabled(self, auth_headers):
         pn = f"PN_{RUN_TAG}_A"
         body = {"part_no": pn, "make": "ACME", "quantity": 10, "godown_id": TestLocationsAndTransactions._ids["g"], "rack_id": TestLocationsAndTransactions._ids["r"], "box_id": TestLocationsAndTransactions._ids["b"]}
         r = requests.post(f"{BASE_URL}/api/stock-in", json=body, headers=auth_headers, timeout=30)
-        assert r.status_code == 200, r.text
-        assert r.json()["quantity"] == 10
+        assert r.status_code == 410, r.text
 
     def test_stock_in_invalid_item(self, auth_headers):
         body = {"part_no": "NONE_X", "make": "NONE", "quantity": 1, "godown_id": TestLocationsAndTransactions._ids["g"], "rack_id": TestLocationsAndTransactions._ids["r"], "box_id": TestLocationsAndTransactions._ids["b"]}
         r = requests.post(f"{BASE_URL}/api/stock-in", json=body, headers=auth_headers, timeout=30)
-        assert r.status_code == 400
+        assert r.status_code == 410
 
     def test_stock_in_bad_qty(self, auth_headers):
         body = {"part_no": f"PN_{RUN_TAG}_A", "make": "ACME", "quantity": 0, "godown_id": TestLocationsAndTransactions._ids["g"], "rack_id": TestLocationsAndTransactions._ids["r"], "box_id": TestLocationsAndTransactions._ids["b"]}
         r = requests.post(f"{BASE_URL}/api/stock-in", json=body, headers=auth_headers, timeout=30)
-        assert r.status_code == 400
+        assert r.status_code == 410
 
     def test_stock_out_insufficient(self, auth_headers):
         body = {"part_no": f"PN_{RUN_TAG}_A", "make": "ACME", "quantity": 9999, "godown_id": TestLocationsAndTransactions._ids["g"], "rack_id": TestLocationsAndTransactions._ids["r"], "box_id": TestLocationsAndTransactions._ids["b"]}
         r = requests.post(f"{BASE_URL}/api/stock-out", json=body, headers=auth_headers, timeout=30)
         assert r.status_code == 400
 
-    def test_stock_out_ok(self, auth_headers):
+    def test_stock_out_without_racked_stock_is_blocked(self, auth_headers):
         body = {"part_no": f"PN_{RUN_TAG}_A", "make": "ACME", "quantity": 3, "godown_id": TestLocationsAndTransactions._ids["g"], "rack_id": TestLocationsAndTransactions._ids["r"], "box_id": TestLocationsAndTransactions._ids["b"]}
         r = requests.post(f"{BASE_URL}/api/stock-out", json=body, headers=auth_headers, timeout=30)
-        assert r.status_code == 200
+        assert r.status_code == 400
 
     def test_balance(self, auth_headers):
         r = requests.get(f"{BASE_URL}/api/stock-balance", headers=auth_headers, timeout=30)
