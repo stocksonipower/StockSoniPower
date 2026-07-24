@@ -39,8 +39,31 @@ from models import *  # noqa: F401,F403
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status
 
 
+def _parse_cors_origins(raw_value: str | None) -> list[str]:
+    if raw_value is None:
+        return ["*"]
+    origins = []
+    for value in raw_value.split(","):
+        origin = value.strip()
+        if not origin:
+            continue
+        if origin != "*":
+            origin = origin.rstrip("/")
+        origins.append(origin)
+    return origins or ["*"]
+
+
 # -------------------- APP SETUP --------------------
 app = FastAPI(title="Stock Management API")
+cors_origins = _parse_cors_origins(os.environ.get("CORS_ORIGINS"))
+logger.info("Configured CORS origins: %s", cors_origins)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 api_router = APIRouter(prefix="/api")
 
 # Auth, Users, Notifications routes extracted to /routes (zero logic changes)
@@ -404,14 +427,6 @@ async def module_access_middleware(request, call_next):
             except Exception:
                 pass
     return await call_next(request)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.get("/health")
 async def health_check():
