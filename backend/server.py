@@ -413,5 +413,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 # CRITICAL: This MUST be the very last line of the file
 app.include_router(api_router)

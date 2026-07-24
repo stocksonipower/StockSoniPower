@@ -90,6 +90,10 @@ credentials.json
 *.pem
 *.key
 .credentials
+# Keep deployment templates versioned
+!.env.example
+!backend/.env.example
+!frontend/.env.example
 frontend/node_modules/.cache/default-development/0.pack
 -e 
 # Environment and credential files
@@ -100,6 +104,11 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Keep deployment templates versioned
+!.env.example
+!backend/.env.example
+!frontend/.env.example
 -e 
 # Environment and credential files
 .env
@@ -555,3 +564,7 @@ credentials.json
 *.pem
 *.key
 .credentials
+# Keep deployment templates versioned
+!.env.example
+!backend/.env.example
+!frontend/.env.example
