@@ -6,7 +6,6 @@ from helpers.status_helpers import (
     _aggregate_other_rkn_qty,
     _aggregate_other_rkn_qty_by_source,
     _pick_aggregate_other,
-    _pick_aggregate_other_by_loc,
     _transfer_other_qty,
     _transfer_other_src_loc_qty,
 )
@@ -38,7 +37,8 @@ def _validate_racking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
         if not (it.godown_id or "").strip() or not (it.rack_id or "").strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
-        # box_id is required only when the rack actually has boxes
+        if not (it.box_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required")
 
 
 async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[str] = None):
@@ -151,27 +151,34 @@ def _validate_picking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
 
 
-async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Optional[str] = None):
+async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Optional[str] = None, assigned_items: Optional[list] = None):
     from helpers.stock_helpers import _stock_locations_for
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
-    for it in inn.get("items", []):
+    allowed_godowns = {}
+    base_items = assigned_items if assigned_items is not None else inn.get("items", [])
+    for it in base_items:
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    other_sums = await _pick_aggregate_other(in_id, exclude_pn_id)
-    other_loc_sums = await _pick_aggregate_other_by_loc(in_id, exclude_pn_id)
+        gid = it.get("selected_godown_id") or ""
+        if gid:
+            allowed_godowns.setdefault(k, set()).add(gid)
+    other_sums = {} if assigned_items is not None else await _pick_aggregate_other(in_id, exclude_pn_id)
 
     new_sums = {}
     new_loc_sums = {}
     for it in items:
         k = _key(it.part_no, it.make)
         new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
-        loc_key = f"{it.part_no}||{it.make}||{it.box_id or ''}"
+        loc_key = f"{it.part_no}||{it.make}||{it.godown_id or ''}||{it.rack_id or ''}||{it.box_id or ''}"
         new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
+        allowed = allowed_godowns.get(k)
+        if allowed and it.godown_id not in allowed:
+            raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make}: selected godown does not match the issue note")
     # 1. cumulative qty
     for k, new_q in new_sums.items():
         recv = requested.get(k, 0)
@@ -183,20 +190,18 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
                 f"requested {recv}, already picked elsewhere {used}, this note {new_q} "
                 f"(total {used + new_q} > {recv})"
             ))
-    # 2. per-location stock availability (after subtracting other DRAFT picks at same loc)
+    # 2. per-location stock availability. Draft picking does not reserve stock.
     # Group by part||make to fetch locations once
     loc_cache = {}
     for k_full, new_q in new_loc_sums.items():
-        part_no, make, box_id = k_full.split("||", 2)
+        part_no, make, godown_id, rack_id, box_id = k_full.split("||", 4)
         if (part_no, make) not in loc_cache:
             loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
         locs = loc_cache[(part_no, make)]
-        # box_id might be empty for racks with no boxes — match accordingly
-        loc = next((L for L in locs if (L.get("box_id") or "") == box_id), None)
+        loc = next((L for L in locs if (L.get("godown_id") or "") == godown_id and (L.get("rack_id") or "") == rack_id and (L.get("box_id") or "") == box_id), None)
         if not loc:
             raise HTTPException(status_code=400, detail=f"{part_no} / {make}: no stock at the chosen location")
-        already_pending_here = other_loc_sums.get(k_full, 0)
-        available = (loc.get("current_qty") or 0) - already_pending_here
+        available = loc.get("current_qty") or 0
         if new_q > available + 1e-6:
             raise HTTPException(status_code=400, detail=(
                 f"{part_no} / {make}: trying to pick {new_q} but only {available} available at "
@@ -217,13 +222,18 @@ def _validate_issue_items(items):
 
 
 async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] = None):
-    """Block requesting more than current stock total for any (part_no, make)."""
+    """Block requesting more than current stock total, and selected-godown stock if set."""
     from helpers.stock_helpers import _stock_total_for
     # Sum requested qty in this payload per (part_no, make)
     req = {}
+    req_by_godown = {}
     for it in items:
         k = _key(it.part_no, it.make)
         req[k] = req.get(k, 0) + (it.quantity or 0)
+        gid = (getattr(it, "selected_godown_id", None) or "").strip()
+        if gid:
+            gk = f"{k}||{gid}"
+            req_by_godown[gk] = req_by_godown.get(gk, 0) + (it.quantity or 0)
     for k, q in req.items():
         part_no, make = k.split("||", 1)
         avail = await _stock_total_for(part_no, make)
@@ -231,6 +241,20 @@ async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] 
             raise HTTPException(
                 status_code=400,
                 detail=f"{part_no} / {make}: cannot issue {q} — only {avail} in stock",
+            )
+    for gk, q in req_by_godown.items():
+        part_no, make, godown_id = gk.split("||", 2)
+        rows = await db.transactions.aggregate([
+            {"$match": {"part_no": part_no, "make": make, "godown_id": godown_id}},
+            {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+        ]).to_list(1)
+        avail = rows[0]["q"] if rows else 0
+        if q > avail + 1e-6:
+            godown = await db.godowns.find_one({"id": godown_id}, {"_id": 0, "godown_name": 1}) or {}
+            label = godown.get("godown_name") or godown_id
+            raise HTTPException(
+                status_code=400,
+                detail=f"{part_no} / {make}: cannot issue {q} from {label} — only {avail} in that godown",
             )
 
 
@@ -275,27 +299,23 @@ def _validate_transfer_note_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
         if not (it.src_godown_id or "").strip() or not (it.src_rack_id or "").strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
-        if not (it.dest_godown_id or "").strip() or not (it.dest_rack_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown and Rack are required")
-        # Disallow source == destination
-        if (
-            it.src_godown_id == it.dest_godown_id
-            and it.src_rack_id == it.dest_rack_id
-            and (it.src_box_id or "") == (it.dest_box_id or "")
-        ):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination locations must differ")
+        if not (it.dest_godown_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is required")
+        if it.src_godown_id == it.dest_godown_id:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination godown must differ")
 
 
-async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None):
+async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None, assigned_items: Optional[list] = None):
     from helpers.stock_helpers import _stock_locations_for
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=400, detail="Transfer request not found")
     requested = {}
-    for it in s.get("items", []):
+    base_items = assigned_items if assigned_items is not None else s.get("items", [])
+    for it in base_items:
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    other_sums = await _transfer_other_qty(str_id, exclude_stn_id)
+    other_sums = {} if assigned_items is not None else await _transfer_other_qty(str_id, exclude_stn_id)
     other_loc_sums = await _transfer_other_src_loc_qty(exclude_stn_id)
 
     new_sums = {}
@@ -303,7 +323,7 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     for it in items:
         k = _key(it.part_no, it.make)
         new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
-        loc_key = f"{it.part_no}||{it.make}||{it.src_box_id or ''}"
+        loc_key = f"{it.part_no}||{it.make}||{it.src_godown_id or ''}||{it.src_rack_id or ''}||{it.src_box_id or ''}"
         new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
@@ -323,11 +343,11 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     # Per-source-location stock check
     loc_cache = {}
     for k_full, new_q in new_loc_sums.items():
-        part_no, make, box_id = k_full.split("||", 2)
+        part_no, make, godown_id, rack_id, box_id = k_full.split("||", 4)
         if (part_no, make) not in loc_cache:
             loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
         locs = loc_cache[(part_no, make)]
-        loc = next((L for L in locs if (L.get("box_id") or "") == box_id), None)
+        loc = next((L for L in locs if (L.get("godown_id") or "") == godown_id and (L.get("rack_id") or "") == rack_id and (L.get("box_id") or "") == box_id), None)
         if not loc:
             raise HTTPException(status_code=400, detail=f"{part_no} / {make}: no stock at the chosen source location")
         already_pending_here = other_loc_sums.get(k_full, 0)

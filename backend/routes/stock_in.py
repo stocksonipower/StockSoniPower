@@ -12,7 +12,7 @@ from helpers.stock_helpers import _enrich_items, _enrich_note_items, _enrich_wit
 from helpers.note_helpers import current_fy_label, _alloc_serial, _no_future_date, _key, _next_letter_suffix, _qty_diff, _rn_items_have_all_received
 from helpers.auto_create import _auto_create_srn_for_rn, _auto_create_ern_for_rn, _auto_create_rkn_for_source
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_srn_racking_status, _recompute_ern_racking_status, _is_source_fully_racked, _aggregate_other_rkn_qty_by_source, _recompute_source_status_after_rkn
-from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic, _box_id_required_for_rack
+from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic
 
 router = APIRouter()
 
@@ -581,9 +581,6 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
         raise HTTPException(status_code=409, detail="This Extra Received Note is already fully racked")
 
     _validate_racking_items(payload.items)
-    for idx, it in enumerate(payload.items, start=1):
-        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, payload.items, exclude_rkn_id=None)
 
     today = datetime.now(timezone.utc)
@@ -986,9 +983,6 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
     _enforce_assignee(parent_doc, user, "edit this racking note")
 
     _validate_racking_items(payload.items)
-    for idx, it in enumerate(payload.items, start=1):
-        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, payload.items, exclude_rkn_id=rkn_id)
     update = {
         "items": [it.model_dump() for it in payload.items],
@@ -1034,7 +1028,7 @@ async def record_racking_note(rkn_id: str, response: Response, user=Depends(_mod
     for idx, it in enumerate(items, start=1):
         if not it.get("godown_id") or not it.get("rack_id"):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing — edit racking note before recording")
-        if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
+        if not it.get("box_id"):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing — edit racking note before recording")
         if (it.get("quantity") or 0) <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: quantity must be > 0")

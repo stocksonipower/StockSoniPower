@@ -259,14 +259,31 @@ async def _recompute_in_status(in_id: str):
     for it in inn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    picked = await _pick_aggregate_other(in_id)
+    recorded = {}
+    has_pending = False
+    has_draft = False
+    async for pn in db.picking_notes.find({"issue_note_id": in_id}, {"_id": 0, "items": 1, "status": 1}):
+        status = (pn.get("status") or "").upper()
+        if status == "PENDING":
+            has_pending = True
+        elif status == "DRAFT":
+            has_draft = True
+        elif status in ("RECORDED", "COMPLETED"):
+            for it in pn.get("items", []):
+                k = _key(it.get("part_no"), it.get("make"))
+                recorded[k] = recorded.get(k, 0) + (it.get("quantity") or 0)
     if not requested:
-        new_status = "PICKING_PENDING"
-    elif sum(picked.values()) == 0:
+        new_status = "OPEN"
+    elif recorded and all(recorded.get(k, 0) + 1e-6 >= q for k, q in requested.items()):
+        new_status = "FULLY_PICKED"
+    elif recorded:
+        new_status = "PARTIALLY_PICKED"
+    elif has_draft:
+        new_status = "PICKING_IN_PROGRESS"
+    elif has_pending:
         new_status = "PICKING_PENDING"
     else:
-        all_full = all(picked.get(k, 0) + 1e-6 >= q for k, q in requested.items())
-        new_status = "FULLY_PICKED" if all_full else "PARTIALLY_PICKED"
+        new_status = "OPEN"
     update = {"status": new_status}
     if new_status == "FULLY_PICKED":
         update["picked_at"] = inn.get("picked_at") or now_iso()
@@ -284,14 +301,18 @@ async def _recompute_str_status(str_id: str):
     for it in s.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    transferred = await _transfer_other_qty(str_id)
-    if not requested or sum(transferred.values()) == 0:
-        new_status = "PENDING"
+    transferred = await _transfer_other_qty(str_id, completed_only=True)
+    active_note = await db.transfer_notes.find_one({"transfer_request_id": str_id, "status": {"$in": ["PENDING", "DRAFT", "PROCESSING"]}}, {"_id": 0, "id": 1})
+    if not requested:
+        new_status = "NEW"
+    elif transferred and all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items()):
+        new_status = "COMPLETED"
+    elif transferred or active_note:
+        new_status = "IN_PROGRESS"
     else:
-        all_full = all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items())
-        new_status = "FULLY_TRANSFERRED" if all_full else "PARTIALLY_TRANSFERRED"
+        new_status = "PENDING"
     update = {"status": new_status}
-    if new_status == "FULLY_TRANSFERRED":
+    if new_status == "COMPLETED":
         update["transferred_at"] = s.get("transferred_at") or now_iso()
     else:
         if s.get("transferred_at"):
@@ -378,26 +399,31 @@ async def _pick_aggregate_other(in_id: str, exclude_pn_id: Optional[str] = None)
 
 
 async def _pick_aggregate_other_by_loc(in_id: str, exclude_pn_id: Optional[str] = None) -> dict:
-    """Per-location sum across other PNs (DRAFT + RECORDED). Key = part||make||box_id."""
+    """Per-location sum across other PNs. Key = part||make||godown_id||rack_id||box_id."""
     q = {"issue_note_id": in_id}
     if exclude_pn_id:
         q["id"] = {"$ne": exclude_pn_id}
     sums = {}
     async for pn in db.picking_notes.find(q, {"_id": 0, "items": 1, "status": 1}):
-        # Only DRAFT picks reserve at the location level (RECORDED already debited the balance).
+        # Kept for legacy callers; draft picks no longer reduce available stock.
         if pn.get("status") != "DRAFT":
             continue
         for it in pn.get("items", []):
-            loc_key = f"{it.get('part_no','')}||{it.get('make','')}||{it.get('box_id','')}"
+            loc_key = (
+                f"{it.get('part_no','')}||{it.get('make','')}||"
+                f"{it.get('godown_id','') or ''}||{it.get('rack_id','') or ''}||{it.get('box_id','') or ''}"
+            )
             sums[loc_key] = sums.get(loc_key, 0) + (it.get("quantity") or 0)
     return sums
 
 
-async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None) -> dict:
+async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None, completed_only: bool = False) -> dict:
     """Sum qty per (part,make) across other STNs (DRAFT + RECORDED) for a given STR."""
     q = {"transfer_request_id": str_id}
     if exclude_stn_id:
         q["id"] = {"$ne": exclude_stn_id}
+    if completed_only:
+        q["status"] = {"$in": ["COMPLETED", "RECORDED"]}
     sums = {}
     async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
         for it in stn.get("items", []):
@@ -407,14 +433,17 @@ async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None)
 
 
 async def _transfer_other_src_loc_qty(exclude_stn_id: Optional[str] = None) -> dict:
-    """Per-source-location sum across DRAFT STNs (used to reserve source qty so two drafts can't double-book)."""
-    q = {"status": "DRAFT"}
+    """Per-source-location sum across active STNs (used to reserve source qty so two executions can't double-book)."""
+    q = {"status": {"$in": ["DRAFT", "PROCESSING"]}}
     if exclude_stn_id:
         q["id"] = {"$ne": exclude_stn_id}
     sums = {}
     async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
         for it in stn.get("items", []):
-            loc_key = f"{it.get('part_no','')}||{it.get('make','')}||{it.get('src_box_id','') or ''}"
+            loc_key = (
+                f"{it.get('part_no','')}||{it.get('make','')}||"
+                f"{it.get('src_godown_id','') or ''}||{it.get('src_rack_id','') or ''}||{it.get('src_box_id','') or ''}"
+            )
             sums[loc_key] = sums.get(loc_key, 0) + (it.get("quantity") or 0)
     return sums
 

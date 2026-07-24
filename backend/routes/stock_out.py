@@ -9,10 +9,163 @@ from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _stock_locations_for, _get_balance
 from helpers.note_helpers import current_fy_label, _alloc_serial, _key
-from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other, _pick_aggregate_other_by_loc
+from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
 
 router = APIRouter()
+
+
+async def _issue_items_for_storage(items):
+    """Normalize optional Issue Note godown selection for persistence.
+
+    Existing clients omit these fields; store nulls in that case. When an id is
+    supplied, trust the id and snapshot the live godown name.
+    """
+    out = []
+    for idx, it in enumerate(items, start=1):
+        row = it.model_dump()
+        gid = (row.get("selected_godown_id") or "").strip()
+        if gid:
+            godown = await db.godowns.find_one({"id": gid}, {"_id": 0})
+            row["selected_godown_id"] = gid
+            row["selected_godown_name"] = (godown or {}).get("godown_name") or row.get("selected_godown_name") or ""
+        else:
+            row["selected_godown_id"] = None
+            row["selected_godown_name"] = None
+        out.append(row)
+    return out
+
+
+async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional[dict]:
+    existing = await db.picking_notes.find_one({"issue_note_id": inn["id"], "parent_picking_note_id": {"$in": [None, ""]}}, {"_id": 0})
+    if existing:
+        return existing
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    last_err = None
+    for _ in range(5):
+        serial = await _alloc_serial("pn", fy)
+        pn_no = f"PN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "pn_no": pn_no,
+            "pn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "issue_note_id": inn["id"],
+            "issue_note_no": inn["in_no"],
+            "issue_note_date": inn["in_date"],
+            "parent_picking_note_id": None,
+            "issued_to": inn.get("issued_to", ""),
+            "assigned_items": inn.get("items", []),
+            "items": [],
+            "status": "PENDING",
+            "auto_created": True,
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+        }
+        try:
+            await db.picking_notes.insert_one(doc)
+            doc.pop("_id", None)
+            return doc
+        except DuplicateKeyError as e:
+            last_err = e
+    raise HTTPException(status_code=500, detail=f"Could not auto-create picking note: {last_err}")
+
+
+async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[dict], user: dict) -> Optional[dict]:
+    if not assigned_items:
+        return None
+    existing = await db.picking_notes.find_one({"parent_picking_note_id": parent_pn["id"]}, {"_id": 0})
+    if existing:
+        return existing
+    today = datetime.now(timezone.utc)
+    fy = current_fy_label(today)
+    last_err = None
+    for _ in range(5):
+        serial = await _alloc_serial("pn", fy)
+        pn_no = f"PN/{fy}/{serial:03d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "pn_no": pn_no,
+            "pn_date": today.date().isoformat(),
+            "fy": fy,
+            "serial": serial,
+            "issue_note_id": parent_pn["issue_note_id"],
+            "issue_note_no": parent_pn.get("issue_note_no", ""),
+            "issue_note_date": parent_pn.get("issue_note_date", ""),
+            "parent_picking_note_id": parent_pn["id"],
+            "issued_to": parent_pn.get("issued_to", ""),
+            "assigned_items": assigned_items,
+            "items": [],
+            "status": "PENDING",
+            "auto_created": True,
+            "auto_source": "partial-pick-remaining",
+            "created_at": now_iso(),
+            "created_by": user.get("email", ""),
+        }
+        try:
+            await db.picking_notes.insert_one(doc)
+            doc.pop("_id", None)
+            return doc
+        except DuplicateKeyError as e:
+            last_err = e
+    raise HTTPException(status_code=500, detail=f"Could not auto-create remaining picking note: {last_err}")
+
+
+async def _enrich_picking_requested_items(rows: list[dict]) -> None:
+    """Expose requested issue quantities for pending auto-created picking notes.
+
+    `picking_notes.items` stores physical rack/box allocations. Pending notes
+    have no allocations yet, but the list/detail UI still needs to show the
+    issue item count and requested qty.
+    """
+    issue_ids = sorted({r.get("issue_note_id") for r in rows if r.get("issue_note_id")})
+    if not issue_ids:
+        return
+    issues = await db.issue_notes.find(
+        {"id": {"$in": issue_ids}},
+        {"_id": 0, "id": 1, "items": 1},
+    ).to_list(len(issue_ids))
+    by_id = {i["id"]: i for i in issues}
+    for row in rows:
+        requested_items = row.get("assigned_items") or by_id.get(row.get("issue_note_id"), {}).get("items", []) or []
+        row["requested_items"] = requested_items
+        row["requested_items_count"] = len(requested_items)
+        row["requested_qty_total"] = sum(float(it.get("quantity") or 0) for it in requested_items)
+        row["picked_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("items") or []))
+
+
+def _stock_out_lock_key(it: dict) -> str:
+    return "||".join([
+        it.get("part_no", ""),
+        it.get("make", ""),
+        it.get("godown_id", ""),
+        it.get("rack_id", ""),
+        it.get("box_id", ""),
+    ])
+
+
+def _sum_issue_like_items(items: list[dict]) -> dict:
+    sums = {}
+    for it in items or []:
+        k = _key(it.get("part_no"), it.get("make"))
+        sums[k] = sums.get(k, 0) + float(it.get("quantity") or 0)
+    return sums
+
+
+def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dict]) -> list[dict]:
+    picked = _sum_issue_like_items(picked_items)
+    remaining = []
+    for it in assigned_items or []:
+        row = dict(it)
+        assigned_qty = float(row.get("quantity") or 0)
+        k = _key(row.get("part_no"), row.get("make"))
+        rem = max(0, assigned_qty - picked.get(k, 0))
+        if rem > 1e-6:
+            row["quantity"] = rem
+            remaining.append(row)
+    return remaining
 
 
 @router.post("/stock-out")
@@ -65,6 +218,33 @@ async def issue_lookup_makes(part_no: str, user=Depends(get_current_user)):
     return {"makes": [{"make": p["_id"]["make"], "available_qty": p["q"]} for p in pairs]}
 
 
+@router.get("/issue-notes/lookup/{part_no}/godowns")
+async def issue_lookup_godowns(part_no: str, make: str, user=Depends(get_current_user)):
+    """For Issue Note flow: list godowns that currently hold positive stock for part/make."""
+    rows = await db.transactions.aggregate([
+        {"$match": {"part_no": part_no, "make": make}},
+        {"$group": {
+            "_id": {
+                "godown_id": "$godown_id",
+                "godown_name": "$godown_name",
+            },
+            "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+        }},
+        {"$match": {"q": {"$gt": 0}, "_id.godown_id": {"$nin": [None, ""]}}},
+        {"$sort": {"_id.godown_name": 1}},
+    ]).to_list(1000)
+    return {
+        "godowns": [
+            {
+                "godown_id": r["_id"].get("godown_id", ""),
+                "godown_name": r["_id"].get("godown_name", ""),
+                "available_qty": r["q"],
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/issue-notes/next-no")
 async def next_issue_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
@@ -83,6 +263,7 @@ async def next_issue_note_no(user=Depends(get_current_user)):
 async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_user)):
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items)
+    stored_items = await _issue_items_for_storage(payload.items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
@@ -97,7 +278,7 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             "fy": fy,
             "serial": serial,
             "issued_to": (payload.issued_to or "").strip(),
-            "items": [it.model_dump() for it in payload.items],
+            "items": stored_items,
             "status": "PICKING_PENDING",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
@@ -106,6 +287,12 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
         try:
             await db.issue_notes.insert_one(doc)
             doc.pop("_id", None)
+            try:
+                await _auto_create_picking_note_for_issue(doc, user)
+            except Exception:
+                await db.issue_notes.delete_one({"id": doc["id"]})
+                await db.picking_notes.delete_many({"issue_note_id": doc["id"], "status": "PENDING", "items": []})
+                raise
             await _notify(
                 actor=user, type="issue_note.created", module="stock_out",
                 title=f"Issue Note {in_no}",
@@ -168,18 +355,26 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     if not existing:
         raise HTTPException(status_code=404, detail="Issue note not found")
     _enforce_assignee(existing, user, "edit this issue note")
-    if await db.picking_notes.find_one({"issue_note_id": in_id}):
+    linked_pn = await db.picking_notes.find_one({"issue_note_id": in_id}, {"_id": 0})
+    if linked_pn and (linked_pn.get("status") != "PENDING" or linked_pn.get("items")):
         raise HTTPException(status_code=409, detail="Cannot edit — picking notes have been created. Delete those first.")
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items, exclude_in_id=in_id)
+    stored_items = await _issue_items_for_storage(payload.items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     update = {
         "issued_to": (payload.issued_to or "").strip(),
-        "items": [it.model_dump() for it in payload.items],
+        "items": stored_items,
         "updated_at": now_iso(),
         **assignee,
     }
     await db.issue_notes.update_one({"id": in_id}, {"$set": update})
+    if linked_pn:
+        await db.picking_notes.update_one({"id": linked_pn["id"]}, {"$set": {
+            "issued_to": update["issued_to"],
+            "items": [],
+            "updated_at": now_iso(),
+        }})
     new_aid = assignee.get("assigned_to_user_id")
     if new_aid and new_aid != existing.get("assigned_to_user_id"):
         await _notify(
@@ -199,8 +394,11 @@ async def delete_issue_note(in_id: str, user=Depends(get_current_user)):
     if not existing:
         raise HTTPException(status_code=404, detail="Issue note not found")
     _enforce_assignee(existing, user, "delete this issue note")
-    if await db.picking_notes.find_one({"issue_note_id": in_id}):
+    linked_pn = await db.picking_notes.find_one({"issue_note_id": in_id}, {"_id": 0})
+    if linked_pn and (linked_pn.get("status") != "PENDING" or linked_pn.get("items")):
         raise HTTPException(status_code=409, detail="Cannot delete — picking notes exist for this issue note. Delete them first.")
+    if linked_pn:
+        await db.picking_notes.delete_one({"id": linked_pn["id"]})
     await db.issue_notes.delete_one({"id": in_id})
     return {"ok": True}
 
@@ -226,26 +424,29 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=404, detail="Issue note not found")
-    if inn.get("status") == "FULLY_PICKED" and not exclude_pn_id:
+    if inn.get("status") in ("FULLY_PICKED", "COMPLETED") and not exclude_pn_id:
         raise HTTPException(status_code=409, detail="This issue note is already fully picked")
-    other_sums = await _pick_aggregate_other(in_id, exclude_pn_id)
-    other_loc_sums = await _pick_aggregate_other_by_loc(in_id, exclude_pn_id)
+    pn_scope = None
+    if exclude_pn_id:
+        pn_scope = await db.picking_notes.find_one({"id": exclude_pn_id}, {"_id": 0})
 
     items_out = []
-    for it in inn.get("items", []):
+    base_items = (pn_scope or {}).get("assigned_items") or inn.get("items", [])
+    for it in base_items:
         part_no = it.get("part_no", "")
         make = it.get("make", "")
         requested_qty = it.get("quantity", 0) or 0
-        already = other_sums.get(_key(part_no, make), 0)
-        pending = requested_qty - already
+        selected_godown_id = it.get("selected_godown_id") or ""
+        already = 0
+        pending = requested_qty
         if pending <= 0:
             continue
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         locs = await _stock_locations_for(part_no, make)
-        # subtract pending DRAFT picks per location to produce "available_for_pick"
+        if selected_godown_id:
+            locs = [L for L in locs if L.get("godown_id") == selected_godown_id]
         for L in locs:
-            reserved = other_loc_sums.get(f"{part_no}||{make}||{L['box_id']}", 0)
-            L["available_qty"] = max(0, L["current_qty"] - reserved)
+            L["available_qty"] = L["current_qty"]
         # Pre-pick if exactly 1 location has enough
         pickable = [L for L in locs if L["available_qty"] > 0]
         prefill = pickable[0] if len(pickable) == 1 and pickable[0]["available_qty"] >= pending else None
@@ -255,7 +456,7 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
             "requested_qty": requested_qty,
             "already_picked_qty": already,
             "pending_qty": pending,
-            "quantity": prefill["available_qty"] if prefill else min(pending, pickable[0]["available_qty"]) if pickable else 0,
+            "quantity": min(pending, prefill["available_qty"]) if prefill else min(pending, pickable[0]["available_qty"]) if pickable else 0,
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -289,13 +490,15 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     _enforce_assignee(inn, user, "create a picking note for this issue")
-    if inn.get("status") == "FULLY_PICKED":
+    if await db.picking_notes.find_one({"issue_note_id": inn["id"], "status": {"$in": ["PENDING", "DRAFT", "RECORDING"]}}, {"_id": 0, "id": 1}):
+        raise HTTPException(status_code=409, detail="A pending Picking Note already exists for this issue note")
+    if inn.get("status") in ("FULLY_PICKED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="This issue note is already fully picked")
     _validate_picking_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
-    await _validate_picking_constraints(inn["id"], payload.items, exclude_pn_id=None)
+    await _validate_picking_constraints(inn["id"], payload.items, exclude_pn_id=None, assigned_items=inn.get("items", []))
 
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
@@ -313,6 +516,7 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
             "issue_note_no": inn["in_no"],
             "issue_note_date": inn["in_date"],
             "issued_to": inn.get("issued_to", ""),
+            "assigned_items": inn.get("items", []),
             "items": [it.model_dump() for it in payload.items],
             "status": "DRAFT",
             "created_at": now_iso(),
@@ -335,21 +539,27 @@ async def list_picking_notes(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    issue_note_id: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     from helpers.stock_helpers import _enrich_with_parent_assignee
     query = {}
+    if issue_note_id:
+        query["issue_note_id"] = issue_note_id
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
+    if not issue_note_id and not status and not not_status:
+        query["status"] = {"$in": ["PENDING", "DRAFT", "RECORDING"]}
     total = await db.picking_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.picking_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
     await _enrich_with_parent_assignee(rows, "issue_notes", "issue_note_id")
+    await _enrich_picking_requested_items(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -365,6 +575,7 @@ async def get_picking_note(pn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Picking note not found")
     await _enrich_note_items([doc])
     await _enrich_with_parent_assignee([doc], "issue_notes", "issue_note_id")
+    await _enrich_picking_requested_items([doc])
     return doc
 
 
@@ -373,7 +584,7 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
     existing = await db.picking_notes.find_one({"id": pn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Picking note not found")
-    if existing.get("status") == "RECORDED":
+    if existing.get("status") in ("RECORDED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="Cannot edit — already recorded as Stock Out")
     in_parent = await db.issue_notes.find_one({"id": existing.get("issue_note_id")}, {"_id": 0}) or {}
     _enforce_assignee(in_parent, user, "edit this picking note")
@@ -381,9 +592,11 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
     for idx, it in enumerate(payload.items, start=1):
         if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
-    await _validate_picking_constraints(existing.get("issue_note_id"), payload.items, exclude_pn_id=pn_id)
+    assigned_items = existing.get("assigned_items") or in_parent.get("items", [])
+    await _validate_picking_constraints(existing.get("issue_note_id"), payload.items, exclude_pn_id=pn_id, assigned_items=assigned_items)
     update = {
         "items": [it.model_dump() for it in payload.items],
+        "status": "DRAFT",
         "updated_at": now_iso(),
     }
     await db.picking_notes.update_one({"id": pn_id}, {"$set": update})
@@ -397,7 +610,7 @@ async def delete_picking_note(pn_id: str, user=Depends(get_current_user)):
     existing = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Picking note not found")
-    if existing.get("status") == "RECORDED":
+    if existing.get("status") in ("RECORDED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock Out")
     in_parent = await db.issue_notes.find_one({"id": existing.get("issue_note_id")}, {"_id": 0}) or {}
     _enforce_assignee(in_parent, user, "delete this picking note")
@@ -412,67 +625,118 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
     pn = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
     if not pn:
         raise HTTPException(status_code=404, detail="Picking note not found")
-    if pn.get("status") == "RECORDED":
+    if pn.get("status") in ("RECORDED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="Already recorded")
+    if pn.get("status") != "DRAFT":
+        raise HTTPException(status_code=409, detail="Picking note must be saved as Draft before recording")
     in_parent = await db.issue_notes.find_one({"id": pn.get("issue_note_id")}, {"_id": 0}) or {}
     _enforce_assignee(in_parent, user, "record this picking note")
     items = pn.get("items", [])
     if not items:
         raise HTTPException(status_code=400, detail="No items to record")
-    # Final availability check (real balance, not the DRAFT-pending-aware one)
-    for idx, it in enumerate(items, start=1):
-        if not it.get("godown_id") or not it.get("rack_id"):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing")
-        if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing")
-        # Real balance at the box (sum of all IN-OUT for this part/make/box)
-        bal = await db.transactions.aggregate([
-            {"$match": {"part_no": it["part_no"], "make": it["make"], "box_id": it.get("box_id", "")}},
-            {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
-        ]).to_list(1)
-        avail = (bal[0]["q"] if bal else 0)
-        if avail < it["quantity"] - 1e-6:
-            raise HTTPException(status_code=400, detail=(
-                f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at "
-                f"{it.get('godown_name')}/{it.get('rack_no')}/{it.get('box_no') or '—'}: have {avail}, need {it['quantity']}"
-            ))
-
+    assigned_items = pn.get("assigned_items") or in_parent.get("items", [])
+    await _validate_picking_constraints(pn.get("issue_note_id"), [PickingNoteItem(**it) for it in items], exclude_pn_id=pn_id, assigned_items=assigned_items)
+    remaining_items = _remaining_assigned_items(assigned_items, items)
     now = now_iso()
-    tx_docs = []
-    for it in items:
-        master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
-        tx_docs.append({
-            "id": str(uuid.uuid4()),
-            "type": "OUT",
-            "part_no": it["part_no"], "make": it["make"],
-            "model": master.get("model", it.get("model", "")),
-            "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
-            "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
-            "description_1": master.get("description_1", it.get("description_1", "")),
-            "description_2": master.get("description_2", it.get("description_2", "")),
-            "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
-            "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
-            "item_category": master.get("item_category", it.get("item_category", "")),
-            "image": master.get("image", ""),
-            "quantity": it["quantity"],
-            "godown_id": it["godown_id"], "godown_name": it.get("godown_name", ""),
-            "rack_id": it["rack_id"], "rack_no": it.get("rack_no", ""),
-            "box_id": it["box_id"], "box_no": it.get("box_no", ""), "box_category": it.get("box_category", ""),
-            "picking_note_id": pn["id"], "picking_note_no": pn["pn_no"],
-            "issue_note_id": pn.get("issue_note_id", ""), "issue_note_no": pn.get("issue_note_no", ""),
-            "issued_to": pn.get("issued_to", ""),
-            "created_at": now, "created_by": user.get("email"),
-        })
-    if tx_docs:
-        await db.transactions.insert_many(tx_docs)
-    await db.picking_notes.update_one({"id": pn_id}, {"$set": {"status": "RECORDED", "recorded_at": now}})
-    if pn.get("issue_note_id"):
-        await _recompute_in_status(pn["issue_note_id"])
-    total_qty = sum(int(it.get("quantity") or 0) for it in items)
-    await _notify(
-        actor=user, type="stock_out.recorded", module="stock_out",
-        title=f"Stock Out recorded ({pn['pn_no']})",
-        message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{pn.get('issued_to') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
-        audience="module", ref_collection="picking_notes", ref_id=pn_id,
+    locked = await db.picking_notes.update_one(
+        {"id": pn_id, "status": "DRAFT"},
+        {"$set": {"status": "RECORDING", "recording_started_at": now}},
     )
-    return {"ok": True, "transactions_created": len(tx_docs)}
+    if locked.modified_count != 1:
+        latest = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0, "status": 1})
+        if latest and latest.get("status") in ("RECORDED", "COMPLETED"):
+            raise HTTPException(status_code=409, detail="Already recorded")
+        raise HTTPException(status_code=409, detail="Picking note is already being recorded")
+
+    lock_keys = sorted({_stock_out_lock_key(it) for it in items})
+    tx_docs = []
+    child_pn = None
+    try:
+        if await db.transactions.find_one({"picking_note_id": pn_id}, {"_id": 0, "id": 1}):
+            raise HTTPException(status_code=409, detail="Stock Out transactions already exist for this Picking Note")
+
+        for key in lock_keys:
+            try:
+                await db.stock_out_locks.insert_one({"_id": key, "picking_note_id": pn_id, "created_at": now})
+            except DuplicateKeyError:
+                raise HTTPException(status_code=409, detail="Stock at one selected location is being recorded by another user")
+
+        # Final availability check (real ledger balance).
+        for idx, it in enumerate(items, start=1):
+            if not it.get("godown_id") or not it.get("rack_id"):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing")
+            if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing")
+            bal = await db.transactions.aggregate([
+                {"$match": {
+                    "part_no": it["part_no"], "make": it["make"],
+                    "godown_id": it.get("godown_id", ""),
+                    "rack_id": it.get("rack_id", ""),
+                    "box_id": it.get("box_id", ""),
+                }},
+                {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+            ]).to_list(1)
+            avail = (bal[0]["q"] if bal else 0)
+            if avail < it["quantity"] - 1e-6:
+                raise HTTPException(status_code=400, detail=(
+                    f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at "
+                    f"{it.get('godown_name')}/{it.get('rack_no')}/{it.get('box_no') or '—'}: have {avail}, need {it['quantity']}"
+                ))
+
+        for it in items:
+            master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
+            tx_docs.append({
+                "id": str(uuid.uuid4()),
+                "type": "OUT",
+                "part_no": it["part_no"], "make": it["make"],
+                "model": master.get("model", it.get("model", "")),
+                "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
+                "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
+                "description_1": master.get("description_1", it.get("description_1", "")),
+                "description_2": master.get("description_2", it.get("description_2", "")),
+                "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
+                "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
+                "item_category": master.get("item_category", it.get("item_category", "")),
+                "image": master.get("image", ""),
+                "quantity": it["quantity"],
+                "godown_id": it["godown_id"], "godown_name": it.get("godown_name", ""),
+                "rack_id": it["rack_id"], "rack_no": it.get("rack_no", ""),
+                "box_id": it["box_id"], "box_no": it.get("box_no", ""), "box_category": it.get("box_category", ""),
+                "picking_note_id": pn["id"], "picking_note_no": pn["pn_no"],
+                "issue_note_id": pn.get("issue_note_id", ""), "issue_note_no": pn.get("issue_note_no", ""),
+                "issued_to": pn.get("issued_to", ""),
+                "created_at": now, "created_by": user.get("email"),
+            })
+        if tx_docs:
+            await db.transactions.insert_many(tx_docs)
+        recorded_update = await db.picking_notes.update_one(
+            {"id": pn_id, "status": "RECORDING"},
+            {"$set": {"status": "COMPLETED", "recorded_at": now}, "$unset": {"recording_started_at": ""}},
+        )
+        if recorded_update.modified_count != 1:
+            raise HTTPException(status_code=409, detail="Picking note recording state changed; stock out was not finalized")
+        if remaining_items:
+            child_pn = await _create_followup_picking_note(pn, remaining_items, user)
+        if pn.get("issue_note_id"):
+            await _recompute_in_status(pn["issue_note_id"])
+        total_qty = sum(int(it.get("quantity") or 0) for it in items)
+        await _notify(
+            actor=user, type="stock_out.recorded", module="stock_out",
+            title=f"Stock Out recorded ({pn['pn_no']})",
+            message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{pn.get('issued_to') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
+            audience="module", ref_collection="picking_notes", ref_id=pn_id,
+        )
+        return {"ok": True, "transactions_created": len(tx_docs), "remaining_picking_note": child_pn}
+    except Exception:
+        if tx_docs:
+            await db.transactions.delete_many({"id": {"$in": [t["id"] for t in tx_docs]}})
+        if child_pn:
+            await db.picking_notes.delete_one({"id": child_pn["id"]})
+        await db.picking_notes.update_one(
+            {"id": pn_id, "status": "RECORDING"},
+            {"$set": {"status": "DRAFT"}, "$unset": {"recording_started_at": ""}},
+        )
+        raise
+    finally:
+        if lock_keys:
+            await db.stock_out_locks.delete_many({"_id": {"$in": lock_keys}, "picking_note_id": pn_id})

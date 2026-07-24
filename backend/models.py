@@ -367,6 +367,9 @@ class IssueNoteItem(BaseModel):
     part_no: str
     make: str
     quantity: float
+    # Optional office-selected godown preference. Rack/box allocation belongs to Picking.
+    selected_godown_id: Optional[str] = None
+    selected_godown_name: Optional[str] = None
     # Denormalized stock master fields (for display only)
     model: Optional[str] = ""
     description_1: Optional[str] = ""
@@ -431,9 +434,11 @@ class PickingNote(BaseModel):
     issue_note_id: str
     issue_note_no: str = ""
     issue_note_date: str = ""
+    parent_picking_note_id: Optional[str] = None
     issued_to: str = ""
+    assigned_items: List[IssueNoteItem] = []
     items: List[PickingNoteItem] = []
-    status: str = "DRAFT"  # DRAFT | RECORDED
+    status: str = "PENDING"  # PENDING | DRAFT | COMPLETED | RECORDED(legacy)
     recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
@@ -468,7 +473,7 @@ class TransferRequest(BaseModel):
     serial: int
     purpose: str = ""
     items: List[TransferRequestItem] = []
-    status: str = "PENDING"  # PENDING | PARTIALLY_TRANSFERRED | FULLY_TRANSFERRED
+    status: str = "PENDING"  # NEW | PENDING | IN_PROGRESS | COMPLETED | CLOSED | CANCELLED
     transferred_at: Optional[str] = None
     created_at: str
     created_by: str = ""
@@ -501,7 +506,7 @@ class TransferNoteItem(BaseModel):
     # Destination location (placed at)
     dest_godown_id: str
     dest_godown_name: Optional[str] = ""
-    dest_rack_id: str
+    dest_rack_id: Optional[str] = ""
     dest_rack_no: Optional[str] = ""
     dest_box_id: Optional[str] = ""
     dest_box_no: Optional[str] = ""
@@ -522,9 +527,11 @@ class TransferNote(BaseModel):
     transfer_request_id: str
     transfer_request_no: str = ""
     transfer_request_date: str = ""
+    parent_transfer_note_id: Optional[str] = None
+    execution_attempt: int = 1
+    assigned_items: List[TransferRequestItem] = []
     items: List[TransferNoteItem] = []
-    status: str = "DRAFT"  # DRAFT | RECORDED
+    status: str = "PENDING"  # PENDING | DRAFT | PROCESSING | COMPLETED | CANCELLED | RECORDED(legacy)
     recorded_at: Optional[str] = None
     created_at: str
     created_by: str = ""
-

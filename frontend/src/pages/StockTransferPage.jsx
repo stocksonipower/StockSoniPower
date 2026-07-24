@@ -40,6 +40,31 @@ function Detail({ k, v }) {
   );
 }
 
+function qtySum(items) {
+  return (items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+}
+
+function transferAssignedQty(stn) {
+  return parseFloat(stn.assigned_qty_total) || qtySum(stn.assigned_items || []);
+}
+
+function transferMovedQty(stn) {
+  return parseFloat(stn.transferred_qty_total) || qtySum(stn.items || []);
+}
+
+function transferNoteDone(stn) {
+  return stn.status === "COMPLETED" || stn.status === "RECORDED";
+}
+
+function transferStatusLabel(status) {
+  if (status === "COMPLETED" || status === "FULLY_TRANSFERRED") return "Completed";
+  if (status === "IN_PROGRESS" || status === "PARTIALLY_TRANSFERRED") return "In Progress";
+  if (status === "DRAFT") return "Draft";
+  if (status === "PROCESSING") return "Processing";
+  if (status === "CANCELLED") return "Cancelled";
+  return "Pending";
+}
+
 /* ==============================================================
    STOCK TRANSFER  (Transfer Request + Transfer Note)
    ============================================================== */
@@ -114,14 +139,15 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
   };
 
-  const statusLabel = (r) => r.status === "FULLY_TRANSFERRED" ? "Fully Transferred" : (r.status === "PARTIALLY_TRANSFERRED" ? "Partially Transferred" : "Pending");
+  const statusLabel = (r) => transferStatusLabel(r.status);
 
   const columns = useMemo(() => [
     { key: "str_date", label: "TRANSFER REQUEST DATE", value: (r) => fmtDate(r.str_date) },
     { key: "str_no", label: "TRANSFER REQUEST NO", value: (r) => r.str_no || "" },
     { key: "purpose", label: "PURPOSE", value: (r) => r.purpose || "" },
     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "TOTAL QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
+    { key: "qty_total", label: "REQUESTED", value: (r) => parseFloat(r.requested_qty_total) || qtySum(r.items)},
+    { key: "progress", label: "TRANSFERRED", value: (r) => `${parseFloat(r.transferred_qty_total) || 0} / ${parseFloat(r.requested_qty_total) || qtySum(r.items)}`},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -179,17 +205,18 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
-              const isFully = r.status === "FULLY_TRANSFERRED";
-              const isPartial = r.status === "PARTIALLY_TRANSFERRED";
-              const hasNotes = isFully || isPartial;
+              const totalQty = parseFloat(r.requested_qty_total) || qtySum(r.items);
+              const movedQty = parseFloat(r.transferred_qty_total) || 0;
+              const isFully = r.status === "COMPLETED" || r.status === "FULLY_TRANSFERRED";
+              const isPartial = r.status === "IN_PROGRESS" || r.status === "PARTIALLY_TRANSFERRED";
+              const hasNotes = true;
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lock = hasNotes || lockedToOther;
               const editTitle = hasNotes ? "Cannot edit — transfer notes exist"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
               const deleteTitle = hasNotes ? "Cannot delete — transfer notes exist"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
-              const label = isFully ? "Fully Transferred" : (isPartial ? "Partially Transferred" : "Pending");
+              const label = statusLabel(r);
               const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
               return (
                 <tr key={r.id} data-testid={`str-row-${r.str_no}`}>
@@ -203,6 +230,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td className="text-slate-700 max-w-[280px] truncate">{r.purpose || "—"}</td>
                   <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td className="text-left font-mono font-bold text-slate-900">{movedQty} / {totalQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-status-${r.str_no}`}>{label}</span>
                   </td>
@@ -224,7 +252,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -254,6 +282,18 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
 }
 
 function TransferRequestDetailDialog({ s, onClose }) {
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    if (!s?.id) {
+      setHistory([]);
+      return;
+    }
+    api.get("/transfer-notes", { params: { transfer_request_id: s.id, page_size: 100 } })
+      .then((r) => setHistory(r.data || []))
+      .catch(() => setHistory([]));
+  }, [s?.id]);
+
   return (
     <Dialog open={!!s} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-4xl rounded-sm" data-testid="str-detail-dialog">
@@ -296,6 +336,35 @@ function TransferRequestDetailDialog({ s, onClose }) {
                 ))}
               </tbody>
             </table>
+            <div className="mt-6">
+              <div className="text-xs font-black uppercase tracking-wider text-slate-600 mb-2">Transfer Note History</div>
+              <table className="data-table w-full text-xs">
+                <thead>
+                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-right">ASSIGNED</th><th className="text-right">TRANSFERRED</th><th>STATUS</th></tr>
+                </thead>
+                <tbody>
+                  {[...history].sort((a, b) => (a.execution_attempt || 1) - (b.execution_attempt || 1)).map((stn) => {
+                    const parent = history.find((h) => h.id === stn.parent_transfer_note_id);
+                    const done = transferNoteDone(stn);
+                    return (
+                      <tr key={stn.id}>
+                        <td className="font-mono font-semibold">{stn.stn_no}</td>
+                        <td className="font-mono">{stn.execution_attempt || 1}</td>
+                        <td className="font-mono">{parent?.stn_no || "—"}</td>
+                        <td className="text-right font-mono font-bold">{transferAssignedQty(stn)}</td>
+                        <td className="text-right font-mono font-bold">{transferMovedQty(stn)}</td>
+                        <td>
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${done ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
+                            {transferStatusLabel(stn.status)}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {history.length === 0 && <tr><td colSpan={6} className="text-center py-6 text-slate-500">No transfer notes yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
       </DialogContent>
@@ -623,20 +692,19 @@ function TransferNoteTab() {
   const [editing, setEditing] = useState(null);
   const [openStn, setOpenStn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const goCreate = () => { setEditing(null); setView("create"); };
   const goEdit = (s) => { setEditing(s); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
 
   return (
     <>
-      {view === "list" && <TransferNoteList reloadKey={reloadKey} onCreate={goCreate} onEdit={goEdit} onOpen={setOpenStn} onRecorded={() => setReloadKey((k) => k + 1)} />}
-      {(view === "create" || view === "edit") && <TransferNoteForm editing={editing} onCancel={goList} onSaved={goList} />}
+      {view === "list" && <TransferNoteList reloadKey={reloadKey} onEdit={goEdit} onOpen={setOpenStn} onRecorded={() => setReloadKey((k) => k + 1)} />}
+      {view === "edit" && <TransferNoteForm editing={editing} onCancel={goList} onSaved={goList} />}
       <TransferNoteDetailDialog stn={openStn} onClose={() => setOpenStn(null)} />
     </>
   );
 }
 
-function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
+function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const { user: me, isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState(1);
@@ -667,6 +735,7 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
     try {
       const { data } = await api.post(`/transfer-notes/${stn.id}/record`);
       toast.success(`Recorded · ${data.transactions_created} transaction(s) created`);
+      if (data.remaining_transfer_note?.stn_no) toast.info(`Remaining quantity moved to ${data.remaining_transfer_note.stn_no}`);
       load(); onRecorded?.();
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not record"); }
     finally { setRecordingId(null); }
@@ -675,10 +744,12 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
   const columns = useMemo(() => [
     { key: "stn_date", label: "STN DATE", value: (r) => fmtDate(r.stn_date) },
     { key: "stn_no", label: "STN NO", value: (r) => r.stn_no || "" },
+    { key: "attempt", label: "ATTEMPT", value: (r) => r.execution_attempt || 1 },
     { key: "str_no", label: "REQUEST NO", value: (r) => r.transfer_request_no || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "QTY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
-    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Recorded" : "Draft" },
+    { key: "items_count", label: "ITEMS", value: (r) => (r.assigned_items || r.items || []).length},
+    { key: "assigned_qty", label: "ASSIGNED", value: transferAssignedQty},
+    { key: "moved_qty", label: "TRANSFERRED", value: transferMovedQty},
+    { key: "status", label: "STATUS", value: (r) => transferStatusLabel(r.status) },
   ], []);
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
@@ -706,8 +777,8 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="stn-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
-          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-stn-button">
-            <Plus size={16} weight="bold" className="mr-2" /> Create New Transfer Note
+          <Button disabled variant="outline" className="rounded-sm border-slate-300 text-slate-400" title="Transfer Notes are auto-generated from Transfer Requests" data-testid="create-stn-button">
+            <Package size={16} weight="bold" className="mr-2" /> Auto Generated
           </Button>
         </div>
       </div>
@@ -735,16 +806,19 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
-              const recorded = r.status === "RECORDED";
+              const assignedQty = transferAssignedQty(r);
+              const movedQty = transferMovedQty(r);
+              const recorded = transferNoteDone(r);
+              const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
               const aName = r.parent_assigned_to_name;
               const aEmail = r.parent_assigned_to_email;
               const lockedToOther = !!aId && aId !== me?.id && !isAdmin;
               const lock = recorded || lockedToOther;
-              const editTitle = recorded ? "Already recorded" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Edit");
+              const editTitle = recorded ? "Already completed" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Transfer Note" : "Edit"));
               const deleteTitle = recorded ? "Already recorded" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Delete");
-              const recordTitle = recorded ? "Already recorded" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Transfer");
+              const recordTitle = recorded ? "Already completed" : (pending ? "Open and save draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Complete Transfer"));
+              const recordDisabled = recorded || pending || lockedToOther || recordingId === r.id;
               return (
                 <tr key={r.id} data-testid={`stn-row-${r.stn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -752,14 +826,14 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`stn-open-${r.stn_no}`}>{r.stn_no}</button>
                   </td>
+                  <td className="font-mono text-slate-700">{r.execution_attempt || 1}</td>
                   <td className="font-mono text-slate-700">{r.transfer_request_no || "—"}</td>
-                  <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td className="text-left font-mono text-slate-600">{(r.assigned_items || r.items || []).length}</td>
+                  <td className="text-left font-mono font-bold text-slate-900">{assignedQty}</td>
+                  <td className="text-left font-mono font-bold text-slate-900">{movedQty}</td>
                   <td>
-                  </td>
-                  <td>
-                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`} data-testid={`stn-status-${r.stn_no}`}>
-                      {recorded ? "Recorded" : "Draft"}
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`stn-status-${r.stn_no}`}>
+                      {transferStatusLabel(r.status)}
                     </span>
                   </td>
                   <td className="text-left whitespace-nowrap">
@@ -773,19 +847,19 @@ function TransferNoteList({ reloadKey, onCreate, onEdit, onOpen, onRecorded }) {
                       data-testid={`stn-delete-${r.stn_no}`}>
                       <Trash size={14} />
                     </button>
-                    <Button onClick={() => handleRecord(r)} disabled={lock || recordingId === r.id} size="sm"
+                    <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
                       title={recordTitle}
                       className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
                       data-testid={`stn-record-${r.stn_no}`}>
                       <CheckCircle size={12} weight="bold" className="mr-1" />
-                      {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Transfer")}
+                      {recorded ? "Completed" : (recordingId === r.id ? "Completing…" : "Complete Transfer")}
                     </Button>
                   </td>
                 </tr>
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending transfer notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -823,8 +897,12 @@ function TransferNoteDetailDialog({ stn, onClose }) {
             <DialogHeader><DialogTitle className="text-2xl font-black font-mono">{stn.stn_no}</DialogTitle></DialogHeader>
             <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
               <Detail k="STN Date" v={fmtDate(stn.stn_date)} />
+              <Detail k="Execution Attempt" v={stn.execution_attempt || 1} />
               <Detail k="Request No" v={stn.transfer_request_no || "—"} />
               <Detail k="Status" v={stn.status} />
+              <Detail k="Assigned" v={transferAssignedQty(stn)} />
+              <Detail k="Transferred" v={transferMovedQty(stn)} />
+              <Detail k="Remaining" v={Math.max(0, transferAssignedQty(stn) - transferMovedQty(stn))} />
               <Detail k="Created By" v={stn.created_by || "—"} />
               <Detail k="Created At" v={new Date(stn.created_at).toLocaleString()} />
               <div>
@@ -841,7 +919,7 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 </tr>
               </thead>
               <tbody>
-                {(stn.items || []).map((it, idx) => (
+                {((stn.items || []).length ? stn.items : (stn.assigned_items || [])).map((it, idx) => (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
@@ -889,7 +967,8 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
         .then((r) => {
           const map = {};
           (r.data.items || []).forEach((p) => { map[`${p.part_no}||${p.make}`] = p; });
-          setItems((editing.items || []).map((it) => {
+          const sourceItems = (editing.items || []).length ? editing.items : (r.data.items || []);
+          setItems(sourceItems.map((it) => {
             const p = map[`${it.part_no}||${it.make}`] || {};
             return { ...it, available_locations: p.available_locations || [], pending_qty: p.pending_qty ?? 0, requested_qty: p.requested_qty ?? 0 };
           }));
@@ -897,7 +976,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     } else {
       api.get("/transfer-notes/next-no").then((r) => { setStnNo(r.data.next_stn_no); setStnDate(r.data.stn_date); })
         .catch(() => toast.error("Could not preview transfer-note number"));
-      api.get("/transfer-requests", { params: { not_status: "FULLY_TRANSFERRED", page_size: 100 } })
+      api.get("/transfer-requests", { params: { not_status: "COMPLETED,CLOSED,FULLY_TRANSFERRED", page_size: 100 } })
         .then((r) => setPendingStrs(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -985,15 +1064,15 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (!it.src_godown_id || !it.src_rack_id) { toast.error(`Row ${i + 1}: pick Source Godown / Rack`); return; }
-      if (!it.dest_godown_id || !it.dest_rack_id) { toast.error(`Row ${i + 1}: pick Destination Godown / Rack`); return; }
+      if (!it.dest_godown_id) { toast.error(`Row ${i + 1}: pick Destination Godown`); return; }
       const srcHasBoxes = (boxesByRack[it.src_rack_id] || []).length > 0;
       if (srcHasBoxes && !it.src_box_id) { toast.error(`Row ${i + 1}: pick Source Box`); return; }
-      const destHasBoxes = (boxesByRack[it.dest_rack_id] || []).length > 0;
+      const destHasBoxes = it.dest_rack_id ? (boxesByRack[it.dest_rack_id] || []).length > 0 : false;
       if (destHasBoxes && !it.dest_box_id) { toast.error(`Row ${i + 1}: pick Destination Box`); return; }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
-      if (it.src_godown_id === it.dest_godown_id && it.src_rack_id === it.dest_rack_id && (it.src_box_id || "") === (it.dest_box_id || "")) {
-        toast.error(`Row ${i + 1}: source and destination are identical`); return;
+      if (it.src_godown_id === it.dest_godown_id) {
+        toast.error(`Row ${i + 1}: source and destination godown must differ`); return;
       }
     }
     setSaving(true);
@@ -1010,7 +1089,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
           src_rack_id: it.src_rack_id, src_rack_no: it.src_rack_no || "",
           src_box_id: it.src_box_id || "", src_box_no: it.src_box_no || "", src_box_category: it.src_box_category || "",
           dest_godown_id: it.dest_godown_id, dest_godown_name: it.dest_godown_name || "",
-          dest_rack_id: it.dest_rack_id, dest_rack_no: it.dest_rack_no || "",
+          dest_rack_id: it.dest_rack_id || "", dest_rack_no: it.dest_rack_no || "",
           dest_box_id: it.dest_box_id || "", dest_box_no: it.dest_box_no || "", dest_box_category: it.dest_box_category || "",
         })),
       };
