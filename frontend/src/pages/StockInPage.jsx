@@ -454,7 +454,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
         .then(({ data }) => setMasterData(prev => ({ ...prev, [key]: data })))
         .catch(() => {});
     });
-  }, [rn?.id, reloadTick]);
+  }, [rn, reloadTick]);
 
   const srnTree = useMemo(() => {
     const parents = srns.filter(s => !s.parent_srn_id);
@@ -2048,7 +2048,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
       { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
     ];
     return cols;
-  }, [isSrn, noun, dateField, idField]);
+  }, [noun, dateField, idField]);
 
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
