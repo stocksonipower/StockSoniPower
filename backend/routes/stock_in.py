@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import uuid
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from deps import db, get_current_user, now_iso, _notify, logger, _resolve_assignee, _enforce_assignee
 from deps import _module_dep
@@ -13,8 +13,22 @@ from helpers.note_helpers import current_fy_label, _alloc_serial, _no_future_dat
 from helpers.auto_create import _auto_create_srn_for_rn, _auto_create_ern_for_rn, _auto_create_rkn_for_source
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_srn_racking_status, _recompute_ern_racking_status, _is_source_fully_racked, _aggregate_other_rkn_qty_by_source, _recompute_source_status_after_rkn
 from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic
+from services.unit_of_work import unit_of_work
+from services import stock_in_service as svc
 
 router = APIRouter()
+
+
+def _is_write_conflict(exc: Exception) -> bool:
+    """True when MongoDB aborted our transaction because another one touched the
+    same document first (the loser of a concurrent read-modify-write)."""
+    labels = getattr(exc, "_error_labels", None) or getattr(exc, "error_labels", None) or set()
+    if "TransientTransactionError" in labels:
+        return True
+    code = getattr(exc, "code", None)
+    if code in (112, 251, 24):  # WriteConflict, NoSuchTransaction, LockTimeout
+        return True
+    return "WriteConflict" in str(exc) or "write conflict" in str(exc).lower()
 
 
 # ===================== RACKING NOTES — polymorphic source (Phase 2) =====================
@@ -373,12 +387,18 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
 @router.put("/receipt-notes/{rn_id}", response_model=ReceiptNote)
 async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(get_current_user)):
     """Edit a Receipt Note.
-       - Editable regardless of status AS LONG AS no Racking Note exists against it.
-       - Once ANY Racking Note (DRAFT or RECORDED) exists, edits are locked.
-       - Assignee enforcement still applies on non-DRAFT RNs so non-owners cannot
-         hijack someone else's finalized note.
-       - Re-finalization logic (SRN/ERN auto-create) remains unchanged on next finalize."""
-    existing = await db.receipt_notes.find_one({"id": rn_id})
+
+    Mutability rule (WMS semantics): the note stays editable for as long as no
+    stock has actually moved — that is, until some Racking Note in its source
+    graph reaches RECORDED. A DRAFT racking note holds no stock, so its presence
+    must not freeze the parent (finalize auto-creates one, which previously locked
+    the note immediately).
+
+    Every edit is propagated inside one transaction to the derived documents:
+    child SRN shortfalls, ERN overages and DRAFT racking-note quantities are all
+    re-derived from the new figures, and an audit entry records old -> new.
+    """
+    existing = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
 
@@ -387,10 +407,6 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     # Assignee enforcement: skip for DRAFT (anyone with module access can edit drafts).
     if not is_draft:
         _enforce_assignee(existing, user, "edit this receipt note")
-
-    # Single gate: ANY racking note against this RN locks further edits.
-    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
-        raise HTTPException(status_code=409, detail="Cannot edit — racking notes exist for this receipt note. Delete those first.")
 
     stock_in_type = _receipt_stock_in_type(payload)
     _no_future_date(payload.invoice_date, "Invoice Date")
@@ -409,7 +425,27 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
         "updated_at": now_iso(),
         **assignee,
     }
-    await db.receipt_notes.update_one({"id": rn_id}, {"$set": update})
+
+    async with unit_of_work() as uow:
+        await svc.assert_rn_mutable(uow, rn_id, "edit this receipt note")
+        await uow.receipt_notes.set_fields(rn_id, update)
+        # Keep every derived document in step with the new quantities.
+        if not is_draft:
+            await svc.synchronize_children_after_rn_edit(uow, existing, items_out, stock_in_type, user)
+        await uow.audit.record(
+            action="receipt_note.updated", actor=user,
+            ref_collection="receipt_notes", ref_id=rn_id,
+            old={"items": existing.get("items"), "invoice_no": existing.get("invoice_no"),
+                 "narration": existing.get("narration"), "stock_in_type": existing.get("stock_in_type")},
+            new={"items": items_out, "invoice_no": update["invoice_no"],
+                 "narration": update["narration"], "stock_in_type": stock_in_type},
+            reason="Receipt note edited before stock was recorded",
+            links={"rn_no": existing.get("rn_no")},
+        )
+
+    # Derived-status recomputation is idempotent and runs once the edit is durable.
+    if not is_draft:
+        await _recompute_rn_status(rn_id)
 
     new_aid = assignee.get("assigned_to_user_id")
     if new_aid and new_aid != existing.get("assigned_to_user_id"):
@@ -499,6 +535,16 @@ async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get
         if extra_rows:
             ern_no = await _auto_create_ern_for_rn(rn, extra_rows, user)
 
+    async with unit_of_work() as uow:
+        await uow.audit.record(
+            action="receipt_note.finalized", actor=user,
+            ref_collection="receipt_notes", ref_id=rn_id,
+            old={"status": "DRAFT", "items": rn.get("items")},
+            new={"status": "RACKING_NOTE_DRAFT", "items": items_out},
+            reason="Receipt note finalized; shortfall/overage and racking derived",
+            links={"rn_no": rn.get("rn_no"), "srn_no": srn_no, "ern_no": ern_no},
+        )
+
     msg = f"{user.get('email')} finalized {rn['rn_no']} with {len(items_out)} item(s)."
     if srn_no:
         msg += f" Auto-created {srn_no} for shortfall."
@@ -525,15 +571,24 @@ async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get
 
 @router.delete("/receipt-notes/{rn_id}")
 async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
+    """Delete a Receipt Note and cascade-remove every pending artifact derived
+    from it, so no orphan racking notes / SRNs / ERNs are left behind.
+
+    Permitted only while no stock has been recorded. A child that already carries
+    committed quantity (a received SRN delivery, an accepted/rejected ERN
+    decision) blocks the delete with an explicit message rather than being
+    silently destroyed.
+    """
     existing = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Receipt note not found")
     _enforce_assignee(existing, user, "delete this receipt note")
-    # Block delete if any racking note (DRAFT or RECORDED) references it
-    if await db.racking_notes.find_one({"receipt_note_id": rn_id}):
-        raise HTTPException(status_code=409, detail="Cannot delete — racking notes exist for this receipt note. Delete them first.")
-    await db.receipt_notes.delete_one({"id": rn_id})
-    return {"ok": True}
+
+    async with unit_of_work() as uow:
+        await svc.assert_rn_mutable(uow, rn_id, "delete this receipt note")
+        removed = await svc.cascade_delete_rn(uow, existing, user)
+
+    return {"ok": True, "cascade_removed": removed}
 
 
 # -------------------- RACKING NOTES --------------------
@@ -1037,64 +1092,58 @@ async def record_racking_note(rkn_id: str, response: Response, user=Depends(_mod
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, item_models, exclude_rkn_id=rkn_id)
 
     now = now_iso()
-    tx_docs = []
-    for idx, it in enumerate(items):
-        master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
-        tx_docs.append({
-            "id": f"{rkn['id']}:stock-in:{idx}",
-            "type": "IN",
-            "part_no": it["part_no"],
-            "make": it["make"],
-            "model": master.get("model", it.get("model", "")),
-            "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
-            "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
-            "description_1": master.get("description_1", it.get("description_1", "")),
-            "description_2": master.get("description_2", it.get("description_2", "")),
-            "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
-            "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
-            "item_category": master.get("item_category", it.get("item_category", "")),
-            "image": master.get("image", ""),
-            "quantity": it["quantity"],
-            "godown_id": it["godown_id"],
-            "godown_name": it.get("godown_name", ""),
-            "rack_id": it["rack_id"],
-            "rack_no": it.get("rack_no", ""),
-            "box_id": it["box_id"],
-            "box_no": it.get("box_no", ""),
-            "box_category": it.get("box_category", ""),
-            "racking_note_id": rkn["id"],
-            "racking_note_no": rkn["rkn_no"],
-            "source_type": src_type,
-            "source_id": src_id,
-            "source_no": rkn.get("source_no", ""),
-            "receipt_note_id": rkn.get("receipt_note_id", ""),
-            "receipt_note_no": rkn.get("receipt_note_no", ""),
-            "created_at": now,
-            "created_by": user.get("email"),
-        })
-    existing_tx_count = await db.transactions.count_documents({
-        "racking_note_id": rkn_id,
-        "type": "IN",
-    })
-    if existing_tx_count > 0:
-        if existing_tx_count == len(tx_docs):
-            await db.racking_notes.update_one(
-                {"id": rkn_id},
-                {"$set": {"status": "RECORDED", "recorded_at": rkn.get("recorded_at") or now}},
-            )
-            await _recompute_source_status_after_rkn(src_type, src_id, (ultimate_rn or {}).get("id"))
-            return {"ok": True, "transactions_created": 0, "already_recorded": True, "auto_rkn_no": None}
-        raise HTTPException(status_code=409, detail="Partial stock transactions already exist for this Racking Note; manual audit required")
-    if tx_docs:
-        try:
-            await db.transactions.insert_many(tx_docs)
-        except DuplicateKeyError:
-            raise HTTPException(status_code=409, detail="Stock has already been recorded for this Racking Note")
-    await db.racking_notes.update_one(
-        {"id": rkn_id},
-        {"$set": {"status": "RECORDED", "recorded_at": now}},
-    )
+
+    # Ledger rows + status flip + audit all commit together, or none of them do.
+    # Concurrency is guarded on three levels:
+    #   1. an optimistic DRAFT -> RECORDING claim, so a second operator loses the race;
+    #   2. the surrounding transaction, which aborts the loser on write conflict;
+    #   3. deterministic transaction ids (<rkn_id>:stock-in:<idx>) on a unique index,
+    #      so a retry can never double-count stock.
+    try:
+        async with unit_of_work() as uow:
+            existing_tx_count = await uow.transactions.count_for_racking_note(rkn_id)
+            tx_docs = await svc.build_stock_in_transactions(uow, rkn, items, src_type, src_id, user, now)
+
+            if existing_tx_count > 0:
+                if existing_tx_count == len(tx_docs):
+                    await uow.racking_notes.set_fields(
+                        rkn_id, {"status": "RECORDED", "recorded_at": rkn.get("recorded_at") or now}
+                    )
+                    already = True
+                else:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Partial stock transactions already exist for this Racking Note; manual audit required",
+                    )
+            else:
+                already = False
+                if not await uow.racking_notes.claim_for_recording(rkn_id, now):
+                    latest = await uow.racking_notes.get(rkn_id)
+                    if latest and latest.get("status") == "RECORDED":
+                        raise HTTPException(status_code=409, detail="Already recorded")
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This Racking Note is already being recorded by another user",
+                    )
+                await uow.transactions.insert_many(tx_docs)
+                await uow.racking_notes.set_fields(rkn_id, {"status": "RECORDED", "recorded_at": now})
+                await uow.audit.record(
+                    action="racking_note.recorded", actor=user,
+                    ref_collection="racking_notes", ref_id=rkn_id,
+                    old={"status": "DRAFT"},
+                    new={"status": "RECORDED", "items": items,
+                         "transactions_created": len(tx_docs)},
+                    reason="Stock In recorded against racking note",
+                    links={"source_type": src_type, "source_id": src_id,
+                           "receipt_note_id": rkn.get("receipt_note_id", ""),
+                           "rkn_no": rkn.get("rkn_no")},
+                )
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Stock has already been recorded for this Racking Note")
+
     await _recompute_source_status_after_rkn(src_type, src_id, (ultimate_rn or {}).get("id"))
+    if already:
+        return {"ok": True, "transactions_created": 0, "already_recorded": True, "auto_rkn_no": None}
 
     # Rule 2: if the same source still has unracked qty, auto-create a balance RKN.
     balance_rkn_no = await _auto_create_rkn_for_source(
@@ -1346,12 +1395,14 @@ async def finalize_short_received_note(srn_id: str, response: Response, user=Dep
 async def add_srn_child_row(srn_id: str, body: SrnChildBody, response: Response,
                             user=Depends(_module_dep("stock_in"))):
     """Append a new fulfillment row to the matching parent SRN item. Auto-allocates
-    a letter-suffixed child_srn_no (PARENT-A, PARENT-B, ...). Recomputes status."""
-    parent = await db.short_received_notes.find_one({"id": srn_id})
-    if not parent:
-        raise HTTPException(status_code=404, detail="Short Received Note not found")
-    _enforce_assignee(parent, user, "add a fulfillment row on this Short Received Note")
+    a letter-suffixed child_srn_no (PARENT-A, PARENT-B, ...). Recomputes status.
 
+    The read-modify-write of ``items[].children`` runs inside a transaction: two
+    operators recording a delivery against the same row concurrently would
+    otherwise both read the same array and the second ``$set`` would silently
+    discard the first slice (and reuse its -A/-B suffix). Under snapshot
+    isolation the loser hits a write conflict and is reported as a 409.
+    """
     rcv = float(body.received_qty or 0)
     nrcv = float(body.not_receivable_qty or 0)
     if rcv < 0 or nrcv < 0:
@@ -1359,46 +1410,65 @@ async def add_srn_child_row(srn_id: str, body: SrnChildBody, response: Response,
     if rcv == 0 and nrcv == 0:
         raise HTTPException(status_code=400, detail="At least one of Received Qty or Not Receivable Qty must be > 0")
 
-    item_idx = None
-    for i, it in enumerate(parent.get("items") or []):
-        if it.get("part_no") == body.part_no and it.get("make") == body.make:
-            item_idx = i
-            break
-    if item_idx is None:
-        raise HTTPException(status_code=400, detail="Item not found on this SRN")
+    try:
+        async with unit_of_work() as uow:
+            parent = await uow.srn.get(srn_id)
+            if not parent:
+                raise HTTPException(status_code=404, detail="Short Received Note not found")
+            _enforce_assignee(parent, user, "add a fulfillment row on this Short Received Note")
 
-    p_item = parent["items"][item_idx]
-    short_qty = float(p_item.get("short_qty") or 0)
-    children = list(p_item.get("children") or [])
-    used_total = sum(float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
-                     for c in children)
-    if used_total + rcv + nrcv > short_qty + 1e-6:
-        raise HTTPException(status_code=400,
-                            detail=f"Exceeds Pending Qty ({short_qty - used_total:.2f})")
+            item_idx = None
+            for i, it in enumerate(parent.get("items") or []):
+                if it.get("part_no") == body.part_no and it.get("make") == body.make:
+                    item_idx = i
+                    break
+            if item_idx is None:
+                raise HTTPException(status_code=400, detail="Item not found on this SRN")
 
-    parent_no = parent.get("srn_no", "")
-    used_suffixes = {(c.get("child_srn_no") or "").rsplit("-", 1)[-1] for c in children}
-    suffix = _next_letter_suffix(used_suffixes)
-    child = {
-        "child_srn_no": f"{parent_no}-{suffix}",
-        "received_qty": rcv,
-        "not_receivable_qty": nrcv,
-        "created_at": now_iso(),
-        "status": "RECEIVED" if rcv > 0 else "NOT_RECEIVABLE",
-    }
-    children.append(child)
+            p_item = parent["items"][item_idx]
+            short_qty = float(p_item.get("short_qty") or 0)
+            children = list(p_item.get("children") or [])
+            used_total = sum(float(c.get("received_qty") or 0) + float(c.get("not_receivable_qty") or 0)
+                             for c in children)
+            if used_total + rcv + nrcv > short_qty + 1e-6:
+                raise HTTPException(status_code=400,
+                                    detail=f"Exceeds Pending Qty ({short_qty - used_total:.2f})")
 
-    new_items = []
-    for i, it in enumerate(parent["items"]):
-        new_it = dict(it)
-        if i == item_idx:
-            new_it["children"] = children
-        new_items.append(new_it)
-    new_status = _compute_srn_status({**parent, "items": new_items})
-    await db.short_received_notes.update_one(
-        {"id": srn_id},
-        {"$set": {"items": new_items, "status": new_status}},
-    )
+            parent_no = parent.get("srn_no", "")
+            used_suffixes = {(c.get("child_srn_no") or "").rsplit("-", 1)[-1] for c in children}
+            suffix = _next_letter_suffix(used_suffixes)
+            child = {
+                "child_srn_no": f"{parent_no}-{suffix}",
+                "received_qty": rcv,
+                "not_receivable_qty": nrcv,
+                "created_at": now_iso(),
+                "status": "RECEIVED" if rcv > 0 else "NOT_RECEIVABLE",
+            }
+            children.append(child)
+
+            new_items = []
+            for i, it in enumerate(parent["items"]):
+                new_it = dict(it)
+                if i == item_idx:
+                    new_it["children"] = children
+                new_items.append(new_it)
+            new_status = _compute_srn_status({**parent, "items": new_items})
+            await uow.srn.set_fields(srn_id, {"items": new_items, "status": new_status})
+            await uow.audit.record(
+                action="srn.delivery_recorded", actor=user,
+                ref_collection="short_received_notes", ref_id=srn_id,
+                old={"children": children[:-1]}, new={"child": child},
+                reason="Partial delivery recorded against shortfall",
+                links={"srn_no": parent_no, "receipt_note_id": parent.get("parent_rn_id")},
+            )
+    except OperationFailure as exc:
+        if _is_write_conflict(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Another delivery was recorded against this SRN at the same time — reload and try again.",
+            )
+        raise
+
     await _recompute_srn_racking_status(srn_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
@@ -1872,10 +1942,6 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
                             user=Depends(_module_dep("stock_in"))):
     """Append a decision row (accepted + rejected) to a parent ERN item.
     Auto-allocates a letter-suffixed child_ern_no (PARENT-A, PARENT-B, ...)."""
-    parent = await db.extra_received_notes.find_one({"id": ern_id})
-    if not parent:
-        raise HTTPException(status_code=404, detail="Extra Received Note not found")
-    _enforce_assignee(parent, user, "add a row on this Extra Received Note")
     acc = float(body.accepted_qty or 0)
     rej = float(body.rejected_qty or 0)
     if acc < 0 or rej < 0:
@@ -1883,43 +1949,64 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
     if acc == 0 and rej == 0:
         raise HTTPException(status_code=400, detail="At least one of Accepted Qty or Rejected Qty must be > 0")
 
-    item_idx = None
-    for i, it in enumerate(parent.get("items") or []):
-        if it.get("part_no") == body.part_no and it.get("make") == body.make:
-            item_idx = i
-            break
-    if item_idx is None:
-        raise HTTPException(status_code=400, detail="Item not found on this ERN")
-    p_item = parent["items"][item_idx]
-    extra_qty = float(p_item.get("extra_qty") or 0)
-    children = list(p_item.get("children") or [])
-    used = sum(float(c.get("accepted_qty") or 0) + float(c.get("rejected_qty") or 0)
-               for c in children)
-    if used + acc + rej > extra_qty + 1e-6:
-        raise HTTPException(status_code=400,
-                            detail=f"Exceeds Pending Qty ({extra_qty - used:.2f})")
+    # Read-modify-write inside a transaction — see the SRN add path for rationale.
+    try:
+        async with unit_of_work() as uow:
+            parent = await uow.ern.get(ern_id)
+            if not parent:
+                raise HTTPException(status_code=404, detail="Extra Received Note not found")
+            _enforce_assignee(parent, user, "add a row on this Extra Received Note")
 
-    parent_no = parent.get("ern_no", "")
-    used_suffixes = {(c.get("child_ern_no") or "").rsplit("-", 1)[-1] for c in children}
-    suffix = _next_letter_suffix(used_suffixes)
-    children.append({
-        "child_ern_no": f"{parent_no}-{suffix}",
-        "accepted_qty": acc,
-        "rejected_qty": rej,
-        "created_at": now_iso(),
-        "status": "COMPLETE",
-    })
-    new_items = []
-    for i, it in enumerate(parent["items"]):
-        new_it = dict(it)
-        if i == item_idx:
-            new_it["children"] = children
-        new_items.append(new_it)
-    new_status = _compute_ern_status({**parent, "items": new_items})
-    await db.extra_received_notes.update_one(
-        {"id": ern_id},
-        {"$set": {"items": new_items, "status": new_status}},
-    )
+            item_idx = None
+            for i, it in enumerate(parent.get("items") or []):
+                if it.get("part_no") == body.part_no and it.get("make") == body.make:
+                    item_idx = i
+                    break
+            if item_idx is None:
+                raise HTTPException(status_code=400, detail="Item not found on this ERN")
+            p_item = parent["items"][item_idx]
+            extra_qty = float(p_item.get("extra_qty") or 0)
+            children = list(p_item.get("children") or [])
+            used = sum(float(c.get("accepted_qty") or 0) + float(c.get("rejected_qty") or 0)
+                       for c in children)
+            if used + acc + rej > extra_qty + 1e-6:
+                raise HTTPException(status_code=400,
+                                    detail=f"Exceeds Pending Qty ({extra_qty - used:.2f})")
+
+            parent_no = parent.get("ern_no", "")
+            used_suffixes = {(c.get("child_ern_no") or "").rsplit("-", 1)[-1] for c in children}
+            suffix = _next_letter_suffix(used_suffixes)
+            child = {
+                "child_ern_no": f"{parent_no}-{suffix}",
+                "accepted_qty": acc,
+                "rejected_qty": rej,
+                "created_at": now_iso(),
+                "status": "COMPLETE",
+            }
+            children.append(child)
+            new_items = []
+            for i, it in enumerate(parent["items"]):
+                new_it = dict(it)
+                if i == item_idx:
+                    new_it["children"] = children
+                new_items.append(new_it)
+            new_status = _compute_ern_status({**parent, "items": new_items})
+            await uow.ern.set_fields(ern_id, {"items": new_items, "status": new_status})
+            await uow.audit.record(
+                action="ern.decision_recorded", actor=user,
+                ref_collection="extra_received_notes", ref_id=ern_id,
+                old={"children": children[:-1]}, new={"child": child},
+                reason="Accept/reject decision recorded against overage",
+                links={"ern_no": parent_no, "receipt_note_id": parent.get("parent_rn_id")},
+            )
+    except OperationFailure as exc:
+        if _is_write_conflict(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Another decision was recorded against this ERN at the same time — reload and try again.",
+            )
+        raise
+
     await _recompute_ern_racking_status(ern_id)
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])

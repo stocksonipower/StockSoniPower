@@ -32,7 +32,7 @@ const COLUMNS = [
   { key: "rack_no", label: "RACK NO", className: "font-mono" },
   { key: "box_no", label: "BOX NO", className: "font-mono" },
   { key: "box_category", label: "BOX CATEGORY", className: "" },
-  { key: "total_quantity", label: "QTY", className: "text-right font-mono font-bold", isQty: true, isNumeric: true, total: true },
+  { key: "total_quantity", label: "QTY", className: "text-center font-mono font-bold", isQty: true, isNumeric: true, total: true },
 ];
 
 const BLANK = "(Blank)";
@@ -237,7 +237,7 @@ export default function StockBalancePage() {
             <tr>
               <th className="w-14">SL NO</th>
               {COLUMNS.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -260,7 +260,7 @@ export default function StockBalancePage() {
                 {COLUMNS.map((c) => {
                   if (c.total) {
                     return (
-                      <td key={c.key} className={`${c.isQty ? "text-right" : ""} font-mono font-black text-amber-900`} data-testid={`totals-${c.key}`}>
+                      <td key={c.key} className={`${c.isQty ? "text-center" : ""} font-mono font-black text-amber-900`} data-testid={`totals-${c.key}`}>
                         {totals[c.key]}
                       </td>
                     );
@@ -308,7 +308,7 @@ export default function StockBalancePage() {
                   }
                   if (c.isQty) {
                     return (
-                      <td key={c.key} className={`text-right font-mono font-bold ${r.total_quantity <= 5 ? "text-red-700" : "text-slate-900"}`}>
+                      <td key={c.key} className={`text-center font-mono font-bold ${r.total_quantity <= 5 ? "text-red-700" : "text-slate-900"}`}>
                         {r.total_quantity}
                       </td>
                     );
@@ -419,7 +419,7 @@ function ColumnFilter({ label, values, selected, onChange, sortDir, onSort, isIm
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
-          className={`group flex items-center gap-1 ${isQty ? "ml-auto" : ""} ${isActive ? "text-blue-700" : "text-slate-500 hover:text-slate-900"}`}
+          className={`group flex items-center gap-1 ${isQty ? "mx-auto" : ""} ${isActive ? "text-blue-700" : "text-slate-500 hover:text-slate-900"}`}
           data-testid={`filter-trigger-${label.toLowerCase().replace(/\s+/g, "-")}`}
         >
           <span className="font-bold tracking-[0.15em]">{label}</span>

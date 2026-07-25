@@ -125,7 +125,7 @@ export default function TransactionsPage() {
                 <ColumnHeader {...getColumnHeaderProps("godown")} label="Godown" testid="tx-col-godown" />
                 <ColumnHeader {...getColumnHeaderProps("rack_no")} label="Rack No" testid="tx-col-rack" />
                 <ColumnHeader {...getColumnHeaderProps("box_no")} label="Box No" testid="tx-col-box" />
-                <ColumnHeader {...getColumnHeaderProps("quantity")} align="right" label="Quantity" testid="tx-col-qty" />
+                <ColumnHeader {...getColumnHeaderProps("quantity")} align="center" label="Quantity" testid="tx-col-qty" />
                 <ColumnHeader {...getColumnHeaderProps("by_user")} label="By User" testid="tx-col-user" />
               </tr>
             </thead>
@@ -159,7 +159,7 @@ export default function TransactionsPage() {
                     <td>{t.godown_name}</td>
                     <td className="font-mono">{t.rack_no}</td>
                     <td className="font-mono">{t.box_no}</td>
-                    <td className="text-right font-mono font-bold">{t.quantity}</td>
+                    <td className="text-center font-mono font-bold">{t.quantity}</td>
                     <td className="text-xs text-slate-500">{t.created_by}</td>
                   </tr>
                 );

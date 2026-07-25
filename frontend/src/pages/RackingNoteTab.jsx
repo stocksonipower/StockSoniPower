@@ -226,7 +226,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -406,7 +406,7 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
                     <th>MODEL</th>
                     <th>DESCRIPTION</th>
                     <th>CATEGORY</th>
-                    <th className="text-right">QTY</th>
+                    <th className="text-center">QTY</th>
                     <th>GODOWN</th>
                     <th>RACK</th>
                     <th>BOX</th>
@@ -415,12 +415,13 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
                 <tbody>
                   {(rkn.items || []).map((it, idx) => (
                     <tr key={idx}>
-                                            <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                      <td className="font-mono text-slate-500">{idx + 1}</td>
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                      <td className="font-mono text-slate-600">{it.make || "—"}</td>
+                      <td className="font-mono text-slate-600">{it.model || "—"}</td>
                       <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                       <td className="text-slate-600">{it.item_category || "—"}</td>
-                      <td className="text-right font-mono font-bold">{it.quantity}</td>
+                      <td className="text-center font-mono font-bold">{it.quantity}</td>
                       <td className="font-mono">{it.godown_name || "—"}</td>
                       <td className="font-mono">{it.rack_no || "—"}</td>
                       <td className="font-mono">{it.box_no || "—"}</td>
@@ -774,7 +775,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 <th>PART NO</th>
                 <th>DESCRIPTION 1</th>
                 <th>ITEM CATEGORY</th>
-                <th className="text-right">QTY</th>
+                <th className="text-center">QTY</th>
                 <th className="min-w-[140px]">GODOWN *</th>
                 <th className="min-w-[120px]">RACK *</th>
                 <th className="min-w-[120px]">BOX *</th>
@@ -798,10 +799,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
-                    <td className="text-right">
+                    <td className="text-center">
                       <Input type="number" min="0.001" step="any" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-right w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
                       {pending !== undefined && (
                         <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`rkn-pending-hint-${idx}`}>
                           {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${received}`}

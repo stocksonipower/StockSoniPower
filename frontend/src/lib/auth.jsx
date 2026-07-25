@@ -3,9 +3,20 @@ import { api } from "./api";
 
 const AuthContext = createContext(null);
 
+function getCachedUser() {
+  try {
+    const token = localStorage.getItem("token");
+    const raw = localStorage.getItem("user");
+    if (token && raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(getCachedUser);
+  // Skip the loading spinner when we already have a cached session —
+  // the background validation will redirect to login if the token is truly invalid.
+  const [loading, setLoading] = useState(() => !getCachedUser());
 
   const refresh = useCallback(async () => {
     const token = localStorage.getItem("token");
@@ -13,15 +24,34 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
+      localStorage.setItem("user", JSON.stringify(data));
       return data;
-    } catch {
-      localStorage.removeItem("token");
-      setUser(null);
+    } catch (err) {
+      // Only destroy the session when the server explicitly rejects the token.
+      // Network failures / 5xx errors are transient — don't log the user out.
+      const status = err?.response?.status;
+      if (status === 401 || status === 403) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        setUser(null);
+      }
       return null;
     }
   }, []);
 
   useEffect(() => { refresh().finally(() => setLoading(false)); }, [refresh]);
+
+  // Cross-tab logout: if another tab clears the token, clear this tab too.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key === "token" && !e.newValue) {
+        setUser(null);
+        localStorage.removeItem("user");
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });

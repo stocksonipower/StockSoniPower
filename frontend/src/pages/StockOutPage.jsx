@@ -286,7 +286,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -411,7 +411,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
             </div>
             <table className="data-table w-full">
               <thead>
-                <tr><th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>GODOWN</th><th className="text-right">QTY</th></tr>
+                <tr><th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>GODOWN</th><th className="text-center">QTY</th></tr>
               </thead>
               <tbody>
                 {(inn.items || []).map((it, idx) => (
@@ -421,7 +421,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                     <td>{it.make}</td>
                     <td className="text-slate-700">{it.description_1 || "—"}</td>
                     <td className="font-mono">{it.selected_godown_name || "—"}</td>
-                    <td className="text-right font-mono font-bold">{it.quantity}</td>
+                    <td className="text-center font-mono font-bold">{it.quantity}</td>
                   </tr>
                 ))}
               </tbody>
@@ -430,7 +430,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
               <div className="text-xs font-black uppercase tracking-wider text-slate-600 mb-2">Picking History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-right">ASSIGNED</th><th className="text-right">PICKED</th><th>STATUS</th></tr>
+                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">ASSIGNED</th><th className="text-center">PICKED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.serial || 0) - (b.serial || 0)).map((pn) => {
@@ -440,8 +440,8 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                       <tr key={pn.id}>
                         <td className="font-mono font-semibold">{pn.pn_no}</td>
                         <td className="font-mono">{parent?.pn_no || "—"}</td>
-                        <td className="text-right font-mono font-bold">{pickingAssignedQty(pn)}</td>
-                        <td className="text-right font-mono font-bold">{pickingPickedQty(pn)}</td>
+                        <td className="text-center font-mono font-bold">{pickingAssignedQty(pn)}</td>
+                        <td className="text-center font-mono font-bold">{pickingPickedQty(pn)}</td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${completed ? "bg-green-100 text-green-800" : (pn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
                             {completed ? "Completed" : (pn.status === "PENDING" ? "Pending" : "Draft")}
@@ -769,7 +769,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                     disabled={!it.make}
                     onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                     placeholder="0"
-                    className={`rounded-sm font-mono h-8 text-right ${overStock || overGodown ? "border-red-400" : ""}`}
+                    className={`rounded-sm font-mono h-8 text-center ${overStock || overGodown ? "border-red-400" : ""}`}
                     data-testid={`in-qty-${idx}`} />
                   {it.make && (
                     <div className={`text-[10px] mt-0.5 ${overStock || overGodown ? "text-red-600 font-bold" : "text-slate-500"}`}
@@ -918,7 +918,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -1051,7 +1051,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
               </div>
             </div>
             <table className="data-table w-full text-xs">
-              <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-right">QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
+              <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
               <tbody>
                 {pickingDisplayItems(pn).map((it, idx) => (
                   <tr key={idx}>
@@ -1060,7 +1060,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                     <td>{it.make}</td>
                     <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                     <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
-                    <td className="text-right font-mono font-bold">{it.quantity}</td>
+                    <td className="text-center font-mono font-bold">{it.quantity}</td>
                     <td className="font-mono">{it.godown_name || "—"}</td>
                     <td className="font-mono">{it.rack_no || "—"}</td>
                     <td className="font-mono">{it.box_no || "—"}</td>
@@ -1300,7 +1300,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 <th>DESCRIPTION</th>
                 <th>CATEGORY</th>
                 <th>STATUS</th>
-                <th className="text-right">QTY</th>
+                <th className="text-center">QTY</th>
                 <th className="min-w-[140px]">GODOWN *</th>
                 <th className="min-w-[120px]">RACK *</th>
                 <th className="min-w-[120px]">BOX *</th>
@@ -1329,10 +1329,10 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="font-mono text-[11px] text-slate-600">{it.row_status || "Draft Pick"}</td>
-                    <td className="text-right">
+                    <td className="text-center">
                       <Input type="number" min="0.001" step="any" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-right w-20 ${overAllocated || overAtLoc ? "border-red-400" : ""}`}
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated || overAtLoc ? "border-red-400" : ""}`}
                         data-testid={`pn-qty-${idx}`} />
                       {pending !== undefined && (
                         <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`}

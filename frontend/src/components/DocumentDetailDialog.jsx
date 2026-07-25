@@ -82,7 +82,7 @@ function RackingBody({ d }) {
       </div>
       <div className="overflow-x-auto">
         <table className="data-table w-full text-xs">
-          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-right">QTY</th></tr></thead>
+          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-center">QTY</th></tr></thead>
           <tbody>
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
@@ -91,7 +91,7 @@ function RackingBody({ d }) {
                 <td>{it.make}</td>
                 <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                 <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
-                <td className="text-right font-mono font-bold">{it.quantity}</td>
+                <td className="text-center font-mono font-bold">{it.quantity}</td>
               </tr>
             ))}
           </tbody>
@@ -114,7 +114,7 @@ function PickingBody({ d }) {
       </div>
       <div className="overflow-x-auto">
         <table className="data-table w-full text-xs">
-          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-right">QTY</th></tr></thead>
+          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-center">QTY</th></tr></thead>
           <tbody>
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
@@ -123,7 +123,7 @@ function PickingBody({ d }) {
                 <td>{it.make}</td>
                 <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                 <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
-                <td className="text-right font-mono font-bold">{it.quantity}</td>
+                <td className="text-center font-mono font-bold">{it.quantity}</td>
               </tr>
             ))}
           </tbody>
@@ -148,7 +148,7 @@ function TransferBody({ d }) {
         <table className="data-table w-full text-xs">
           <thead>
             <tr>
-              <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-right">QTY</th>
+              <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-center">QTY</th>
               <th>SOURCE</th><th>DESTINATION</th>
             </tr>
           </thead>
@@ -158,7 +158,7 @@ function TransferBody({ d }) {
                 <td className="font-mono text-slate-500">{idx + 1}</td>
                 <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                 <td>{it.make}</td>
-                <td className="text-right font-mono font-bold">{it.quantity}</td>
+                <td className="text-center font-mono font-bold">{it.quantity}</td>
                 <td><LocCell g={it.src_godown_name} r={it.src_rack_no} b={it.src_box_no} /></td>
                 <td><LocCell g={it.dest_godown_name} r={it.dest_rack_no} b={it.dest_box_no} /></td>
               </tr>

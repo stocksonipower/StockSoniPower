@@ -37,6 +37,7 @@ from models import *  # noqa: F401,F403
 
 # Helpers needed by startup migration
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status
+from services.unit_of_work import ensure_collections, probe_transaction_support
 
 
 def _parse_cors_origins(raw_value: str | None) -> list[str]:
@@ -103,6 +104,16 @@ async def startup():
         init_storage()
     except Exception as e:
         logger.error(f"Object storage init failed: {e}")
+
+    # Stock In transactional support: MongoDB cannot implicitly create a collection
+    # inside a multi-document transaction, so make sure they all exist first, then
+    # detect whether this deployment (replica set) can run transactions at all.
+    try:
+        await ensure_collections(db)
+        await probe_transaction_support(db)
+    except Exception as e:
+        logger.error(f"Transaction support init failed: {e}")
+
     await db.users.create_index("email", unique=True)
     await db.stock_master.create_index([("part_no", 1), ("make", 1)], unique=True)
     await db.stock_master.create_index("id", unique=True)

@@ -18,7 +18,7 @@ export const BLANK = "(Blank)";
  *   onChange     – (Set | null) => void
  *   sortDir      – "asc" | "desc" | null  current sort direction for this column
  *   onSort       – (dir) => void  parent sets {key, dir} when user picks a sort
- *   isQty        – boolean  align right
+ *   isQty        – boolean  align center
  *   isNumeric    – boolean  use numeric sort
  */
 export default function ExcelColumnFilter({
@@ -88,7 +88,7 @@ export default function ExcelColumnFilter({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
-          className={`group flex items-center gap-1 ${isQty ? "ml-auto" : ""} ${isFilterActive || isSortActive ? "text-blue-700" : "text-slate-500 hover:text-slate-900"}`}
+          className={`group flex items-center gap-1 ${isQty ? "mx-auto" : ""} ${isFilterActive || isSortActive ? "text-blue-700" : "text-slate-500 hover:text-slate-900"}`}
           data-testid={`filter-trigger-${label.toLowerCase().replace(/\s+/g, "-")}`}
         >
           <span className="font-bold tracking-[0.15em]">{label}</span>

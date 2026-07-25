@@ -187,7 +187,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -316,7 +316,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
               <thead>
                 <tr>
                   <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
-                  <th className="text-right">QTY</th><th>PREFERRED DEST</th>
+                  <th className="text-center">QTY</th><th>PREFERRED DEST</th>
                 </tr>
               </thead>
               <tbody>
@@ -326,7 +326,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                    <td className="text-right font-mono font-bold">{it.quantity}</td>
+                    <td className="text-center font-mono font-bold">{it.quantity}</td>
                     <td className="font-mono text-slate-600">
                       {it.dest_godown_name || it.dest_rack_no || it.dest_box_no
                         ? `${it.dest_godown_name || "?"}/${it.dest_rack_no || "?"}${it.dest_box_no ? "/" + it.dest_box_no : ""}`
@@ -340,7 +340,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
               <div className="text-xs font-black uppercase tracking-wider text-slate-600 mb-2">Transfer Note History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-right">ASSIGNED</th><th className="text-right">TRANSFERRED</th><th>STATUS</th></tr>
+                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-center">ASSIGNED</th><th className="text-center">TRANSFERRED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.execution_attempt || 1) - (b.execution_attempt || 1)).map((stn) => {
@@ -351,8 +351,8 @@ function TransferRequestDetailDialog({ s, onClose }) {
                         <td className="font-mono font-semibold">{stn.stn_no}</td>
                         <td className="font-mono">{stn.execution_attempt || 1}</td>
                         <td className="font-mono">{parent?.stn_no || "—"}</td>
-                        <td className="text-right font-mono font-bold">{transferAssignedQty(stn)}</td>
-                        <td className="text-right font-mono font-bold">{transferMovedQty(stn)}</td>
+                        <td className="text-center font-mono font-bold">{transferAssignedQty(stn)}</td>
+                        <td className="text-center font-mono font-bold">{transferMovedQty(stn)}</td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${done ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
                             {transferStatusLabel(stn.status)}
@@ -632,7 +632,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                     <td className="w-28">
                       <Input type="number" min="0.001" step="any" value={it.quantity} disabled={!it.make}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        placeholder="0" className={`rounded-sm font-mono h-8 text-right ${overStock ? "border-red-400" : ""}`}
+                        placeholder="0" className={`rounded-sm font-mono h-8 text-center ${overStock ? "border-red-400" : ""}`}
                         data-testid={`str-qty-${idx}`} />
                       {it.make && (
                         <div className={`text-[10px] mt-0.5 ${overStock ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`str-avail-hint-${idx}`}>
@@ -788,7 +788,7 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -913,7 +913,7 @@ function TransferNoteDetailDialog({ stn, onClose }) {
             <table className="data-table w-full text-xs">
               <thead>
                 <tr>
-                  <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-right">QTY</th>
+                  <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-center">QTY</th>
                   <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
                   <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th>
                 </tr>
@@ -924,7 +924,7 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
-                    <td className="text-right font-mono font-bold">{it.quantity}</td>
+                    <td className="text-center font-mono font-bold">{it.quantity}</td>
                     <td className="font-mono">{it.src_godown_name || "—"}</td>
                     <td className="font-mono">{it.src_rack_no || "—"}</td>
                     <td className="font-mono">{it.src_box_no || "—"}</td>
@@ -1153,7 +1153,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                 <tr>
                   <th className="w-10">SL</th>
                   <th>PART / MAKE</th>
-                  <th className="text-right">REQ / PEND / NOW</th>
+                  <th className="text-center">REQ / PEND / NOW</th>
                   <th>SOURCE</th>
                   <th>DESTINATION</th>
                 </tr>
@@ -1173,11 +1173,11 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                         <div className="text-slate-600">{it.make}</div>
                         <div className="text-[10px] text-slate-500 mt-0.5">{it.description_1 || ""}</div>
                       </td>
-                      <td className="text-right pt-3">
+                      <td className="text-center pt-3">
                         <div className="font-mono text-[11px] text-slate-500">req {it.requested_qty} · pend <b className="text-slate-900">{it.pending_qty}</b></div>
                         <Input type="number" min="0.001" step="any" value={it.quantity}
                           onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                          className={`rounded-sm font-mono h-8 text-right mt-1 w-24 ml-auto ${overPending ? "border-red-400" : ""}`}
+                          className={`rounded-sm font-mono h-8 text-center mt-1 w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
                           data-testid={`stn-qty-${idx}`} />
                         {overPending && <div className="text-[10px] text-red-600 font-bold mt-0.5">over {it.quantity}/{it.pending_qty}</div>}
                       </td>

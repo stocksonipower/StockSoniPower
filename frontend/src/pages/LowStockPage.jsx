@@ -88,8 +88,8 @@ export default function LowStockPage() {
               <ColumnHeader {...getColumnHeaderProps("description_1")} label="Description 1" testid="low-stock-col-desc1" />
               <ColumnHeader {...getColumnHeaderProps("description_2")} label="Description 2" testid="low-stock-col-desc2" />
               <ColumnHeader {...getColumnHeaderProps("make")} label="Make" testid="low-stock-col-make" />
-              <ColumnHeader {...getColumnHeaderProps("reorder_level")} align="right" label="Reorder Level" testid="low-stock-col-reorder" />
-              <ColumnHeader {...getColumnHeaderProps("current_stock")} align="right" label="Current Stock" testid="low-stock-col-current" />
+              <ColumnHeader {...getColumnHeaderProps("reorder_level")} align="center" label="Reorder Level" testid="low-stock-col-reorder" />
+              <ColumnHeader {...getColumnHeaderProps("current_stock")} align="center" label="Current Stock" testid="low-stock-col-current" />
             </tr>
           </thead>
           <tbody>
@@ -103,8 +103,8 @@ export default function LowStockPage() {
                 <td className="text-slate-600">{r.description_1 || "—"}</td>
                 <td className="text-slate-600">{r.description_2 || "—"}</td>
                 <td>{r.make}</td>
-                <td className="text-right font-mono text-slate-700">{r.reorder_level}</td>
-                <td className={`text-right font-mono font-bold ${r.total_quantity === 0 ? "text-red-700" : "text-amber-700"}`}>{r.total_quantity}</td>
+                <td className="text-center font-mono text-slate-700">{r.reorder_level}</td>
+                <td className={`text-center font-mono font-bold ${r.total_quantity === 0 ? "text-red-700" : "text-amber-700"}`}>{r.total_quantity}</td>
               </tr>
             ))}
           </tbody>

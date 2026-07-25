@@ -299,7 +299,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -524,9 +524,9 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                       <th>PART NO</th>
                       <th>DESCRIPTION 1</th>
                       <th>MAKE</th>
-                      <th className="text-right">INVOICE QTY</th>
-                      <th className="text-right">RECEIVED QTY</th>
-                      <th className="text-right">DIFFERENCE QTY</th>
+                      <th className="text-center">INVOICE QTY</th>
+                      <th className="text-center">RECEIVED QTY</th>
+                      <th className="text-center">DIFFERENCE QTY</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -542,9 +542,9 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                           <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                           <td className="text-slate-700">{sm ? (sm.description_1 || it.description_1 || "—") : (it.description_1 || "—")}</td>
                           <td>{it.make}</td>
-                          <td className="text-right font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
-                          <td className="text-right font-mono">{toNum(it.received_qty) ?? "—"}</td>
-                          <td className={`text-right font-mono font-bold ${diffCls}`}>
+                          <td className="text-center font-mono">{toNum(it.invoice_qty) ?? "—"}</td>
+                          <td className="text-center font-mono">{toNum(it.received_qty) ?? "—"}</td>
+                          <td className={`text-center font-mono font-bold ${diffCls}`}>
                             {toNum(it.received_qty) == null ? "—" : (diff > 0 ? `+${diff}` : diff)}
                           </td>
                         </tr>
@@ -1520,9 +1520,9 @@ const canFinalize = useMemo(() => {
                 <th className="w-14">SL NO</th>
                 <th className="w-44">PART NO</th>
                 <th>DESCRIPTION 1</th>
-                <th className="w-28 text-right">{isGeneral ? "INV QTY" : "INVOICE QTY"}</th>
-                <th className="w-28 text-right">RECEIVED QTY</th>
-                <th className="w-24 text-right">QTY DIFF</th>
+                <th className="w-28 text-center">{isGeneral ? "INV QTY" : "INVOICE QTY"}</th>
+                <th className="w-28 text-center">RECEIVED QTY</th>
+                <th className="w-24 text-center">QTY DIFF</th>
                 <th className="w-56">MAKE</th>
                 <th className="w-14"></th>
               </tr>
@@ -1533,7 +1533,7 @@ const canFinalize = useMemo(() => {
                 const diff = isGeneral ? 0 : qtyDiff(it);
                 const recFilled = toNum(it.received_qty) != null;
                 const diffNonZero = !isGeneral && recFilled && diff !== 0;
-                const recCls = `rounded-sm font-mono h-8 text-right ${diffNonZero ? "border-red-500 ring-1 ring-red-200" : ""}`;
+                const recCls = `rounded-sm font-mono h-8 text-center ${diffNonZero ? "border-red-500 ring-1 ring-red-200" : ""}`;
                 const diffCls = !recFilled
                   ? "text-slate-400"
                   : (diff < 0 ? "text-red-700 font-bold" : (diff > 0 ? "text-amber-700 font-bold" : "text-slate-500"));
@@ -1582,7 +1582,7 @@ const canFinalize = useMemo(() => {
                         disabled={isGeneral}
                         onChange={(e) => updateItem(idx, { invoice_qty: e.target.value })}
                         placeholder="0"
-                        className={`rounded-sm font-mono h-8 text-right ${isGeneral ? "bg-slate-100 text-slate-400" : ""}`}
+                        className={`rounded-sm font-mono h-8 text-center ${isGeneral ? "bg-slate-100 text-slate-400" : ""}`}
                         data-testid={`rn-invoice-qty-${idx}`}
                         title={isGeneral ? "Auto-mirrors Received Qty in General mode" : undefined}
                       />
@@ -1600,7 +1600,7 @@ const canFinalize = useMemo(() => {
                         title={diffNonZero ? (diff < 0 ? `Short by ${Math.abs(diff)} — SRN will be auto-created on Final Save` : `Extra of ${diff} — ERN will be auto-created on Final Save`) : undefined}
                       />
                     </td>
-                    <td className={`w-24 text-right font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
+                    <td className={`w-24 text-center font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
                       {!recFilled ? "—" : (diff > 0 ? `+${diff}` : diff)}
                     </td>
                     <td className="w-56">
@@ -2078,7 +2078,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
             <tr>
               <th className="w-14">SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-right" : ""}>
+                <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -2256,22 +2256,22 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                 <th>PART NO</th>
                 <th>DESCRIPTION 1</th>
                 <th>MAKE</th>
-                <th className="text-right">INV QTY</th>
-                <th className="text-right">RCVD QTY</th>
+                <th className="text-center">INV QTY</th>
+                <th className="text-center">RCVD QTY</th>
                 {isSrn ? (
                   <>
-                    <th className="text-right">SHORT QTY</th>
-                    <th className="text-right">FULFILLED QTY</th>
-                    <th className="text-right">PENDING QTY</th>
-                    <th className="text-right">CHILD SRNs</th>
+                    <th className="text-center">SHORT QTY</th>
+                    <th className="text-center">FULFILLED QTY</th>
+                    <th className="text-center">PENDING QTY</th>
+                    <th className="text-center">CHILD SRNs</th>
                   </>
                 ) : (
                   <>
-                    <th className="text-right">EXTRA QTY</th>
-                    <th className="text-right">ACCEPTED QTY</th>
-                    <th className="text-right">REJECTED QTY</th>
-                    <th className="text-right">UNDECIDED</th>
-                    <th className="text-right">CHILD ERNs</th>
+                    <th className="text-center">EXTRA QTY</th>
+                    <th className="text-center">ACCEPTED QTY</th>
+                    <th className="text-center">REJECTED QTY</th>
+                    <th className="text-center">UNDECIDED</th>
+                    <th className="text-center">CHILD ERNs</th>
                   </>
                 )}
               </tr>
@@ -2297,12 +2297,12 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
-                      <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                      <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                      <td className="text-right font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
-                      <td className="text-right font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
-                      <td className={`text-right font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                      <td className="text-right">{renderChildren(it)}</td>
+                      <td className="text-center font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
+                      <td className="text-center font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
+                      <td className="text-center font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
+                      <td className="text-center font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
+                      <td className={`text-center font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                      <td className="text-center">{renderChildren(it)}</td>
                     </tr>
                   );
                 }
@@ -2326,13 +2326,13 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td className="text-slate-700">{it.description_1 || "—"}</td>
                     <td>{it.make}</td>
-                    <td className="text-right font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                    <td className="text-right font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                    <td className="text-right font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
-                    <td className="text-right font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
-                    <td className="text-right font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
-                    <td className={`text-right font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
-                    <td className="text-right">{renderChildren(it)}</td>
+                    <td className="text-center font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
+                    <td className="text-center font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
+                    <td className="text-center font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
+                    <td className="text-center font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
+                    <td className="text-center font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
+                    <td className={`text-center font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
+                    <td className="text-center">{renderChildren(it)}</td>
                   </tr>
                 );
               })}
@@ -2484,10 +2484,10 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
               <th className="w-8">#</th>
               <th className="w-44">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-20 text-right">SHORT QTY</th>
-              <th className="w-24 text-right">TOTAL RCVD</th>
-              <th className="w-24 text-right">TOTAL N/R</th>
-              <th className="w-20 text-right">PENDING</th>
+              <th className="w-20 text-center">SHORT QTY</th>
+              <th className="w-24 text-center">TOTAL RCVD</th>
+              <th className="w-24 text-center">TOTAL N/R</th>
+              <th className="w-20 text-center">PENDING</th>
               <th className="w-28">CHILD NO</th>
               <th className="w-32">RECEIVED QTY</th>
               <th className="w-32">NOT RECEIVABLE</th>
@@ -2505,10 +2505,10 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                   <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
                   <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-xs text-slate-700 truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono font-bold text-red-700">{(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-green-700">{rcv.toFixed(2)}</td>
-                  <td className="text-right font-mono text-slate-700">{nrcv.toFixed(2)}</td>
-                  <td className={`text-right font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-red-700">{(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-green-700">{rcv.toFixed(2)}</td>
+                  <td className="text-center font-mono text-slate-700">{nrcv.toFixed(2)}</td>
+                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
                   <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
                   <td className="text-right">
                     {pending > 1e-6 && drafts[idx] === undefined && (
@@ -2538,14 +2538,14 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                       {isEdit ? (
                         <Input type="number" min="0" step="any" value={editing.received_qty}
                           onChange={(e) => setEditing({ ...editing, received_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
+                          className="rounded-sm font-mono h-7 text-center" />
                       ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.received_qty) || 0).toFixed(2)}</span>}
                     </td>
                     <td>
                       {isEdit ? (
                         <Input type="number" min="0" step="any" value={editing.not_receivable_qty}
                           onChange={(e) => setEditing({ ...editing, not_receivable_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
+                          className="rounded-sm font-mono h-7 text-center" />
                       ) : <span className="font-mono text-slate-700">{(parseFloat(c.not_receivable_qty) || 0).toFixed(2)}</span>}
                     </td>
                     <td className="text-right">
@@ -2598,7 +2598,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                         value={d.received_qty || ""}
                         onChange={(e) => setDraft(idx, { received_qty: e.target.value })}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
+                        className="rounded-sm font-mono h-8 text-center"
                         data-testid={`srn-input-rcv-${idx}`} />
                     </td>
                     <td>
@@ -2606,7 +2606,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                         value={d.not_receivable_qty || ""}
                         onChange={(e) => setDraft(idx, { not_receivable_qty: e.target.value })}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
+                        className="rounded-sm font-mono h-8 text-center"
                         data-testid={`srn-input-nrcv-${idx}`} />
                     </td>
                     <td className="text-right">
@@ -2794,10 +2794,10 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
               <th className="w-8">#</th>
               <th className="w-44">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-20 text-right">EXTRA</th>
-              <th className="w-24 text-right">TOTAL ACC</th>
-              <th className="w-24 text-right">TOTAL REJ</th>
-              <th className="w-20 text-right">PENDING</th>
+              <th className="w-20 text-center">EXTRA</th>
+              <th className="w-24 text-center">TOTAL ACC</th>
+              <th className="w-24 text-center">TOTAL REJ</th>
+              <th className="w-20 text-center">PENDING</th>
               <th className="w-28">CHILD NO</th>
               <th className="w-32">ACCEPTED QTY</th>
               <th className="w-32">REJECTED QTY</th>
@@ -2813,10 +2813,10 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                   <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
                   <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-xs text-slate-700 truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-right font-mono font-bold text-amber-700">{(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
-                  <td className="text-right font-mono font-bold text-green-700">{acc.toFixed(2)}</td>
-                  <td className="text-right font-mono text-red-700">{rej.toFixed(2)}</td>
-                  <td className={`text-right font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-amber-700">{(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-green-700">{acc.toFixed(2)}</td>
+                  <td className="text-center font-mono text-red-700">{rej.toFixed(2)}</td>
+                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
                   <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
                   <td className="text-right">
                     {pending > 1e-6 && drafts[idx] === undefined && (
@@ -2844,14 +2844,14 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                       {isEdit ? (
                         <Input type="number" min="0" step="any" value={editing.accepted_qty}
                           onChange={(e) => setEditing({ ...editing, accepted_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
+                          className="rounded-sm font-mono h-7 text-center" />
                       ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.accepted_qty) || 0).toFixed(2)}</span>}
                     </td>
                     <td>
                       {isEdit ? (
                         <Input type="number" min="0" step="any" value={editing.rejected_qty}
                           onChange={(e) => setEditing({ ...editing, rejected_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-right" />
+                          className="rounded-sm font-mono h-7 text-center" />
                       ) : <span className="font-mono text-red-700">{(parseFloat(c.rejected_qty) || 0).toFixed(2)}</span>}
                     </td>
                     <td className="text-right">
@@ -2902,7 +2902,7 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                         value={d.accepted_qty || ""}
                         onChange={(e) => setDraft(idx, { accepted_qty: e.target.value })}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
+                        className="rounded-sm font-mono h-8 text-center"
                         data-testid={`ern-input-acc-${idx}`} />
                     </td>
                     <td>
@@ -2910,7 +2910,7 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                         value={d.rejected_qty || ""}
                         onChange={(e) => setDraft(idx, { rejected_qty: e.target.value })}
                         placeholder="0"
-                        className="rounded-sm font-mono h-8 text-right"
+                        className="rounded-sm font-mono h-8 text-center"
                         data-testid={`ern-input-rej-${idx}`} />
                     </td>
                     <td className="text-right">

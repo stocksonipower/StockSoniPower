@@ -62,6 +62,7 @@ export default function ItemDetailsPage() {
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef(null);
   const inputRef = useRef(null);
+  const resultsRef = useRef(null);
 
   // Hydrate selection from URL params (deep-link from anywhere in the app).
   useEffect(() => {
@@ -95,7 +96,9 @@ export default function ItemDetailsPage() {
 
   useEffect(() => {
   const handleClickOutside = (e) => {
-    if (inputRef.current && !inputRef.current.contains(e.target)) {
+    const inInput = inputRef.current && inputRef.current.contains(e.target);
+    const inResults = resultsRef.current && resultsRef.current.contains(e.target);
+    if (!inInput && !inResults) {
       setShowResults(false);
     }
   };
@@ -174,7 +177,7 @@ const handleKeyDown = (e) => {
   data-testid="item-details-search-input"
 />
             {showResults && results.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-sm shadow-lg max-h-96 overflow-y-auto z-50" data-testid="item-details-search-results">
+              <div ref={resultsRef} className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-sm shadow-lg max-h-96 overflow-y-auto z-50" data-testid="item-details-search-results">
                 {results.map((r, idx) => (
                   <button
                     key={r.id}
@@ -296,7 +299,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.stock_balance.length === 0 ? <Empty>No stock available for this item.</Empty> : (
           <Tbl
             cols={["Godown", "Rack", "Box", "Quantity"]}
-            align={["left", "left", "left", "right"]}
+            align={["left", "left", "left", "center"]}
             rows={details.stock_balance.map((r) => [
               r.godown_name || "—", r.rack_no || "—", r.box_no || "—",
               <span className="font-bold text-slate-900">{r.quantity ?? 0}</span>,
@@ -310,7 +313,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.receipt_notes.length === 0 ? <Empty>No receipt notes.</Empty> : (
           <Tbl
             cols={["RN No", "Date", "Type", "Invoice No", "Invoice Qty", "Received Qty", "Status"]}
-            align={["left", "left", "left", "left", "right", "right", "left"]}
+            align={["left", "left", "left", "left", "center", "center", "left"]}
             rows={details.receipt_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.rn_no}</span>, fmtDate(r.rn_date),
               <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm bg-slate-100 text-slate-700">{(r.stock_in_type || "INVOICE").toLowerCase()}</span>,
@@ -327,7 +330,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.short_received_notes.length === 0 ? <Empty>No SRN entries.</Empty> : (
           <Tbl
             cols={["SRN No", "Date", "Parent RN", "Short Qty", "Fulfilled", "Status"]}
-            align={["left", "left", "left", "right", "right", "left"]}
+            align={["left", "left", "left", "center", "center", "left"]}
             rows={details.short_received_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.srn_no}</span>, fmtDate(r.srn_date),
               <span className="font-mono">{r.parent_rn_no || "—"}</span>,
@@ -343,7 +346,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.extra_received_notes.length === 0 ? <Empty>No ERN entries.</Empty> : (
           <Tbl
             cols={["ERN No", "Date", "Parent RN", "Extra Qty", "Accepted", "Rejected", "Status"]}
-            align={["left", "left", "left", "right", "right", "right", "left"]}
+            align={["left", "left", "left", "center", "center", "center", "left"]}
             rows={details.extra_received_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.ern_no}</span>, fmtDate(r.ern_date),
               <span className="font-mono">{r.parent_rn_no || "—"}</span>,
@@ -359,7 +362,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.racking_notes.length === 0 ? <Empty>No racking notes.</Empty> : (
           <Tbl
             cols={["RKN No", "Date", "Source", "Godown", "Rack", "Box", "Qty", "Status"]}
-            align={["left", "left", "left", "left", "left", "left", "right", "left"]}
+            align={["left", "left", "left", "left", "left", "left", "center", "left"]}
             rows={details.racking_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.rkn_no}</span>, fmtDate(r.rkn_date),
               <span className="font-mono text-xs">{r.source_no || r.receipt_note_no}</span>,
@@ -376,7 +379,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.issue_notes.length === 0 ? <Empty>No issue notes.</Empty> : (
           <Tbl
             cols={["IN No", "Date", "Issued To", "Qty", "Status"]}
-            align={["left", "left", "left", "right", "left"]}
+            align={["left", "left", "left", "center", "left"]}
             rows={details.issue_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.in_no}</span>, fmtDate(r.in_date),
               r.issued_to_name || r.issued_to || "—",
@@ -392,7 +395,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.picking_notes.length === 0 ? <Empty>No picking notes.</Empty> : (
           <Tbl
             cols={["PN No", "Date", "Source", "Godown", "Rack", "Box", "Qty", "Status"]}
-            align={["left", "left", "left", "left", "left", "left", "right", "left"]}
+            align={["left", "left", "left", "left", "left", "left", "center", "left"]}
             rows={details.picking_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.pn_no}</span>, fmtDate(r.pn_date),
               <span className="font-mono text-xs">{r.issue_note_no || "—"}</span>,
@@ -409,7 +412,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.transfer_requests.length === 0 ? <Empty>No transfer requests.</Empty> : (
           <Tbl
             cols={["STR No", "Date", "From → To", "Qty", "Status"]}
-            align={["left", "left", "left", "right", "left"]}
+            align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_requests.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.str_no}</span>, fmtDate(r.str_date),
               `${r.source_godown_name || "—"} → ${r.dest_godown_name || "—"}`,
@@ -425,7 +428,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.transfer_notes.length === 0 ? <Empty>No transfer notes.</Empty> : (
           <Tbl
             cols={["STN No", "Date", "From → To", "Qty", "Status"]}
-            align={["left", "left", "left", "right", "left"]}
+            align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.stn_no}</span>, fmtDate(r.stn_date),
               `${r.source_godown_name || "—"} → ${r.dest_godown_name || "—"}`,
@@ -441,7 +444,7 @@ function ItemDetailsContent({ details, selected }) {
         {details.transactions.length === 0 ? <Empty>No ledger entries.</Empty> : (
           <Tbl
             cols={["Date", "Type", "Ref Doc", "Location", "Qty", "Balance After"]}
-            align={["left", "left", "left", "left", "right", "right"]}
+            align={["left", "left", "left", "left", "center", "center"]}
             rows={details.transactions.map((tx) => [
               fmtDate(tx.created_at),
               <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm ${
@@ -524,7 +527,7 @@ function Tbl({ cols, align, rows }) {
         <thead>
           <tr>
             {cols.map((c, i) => (
-              <th key={i} className={align?.[i] === "right" ? "text-right" : ""}>{c}</th>
+              <th key={i} className={align?.[i] === "center" ? "text-center" : ""}>{c}</th>
             ))}
           </tr>
         </thead>
@@ -532,7 +535,7 @@ function Tbl({ cols, align, rows }) {
           {rows.map((row, i) => (
             <tr key={i}>
               {row.map((cell, j) => (
-                <td key={j} className={`${align?.[j] === "right" ? "text-right font-mono" : ""}`}>
+                <td key={j} className={`${align?.[j] === "center" ? "text-center font-mono" : ""}`}>
                   {cell}
                 </td>
               ))}

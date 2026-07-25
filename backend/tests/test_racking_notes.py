@@ -334,8 +334,17 @@ class TestRackingNoteCRUDAndRecord:
 # Negative: deleting RN with RKN attached blocked
 # ------------------------------------------------------------------
 class TestRnDeleteBlockedByDraftRkn:
-    def test_block_rn_delete_when_draft_rkn_exists(self, client):
-        # create a brand-new RN, then a DRAFT RKN against it, then try to delete the RN
+    def test_rn_delete_cascades_draft_rkn(self, client):
+        """A DRAFT racking note holds no stock, so it must NOT freeze its parent.
+
+        Updated from the previous rule (delete blocked whenever any racking note
+        existed): because finalize auto-creates a DRAFT racking note, that rule
+        made every finalized receipt note permanently undeletable. Deleting the
+        receipt note now cascades the pending racking note away instead. Deletion
+        is still refused once a racking note is RECORDED — see
+        ``tests/test_stock_in_wms.py::test_edit_and_delete_blocked_once_stock_recorded``.
+        """
+        # create a brand-new RN, then a DRAFT RKN against it, then delete the RN
         rn_payload = {
             "invoice_no": "TEST_RKN_BLOCK_DEL",
             "invoice_date": "2026-04-25",
@@ -359,12 +368,10 @@ class TestRnDeleteBlockedByDraftRkn:
         assert rkn.status_code == 200, rkn.text
         rkn_id = rkn.json()["id"]
 
-        # RN delete must be blocked
+        # RN delete succeeds and takes the pending racking note with it.
         d = client.delete(f"{BASE_URL}/api/receipt-notes/{rn_id}")
-        assert d.status_code == 409, d.text
+        assert d.status_code in (200, 204), d.text
 
-        # cleanup: delete RKN draft, then RN
-        c1 = client.delete(f"{BASE_URL}/api/racking-notes/{rkn_id}")
-        assert c1.status_code in (200, 204)
-        c2 = client.delete(f"{BASE_URL}/api/receipt-notes/{rn_id}")
-        assert c2.status_code in (200, 204)
+        # No orphans: both the receipt note and its DRAFT racking note are gone.
+        assert client.get(f"{BASE_URL}/api/receipt-notes/{rn_id}").status_code == 404
+        assert client.get(f"{BASE_URL}/api/racking-notes/{rkn_id}").status_code == 404

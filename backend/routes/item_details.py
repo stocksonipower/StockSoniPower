@@ -3,6 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from deps import db, get_current_user
+from helpers.stock_helpers import _stock_locations_for
 
 router = APIRouter()
 
@@ -70,10 +71,13 @@ async def item_details(part_no: str, make: str, user=Depends(get_current_user)):
         {"part_no": pn, "make": mk}, {"_id": 0}
     )
 
-    # Per-location balance for this part/make
-    balance = await db.stock_balance.find(
-        {"part_no": pn, "make": mk}, {"_id": 0}
-    ).to_list(2000)
+    # Per-location balance for this part/make — computed live from the transaction
+    # ledger (the `stock_balance` collection is not maintained anywhere in this
+    # codebase and is always empty; the ledger is the only source of truth).
+    balance = []
+    for loc in await _stock_locations_for(pn, mk):
+        qty = loc.pop("current_qty")
+        balance.append({**loc, "quantity": qty})
 
     # Helper: pull docs from a notes collection where any item row matches the part/make,
     # then trim the items array down to just the matching rows.
@@ -119,10 +123,10 @@ async def item_details(part_no: str, make: str, user=Depends(get_current_user)):
         "issued_qty":      sum((float(it.get("issued_qty") or it.get("quantity") or 0)
                                 for r in issue_notes for it in r.get("items", []))),
         "picked_qty":      sum((float(it.get("quantity") or 0)
-                                for r in picking_notes if r.get("status") == "RECORDED"
+                                for r in picking_notes if r.get("status") == "COMPLETED"
                                 for it in r.get("items", []))),
         "transferred_qty": sum((float(it.get("quantity") or 0)
-                                for r in transfer_notes if r.get("status") == "RECORDED"
+                                for r in transfer_notes if r.get("status") == "COMPLETED"
                                 for it in r.get("items", []))),
         "txn_count":       len(txns),
     }
