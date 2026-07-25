@@ -23,6 +23,16 @@ services:
         sync: false
       - key: EMERGENT_LLM_KEY
         sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
 
   - type: web
     name: stocksonipower-frontend

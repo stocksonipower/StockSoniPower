@@ -11,6 +11,8 @@ from helpers.stock_helpers import _enrich_with_parent_assignee
 from helpers.note_helpers import current_fy_label, _alloc_serial, _key
 from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _transfer_other_src_loc_qty
 from helpers.validation import _validate_transfer_request_items, _validate_transfer_request_qty, _validate_transfer_note_items, _validate_transfer_note_constraints, _box_id_required_for_rack
+from services.unit_of_work import unit_of_work
+from services.locking import location_locks
 
 router = APIRouter()
 
@@ -27,6 +29,21 @@ async def _audit_transfer(action: str, user: dict, ref_collection: str, ref_id: 
         "created_at": now_iso(),
         "created_by": user.get("email", ""),
     })
+
+
+def _transfer_src_lock_key(it: dict) -> str:
+    """Same key format as stock_out.py's `_stock_out_lock_key`, over the SOURCE location.
+    Sharing the `stock_out_locks` collection (not just the format) means a Transfer Note
+    completion and a Picking Note completion drawing from the same physical location can
+    never both pass their balance check at once — closing the cross-module race that
+    could otherwise drive a location's stock negative."""
+    return "||".join([
+        it.get("part_no", ""),
+        it.get("make", ""),
+        it.get("src_godown_id", ""),
+        it.get("src_rack_id", ""),
+        it.get("src_box_id", ""),
+    ])
 
 
 def _sum_transfer_like_items(items: list[dict]) -> dict:
@@ -334,7 +351,7 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
             "requested_qty": requested_qty,
             "already_transferred_qty": already,
             "pending_qty": pending,
-            "quantity": prefill["available_qty"] if prefill else (min(pending, pickable[0]["available_qty"]) if pickable else 0),
+            "quantity": min(pending, prefill["available_qty"]) if prefill else (min(pending, pickable[0]["available_qty"]) if pickable else 0),
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -379,47 +396,60 @@ async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_cur
     _enforce_assignee(s, user, "create a transfer note for this request")
     if s.get("status") in ("FULLY_TRANSFERRED", "COMPLETED", "CLOSED"):
         raise HTTPException(status_code=409, detail="This transfer request is already fully transferred")
-    if await db.transfer_notes.find_one({"transfer_request_id": s["id"], "status": {"$in": ["PENDING", "DRAFT", "PROCESSING"]}}, {"_id": 0, "id": 1}):
-        raise HTTPException(status_code=409, detail="An active Transfer Note already exists for this request")
-    _validate_transfer_note_items(payload.items)
-    for idx, it in enumerate(payload.items, start=1):
-        if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
-        if (it.dest_rack_id or "").strip() and not (it.dest_box_id or "").strip() and await _box_id_required_for_rack(it.dest_rack_id):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
-    await _validate_transfer_note_constraints(s["id"], payload.items, exclude_stn_id=None, assigned_items=s.get("items", []))
 
-    today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last_err = None
-    for _ in range(5):
-        serial = await _alloc_serial("stn", fy)
-        stn_no = f"STN/{fy}/{serial:03d}"
-        doc = {
-            "id": str(uuid.uuid4()),
-            "stn_no": stn_no,
-            "stn_date": today.date().isoformat(),
-            "fy": fy,
-            "serial": serial,
-            "transfer_request_id": s["id"],
-            "transfer_request_no": s["str_no"],
-            "transfer_request_date": s["str_date"],
-            "parent_transfer_note_id": None,
-            "execution_attempt": 1,
-            "assigned_items": s.get("items", []),
-            "items": [it.model_dump() for it in payload.items],
-            "status": "DRAFT",
-            "created_at": now_iso(),
-            "created_by": user.get("email", ""),
-        }
-        try:
-            await db.transfer_notes.insert_one(doc)
-            doc.pop("_id", None)
-            await _recompute_str_status(s["id"])
-            return doc
-        except DuplicateKeyError as e:
-            last_err = e
-    raise HTTPException(status_code=500, detail=f"Could not allocate transfer-note number: {last_err}")
+    # Atomic guard: without this, two concurrent create-requests for the same
+    # Transfer Request (double-click, two operators, or a client retry) could both
+    # pass the "no active note exists" check below before either inserts, producing
+    # two active Transfer Notes for one request.
+    note_lock_key = f"str_note_slot::{s['id']}"
+    try:
+        await db.stock_out_locks.insert_one({"_id": note_lock_key, "transfer_request_id": s["id"], "created_at": now_iso()})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Another request is already creating a Transfer Note for this request — please retry")
+    try:
+        if await db.transfer_notes.find_one({"transfer_request_id": s["id"], "status": {"$in": ["PENDING", "DRAFT", "PROCESSING"]}}, {"_id": 0, "id": 1}):
+            raise HTTPException(status_code=409, detail="An active Transfer Note already exists for this request")
+        await _validate_transfer_note_items(payload.items)
+        for idx, it in enumerate(payload.items, start=1):
+            if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
+            if (it.dest_rack_id or "").strip() and not (it.dest_box_id or "").strip() and await _box_id_required_for_rack(it.dest_rack_id):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
+        await _validate_transfer_note_constraints(s["id"], payload.items, exclude_stn_id=None, assigned_items=s.get("items", []))
+
+        today = datetime.now(timezone.utc)
+        fy = current_fy_label(today)
+        last_err = None
+        for _ in range(5):
+            serial = await _alloc_serial("stn", fy)
+            stn_no = f"STN/{fy}/{serial:03d}"
+            doc = {
+                "id": str(uuid.uuid4()),
+                "stn_no": stn_no,
+                "stn_date": today.date().isoformat(),
+                "fy": fy,
+                "serial": serial,
+                "transfer_request_id": s["id"],
+                "transfer_request_no": s["str_no"],
+                "transfer_request_date": s["str_date"],
+                "parent_transfer_note_id": None,
+                "execution_attempt": 1,
+                "assigned_items": s.get("items", []),
+                "items": [it.model_dump() for it in payload.items],
+                "status": "DRAFT",
+                "created_at": now_iso(),
+                "created_by": user.get("email", ""),
+            }
+            try:
+                await db.transfer_notes.insert_one(doc)
+                doc.pop("_id", None)
+                await _recompute_str_status(s["id"])
+                return doc
+            except DuplicateKeyError as e:
+                last_err = e
+        raise HTTPException(status_code=500, detail=f"Could not allocate transfer-note number: {last_err}")
+    finally:
+        await db.stock_out_locks.delete_one({"_id": note_lock_key})
 
 
 @router.get("/transfer-notes")
@@ -479,7 +509,7 @@ async def update_transfer_note(stn_id: str, payload: TransferNoteCreate, user=De
         raise HTTPException(status_code=409, detail="Cannot edit — already recorded as Stock Transfer")
     parent = await db.transfer_requests.find_one({"id": existing.get("transfer_request_id")}, {"_id": 0}) or {}
     _enforce_assignee(parent, user, "edit this transfer note")
-    _validate_transfer_note_items(payload.items)
+    await _validate_transfer_note_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
         if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
@@ -533,6 +563,11 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
     await _validate_transfer_note_constraints(stn.get("transfer_request_id"), item_models, exclude_stn_id=stn_id, assigned_items=assigned_items)
     remaining_items = _remaining_assigned_items(assigned_items, items)
     now = now_iso()
+
+    # Optimistic claim on the note itself — same primitive Stock In's Racking Note
+    # recording uses (repositories/inventory_repo.py: transition_status). Done as a
+    # standalone write (not inside the transaction below) so a concurrent double-submit
+    # of the SAME note gets exactly this 409, before any location lock is attempted.
     locked = await db.transfer_notes.update_one(
         {"id": stn_id, "status": "DRAFT"},
         {"$set": {"status": "PROCESSING", "processing_started_at": now}},
@@ -545,62 +580,92 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
     if await db.transactions.find_one({"transfer_note_id": stn_id}, {"_id": 0, "id": 1}):
         await db.transfer_notes.update_one({"id": stn_id, "status": "PROCESSING"}, {"$set": {"status": "COMPLETED"}, "$unset": {"processing_started_at": ""}})
         raise HTTPException(status_code=409, detail="Transfer already completed")
-    # Final source-balance check (real balance, not DRAFT-aware)
+
+    # Per-source-location lock: without this, two concurrent completions drawing from
+    # the same physical (part, make, godown, rack, box) — whether another Transfer Note
+    # or a Picking Note's Stock Out — could both pass the balance check below before
+    # either writes its transaction, over-drawing the location into negative stock.
+    lock_keys = sorted({_transfer_src_lock_key(it) for it in items})
     tx_docs = []
-    child_stn = None
     try:
-        for idx, it in enumerate(items, start=1):
-            bal = await db.transactions.aggregate([
-                {"$match": {
-                    "part_no": it["part_no"], "make": it["make"],
-                    "godown_id": it.get("src_godown_id", ""),
-                    "rack_id": it.get("src_rack_id", ""),
-                    "box_id": it.get("src_box_id", ""),
-                }},
-                {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
-            ]).to_list(1)
-            avail = (bal[0]["q"] if bal else 0)
-            if avail < it["quantity"] - 1e-6:
-                raise HTTPException(status_code=400, detail=(
-                    f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at source "
-                    f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: have {avail}, need {it['quantity']}"
-                ))
-        for it in items:
-            master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
-            common = {
-                "part_no": it["part_no"], "make": it["make"],
-                "model": master.get("model", it.get("model", "")),
-                "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
-                "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
-                "description_1": master.get("description_1", it.get("description_1", "")),
-                "description_2": master.get("description_2", it.get("description_2", "")),
-                "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
-                "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
-                "item_category": master.get("item_category", it.get("item_category", "")),
-                "image": master.get("image", ""),
-                "quantity": it["quantity"],
-                "transfer_note_id": stn["id"], "transfer_note_no": stn["stn_no"],
-                "transfer_request_id": stn.get("transfer_request_id", ""),
-                "transfer_request_no": stn.get("transfer_request_no", ""),
-                "created_at": now, "created_by": user.get("email"),
-            }
-            tx_docs.append({**common, "id": str(uuid.uuid4()), "type": "OUT", "godown_id": it["src_godown_id"], "godown_name": it.get("src_godown_name", ""), "rack_id": it["src_rack_id"], "rack_no": it.get("src_rack_no", ""), "box_id": it.get("src_box_id", ""), "box_no": it.get("src_box_no", ""), "box_category": it.get("src_box_category", "")})
-            tx_docs.append({**common, "id": str(uuid.uuid4()), "type": "IN", "godown_id": it["dest_godown_id"], "godown_name": it.get("dest_godown_name", ""), "rack_id": it.get("dest_rack_id", ""), "rack_no": it.get("dest_rack_no", ""), "box_id": it.get("dest_box_id", ""), "box_no": it.get("dest_box_no", ""), "box_category": it.get("dest_box_category", "")})
-        if tx_docs:
-            await db.transactions.insert_many(tx_docs)
-        await db.transfer_notes.update_one({"id": stn_id, "status": "PROCESSING"}, {"$set": {"status": "COMPLETED", "recorded_at": now}, "$unset": {"processing_started_at": ""}})
-        if remaining_items:
-            child_stn = await _create_followup_transfer_note(stn, remaining_items, user)
-        if stn.get("transfer_request_id"):
-            await _recompute_str_status(stn["transfer_request_id"])
-        total_qty = sum(int(it.get("quantity") or 0) for it in items)
-        await _audit_transfer("transfer_note.completed", user, "transfer_notes", stn_id, {"status": "DRAFT"}, {"status": "COMPLETED", "items": items})
-        await _notify(actor=user, type="stock_transfer.recorded", module="stock_transfer", title=f"Stock Transfer completed ({stn['stn_no']})", message=f"{user.get('email')} transferred {len(items)} item(s), total qty {total_qty}, from {stn.get('transfer_request_no') or 'STR'}.", audience="module", ref_collection="transfer_notes", ref_id=stn_id)
-        return {"ok": True, "transactions_created": len(tx_docs), "remaining_transfer_note": child_stn}
+        # Lock held across the whole transaction, released only after commit (see
+        # services/locking.py) — otherwise a concurrent request could pass its own
+        # balance check against not-yet-committed writes the instant the lock frees.
+        async with location_locks(
+            lock_keys, owner_field="transfer_note_id", owner_value=stn_id,
+            conflict_message="Stock at one selected source location is being recorded by another user",
+        ):
+            async with unit_of_work() as uow:
+                # Final source-balance check (real balance, not DRAFT-aware)
+                for idx, it in enumerate(items, start=1):
+                    bal = await uow.transactions.aggregate([
+                        {"$match": {
+                            "part_no": it["part_no"], "make": it["make"],
+                            "godown_id": it.get("src_godown_id", ""),
+                            "rack_id": it.get("src_rack_id", ""),
+                            "box_id": it.get("src_box_id", ""),
+                        }},
+                        {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+                    ])
+                    avail = (bal[0]["q"] if bal else 0)
+                    if avail < it["quantity"] - 1e-6:
+                        raise HTTPException(status_code=400, detail=(
+                            f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at source "
+                            f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: have {avail}, need {it['quantity']}"
+                        ))
+                for it in items:
+                    master = await uow.db.stock_master.find_one(
+                        {"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}, session=uow.session
+                    ) or {}
+                    common = {
+                        "part_no": it["part_no"], "make": it["make"],
+                        "model": master.get("model", it.get("model", "")),
+                        "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
+                        "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
+                        "description_1": master.get("description_1", it.get("description_1", "")),
+                        "description_2": master.get("description_2", it.get("description_2", "")),
+                        "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
+                        "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
+                        "item_category": master.get("item_category", it.get("item_category", "")),
+                        "image": master.get("image", ""),
+                        "quantity": it["quantity"],
+                        "transfer_note_id": stn["id"], "transfer_note_no": stn["stn_no"],
+                        "transfer_request_id": stn.get("transfer_request_id", ""),
+                        "transfer_request_no": stn.get("transfer_request_no", ""),
+                        "created_at": now, "created_by": user.get("email"),
+                    }
+                    tx_docs.append({**common, "id": str(uuid.uuid4()), "type": "OUT", "godown_id": it["src_godown_id"], "godown_name": it.get("src_godown_name", ""), "rack_id": it["src_rack_id"], "rack_no": it.get("src_rack_no", ""), "box_id": it.get("src_box_id", ""), "box_no": it.get("src_box_no", ""), "box_category": it.get("src_box_category", "")})
+                    tx_docs.append({**common, "id": str(uuid.uuid4()), "type": "IN", "godown_id": it["dest_godown_id"], "godown_name": it.get("dest_godown_name", ""), "rack_id": it.get("dest_rack_id", ""), "rack_no": it.get("dest_rack_no", ""), "box_id": it.get("dest_box_id", ""), "box_no": it.get("dest_box_no", ""), "box_category": it.get("dest_box_category", "")})
+                if tx_docs:
+                    await uow.transactions.insert_many(tx_docs)
+                finalized = await uow.transfer_notes.transition_status(
+                    stn_id, from_status="PROCESSING", to_status="COMPLETED",
+                    set_fields={"recorded_at": now}, unset_fields=["processing_started_at"],
+                )
+                if not finalized:
+                    raise HTTPException(status_code=409, detail="Transfer Note recording state changed; transfer was not finalized")
+                await uow.audit.record(
+                    action="transfer_note.completed", actor=user,
+                    ref_collection="transfer_notes", ref_id=stn_id,
+                    old={"status": "DRAFT"},
+                    new={"status": "COMPLETED", "items": items},
+                    module="stock_transfer",
+                    links={"transfer_request_id": stn.get("transfer_request_id", "")},
+                )
+            # transaction committed here, still holding the location locks
+        # location locks released here
     except Exception:
-        if tx_docs:
-            await db.transactions.delete_many({"id": {"$in": [t["id"] for t in tx_docs]}})
-        if child_stn:
-            await db.transfer_notes.delete_one({"id": child_stn["id"]})
+        # Everything inside unit_of_work() above already rolled back automatically on
+        # abort (tx_docs, the COMPLETED flip, the audit entry never became durable).
+        # Only this note's initial non-transactional claim needs a manual revert.
         await db.transfer_notes.update_one({"id": stn_id, "status": "PROCESSING"}, {"$set": {"status": "DRAFT"}, "$unset": {"processing_started_at": ""}})
         raise
+
+    child_stn = None
+    if remaining_items:
+        child_stn = await _create_followup_transfer_note(stn, remaining_items, user)
+    if stn.get("transfer_request_id"):
+        await _recompute_str_status(stn["transfer_request_id"])
+    total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    await _notify(actor=user, type="stock_transfer.recorded", module="stock_transfer", title=f"Stock Transfer completed ({stn['stn_no']})", message=f"{user.get('email')} transferred {len(items)} item(s), total qty {total_qty}, from {stn.get('transfer_request_no') or 'STR'}.", audience="module", ref_collection="transfer_notes", ref_id=stn_id)
+    return {"ok": True, "transactions_created": len(tx_docs), "remaining_transfer_note": child_stn}

@@ -276,7 +276,7 @@ export default function StockBalancePage() {
                 </td>
               </tr>
             ) : filteredRows.map((r, i) => (
-              <tr key={`${r.part_no}|${r.make}|${r.box_id || i}`} data-testid={`balance-row-${i}`}>
+              <tr key={`${r.part_no}|${r.make}|${r.godown_id}|${r.rack_id}|${r.box_id}`} data-testid={`balance-row-${i}`}>
                 <td className="font-mono text-slate-500">{i + 1}</td>
                 {COLUMNS.map((c) => {
                   if (c.isImage) {

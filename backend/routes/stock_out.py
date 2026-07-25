@@ -11,6 +11,8 @@ from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_tota
 from helpers.note_helpers import current_fy_label, _alloc_serial, _key
 from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
+from services.unit_of_work import unit_of_work
+from services.locking import location_locks
 
 router = APIRouter()
 
@@ -169,38 +171,51 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
 @router.post("/stock-out")
 async def stock_out(payload: StockOutCreate, user=Depends(get_current_user)):
     item, godown, rack, box = await _validate_txn(payload)
-    # Check available balance
-    balance = await _get_balance(payload.part_no, payload.make, payload.godown_id, payload.rack_id, payload.box_id)
-    if balance < payload.quantity:
-        raise HTTPException(status_code=400, detail=f"Insufficient stock. Available: {balance}")
-    doc = {
-        "id": str(uuid.uuid4()),
-        "type": "OUT",
-        "part_no": payload.part_no,
-        "make": payload.make,
-        "model": item.get("model", ""),
-        "old_part_no": item.get("old_part_no", ""),
-        "make_part_no": item.get("make_part_no", ""),
-        "description_1": item.get("description_1", ""),
-        "description_2": item.get("description_2", ""),
-        "remarks_oem": item.get("remarks_oem", ""),
-        "remarks_others": item.get("remarks_others", ""),
-        "item_category": item.get("item_category", ""),
-        "image": item.get("image", ""),
-        "quantity": payload.quantity,
-        "godown_id": payload.godown_id,
-        "godown_name": godown["godown_name"],
-        "rack_id": payload.rack_id,
-        "rack_no": rack["rack_no"],
-        "box_id": payload.box_id,
-        "box_no": box["box_no"],
-        "box_category": box.get("box_category", ""),
-        "created_at": now_iso(),
-        "created_by": user.get("email"),
-    }
-    await db.transactions.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+    # Per-location lock: without this, two concurrent direct stock-out calls (or one
+    # racing a Picking Note / Transfer Note completion) against the same physical
+    # location could both pass the balance check below before either writes its
+    # transaction, over-drawing the location into negative stock. Reusing the same
+    # `stock_out_locks` collection/key format as the Picking Note and Transfer Note
+    # completion paths means all three mutually exclude each other on the same location.
+    lock_key = "||".join([payload.part_no, payload.make, payload.godown_id, payload.rack_id, payload.box_id])
+    try:
+        await db.stock_out_locks.insert_one({"_id": lock_key, "direct_stock_out": True, "created_at": now_iso()})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Stock at this location is being recorded by another user")
+    try:
+        balance = await _get_balance(payload.part_no, payload.make, payload.godown_id, payload.rack_id, payload.box_id)
+        if balance < payload.quantity:
+            raise HTTPException(status_code=400, detail=f"Insufficient stock. Available: {balance}")
+        doc = {
+            "id": str(uuid.uuid4()),
+            "type": "OUT",
+            "part_no": payload.part_no,
+            "make": payload.make,
+            "model": item.get("model", ""),
+            "old_part_no": item.get("old_part_no", ""),
+            "make_part_no": item.get("make_part_no", ""),
+            "description_1": item.get("description_1", ""),
+            "description_2": item.get("description_2", ""),
+            "remarks_oem": item.get("remarks_oem", ""),
+            "remarks_others": item.get("remarks_others", ""),
+            "item_category": item.get("item_category", ""),
+            "image": item.get("image", ""),
+            "quantity": payload.quantity,
+            "godown_id": payload.godown_id,
+            "godown_name": godown["godown_name"],
+            "rack_id": payload.rack_id,
+            "rack_no": rack["rack_no"],
+            "box_id": payload.box_id,
+            "box_no": box["box_no"],
+            "box_category": box.get("box_category", ""),
+            "created_at": now_iso(),
+            "created_by": user.get("email"),
+        }
+        await db.transactions.insert_one(doc)
+        doc.pop("_id", None)
+        return doc
+    finally:
+        await db.stock_out_locks.delete_one({"_id": lock_key, "direct_stock_out": True})
 
 
 @router.get("/issue-notes/lookup/{part_no}")
@@ -632,6 +647,11 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
     await _validate_picking_constraints(pn.get("issue_note_id"), [PickingNoteItem(**it) for it in items], exclude_pn_id=pn_id, assigned_items=assigned_items)
     remaining_items = _remaining_assigned_items(assigned_items, items)
     now = now_iso()
+
+    # Optimistic claim on the note itself — same primitive Stock In's Racking Note
+    # recording uses (repositories/inventory_repo.py: transition_status). Done as a
+    # standalone write (not inside the transaction below) so a concurrent double-submit
+    # of the SAME note gets exactly this 409, before any location lock is attempted.
     locked = await db.picking_notes.update_one(
         {"id": pn_id, "status": "DRAFT"},
         {"$set": {"status": "RECORDING", "recording_started_at": now}},
@@ -644,92 +664,103 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
 
     lock_keys = sorted({_stock_out_lock_key(it) for it in items})
     tx_docs = []
-    child_pn = None
     try:
-        if await db.transactions.find_one({"picking_note_id": pn_id}, {"_id": 0, "id": 1}):
-            raise HTTPException(status_code=409, detail="Stock Out transactions already exist for this Picking Note")
+        # Lock held across the whole transaction, released only after commit (see
+        # services/locking.py) — otherwise a concurrent request could pass its own
+        # balance check against not-yet-committed writes the instant the lock frees.
+        async with location_locks(
+            lock_keys, owner_field="picking_note_id", owner_value=pn_id,
+            conflict_message="Stock at one selected location is being recorded by another user",
+        ):
+            async with unit_of_work() as uow:
+                if await uow.transactions.find_one({"picking_note_id": pn_id}):
+                    raise HTTPException(status_code=409, detail="Stock Out transactions already exist for this Picking Note")
 
-        for key in lock_keys:
-            try:
-                await db.stock_out_locks.insert_one({"_id": key, "picking_note_id": pn_id, "created_at": now})
-            except DuplicateKeyError:
-                raise HTTPException(status_code=409, detail="Stock at one selected location is being recorded by another user")
+                # Final availability check (real ledger balance).
+                for idx, it in enumerate(items, start=1):
+                    if not it.get("godown_id") or not it.get("rack_id"):
+                        raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing")
+                    if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
+                        raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing")
+                    bal = await uow.transactions.aggregate([
+                        {"$match": {
+                            "part_no": it["part_no"], "make": it["make"],
+                            "godown_id": it.get("godown_id", ""),
+                            "rack_id": it.get("rack_id", ""),
+                            "box_id": it.get("box_id", ""),
+                        }},
+                        {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+                    ])
+                    avail = (bal[0]["q"] if bal else 0)
+                    if avail < it["quantity"] - 1e-6:
+                        raise HTTPException(status_code=400, detail=(
+                            f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at "
+                            f"{it.get('godown_name')}/{it.get('rack_no')}/{it.get('box_no') or '—'}: have {avail}, need {it['quantity']}"
+                        ))
 
-        # Final availability check (real ledger balance).
-        for idx, it in enumerate(items, start=1):
-            if not it.get("godown_id") or not it.get("rack_id"):
-                raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing")
-            if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
-                raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing")
-            bal = await db.transactions.aggregate([
-                {"$match": {
-                    "part_no": it["part_no"], "make": it["make"],
-                    "godown_id": it.get("godown_id", ""),
-                    "rack_id": it.get("rack_id", ""),
-                    "box_id": it.get("box_id", ""),
-                }},
-                {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
-            ]).to_list(1)
-            avail = (bal[0]["q"] if bal else 0)
-            if avail < it["quantity"] - 1e-6:
-                raise HTTPException(status_code=400, detail=(
-                    f"Row {idx}: insufficient stock for {it['part_no']} / {it['make']} at "
-                    f"{it.get('godown_name')}/{it.get('rack_no')}/{it.get('box_no') or '—'}: have {avail}, need {it['quantity']}"
-                ))
-
-        for it in items:
-            master = await db.stock_master.find_one({"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}) or {}
-            tx_docs.append({
-                "id": str(uuid.uuid4()),
-                "type": "OUT",
-                "part_no": it["part_no"], "make": it["make"],
-                "model": master.get("model", it.get("model", "")),
-                "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
-                "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
-                "description_1": master.get("description_1", it.get("description_1", "")),
-                "description_2": master.get("description_2", it.get("description_2", "")),
-                "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
-                "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
-                "item_category": master.get("item_category", it.get("item_category", "")),
-                "image": master.get("image", ""),
-                "quantity": it["quantity"],
-                "godown_id": it["godown_id"], "godown_name": it.get("godown_name", ""),
-                "rack_id": it["rack_id"], "rack_no": it.get("rack_no", ""),
-                "box_id": it["box_id"], "box_no": it.get("box_no", ""), "box_category": it.get("box_category", ""),
-                "picking_note_id": pn["id"], "picking_note_no": pn["pn_no"],
-                "issue_note_id": pn.get("issue_note_id", ""), "issue_note_no": pn.get("issue_note_no", ""),
-                "created_at": now, "created_by": user.get("email"),
-            })
-        if tx_docs:
-            await db.transactions.insert_many(tx_docs)
-        recorded_update = await db.picking_notes.update_one(
-            {"id": pn_id, "status": "RECORDING"},
-            {"$set": {"status": "COMPLETED", "recorded_at": now}, "$unset": {"recording_started_at": ""}},
-        )
-        if recorded_update.modified_count != 1:
-            raise HTTPException(status_code=409, detail="Picking note recording state changed; stock out was not finalized")
-        if remaining_items:
-            child_pn = await _create_followup_picking_note(pn, remaining_items, user)
-        if pn.get("issue_note_id"):
-            await _recompute_in_status(pn["issue_note_id"])
-        total_qty = sum(int(it.get("quantity") or 0) for it in items)
-        await _notify(
-            actor=user, type="stock_out.recorded", module="stock_out",
-            title=f"Stock Out recorded ({pn['pn_no']})",
-            message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{in_parent.get('assigned_to_name') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
-            audience="module", ref_collection="picking_notes", ref_id=pn_id,
-        )
-        return {"ok": True, "transactions_created": len(tx_docs), "remaining_picking_note": child_pn}
+                for it in items:
+                    master = await uow.db.stock_master.find_one(
+                        {"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}, session=uow.session
+                    ) or {}
+                    tx_docs.append({
+                        "id": str(uuid.uuid4()),
+                        "type": "OUT",
+                        "part_no": it["part_no"], "make": it["make"],
+                        "model": master.get("model", it.get("model", "")),
+                        "old_part_no": master.get("old_part_no", it.get("old_part_no", "")),
+                        "make_part_no": master.get("make_part_no", it.get("make_part_no", "")),
+                        "description_1": master.get("description_1", it.get("description_1", "")),
+                        "description_2": master.get("description_2", it.get("description_2", "")),
+                        "remarks_oem": master.get("remarks_oem", it.get("remarks_oem", "")),
+                        "remarks_others": master.get("remarks_others", it.get("remarks_others", "")),
+                        "item_category": master.get("item_category", it.get("item_category", "")),
+                        "image": master.get("image", ""),
+                        "quantity": it["quantity"],
+                        "godown_id": it["godown_id"], "godown_name": it.get("godown_name", ""),
+                        "rack_id": it["rack_id"], "rack_no": it.get("rack_no", ""),
+                        "box_id": it["box_id"], "box_no": it.get("box_no", ""), "box_category": it.get("box_category", ""),
+                        "picking_note_id": pn["id"], "picking_note_no": pn["pn_no"],
+                        "issue_note_id": pn.get("issue_note_id", ""), "issue_note_no": pn.get("issue_note_no", ""),
+                        "created_at": now, "created_by": user.get("email"),
+                    })
+                if tx_docs:
+                    await uow.transactions.insert_many(tx_docs)
+                finalized = await uow.picking_notes.transition_status(
+                    pn_id, from_status="RECORDING", to_status="COMPLETED",
+                    set_fields={"recorded_at": now}, unset_fields=["recording_started_at"],
+                )
+                if not finalized:
+                    raise HTTPException(status_code=409, detail="Picking note recording state changed; stock out was not finalized")
+                await uow.audit.record(
+                    action="picking_note.completed", actor=user,
+                    ref_collection="picking_notes", ref_id=pn_id,
+                    old={"status": "RECORDING"},
+                    new={"status": "COMPLETED", "items": items, "transactions_created": len(tx_docs)},
+                    module="stock_out",
+                    links={"issue_note_id": pn.get("issue_note_id", "")},
+                )
+            # transaction committed here, still holding the location locks
+        # location locks released here
     except Exception:
-        if tx_docs:
-            await db.transactions.delete_many({"id": {"$in": [t["id"] for t in tx_docs]}})
-        if child_pn:
-            await db.picking_notes.delete_one({"id": child_pn["id"]})
+        # Everything inside unit_of_work() above already rolled back automatically on
+        # abort (tx_docs, the COMPLETED flip, the audit entry never became durable).
+        # Only this note's initial non-transactional claim needs a manual revert.
         await db.picking_notes.update_one(
             {"id": pn_id, "status": "RECORDING"},
             {"$set": {"status": "DRAFT"}, "$unset": {"recording_started_at": ""}},
         )
         raise
-    finally:
-        if lock_keys:
-            await db.stock_out_locks.delete_many({"_id": {"$in": lock_keys}, "picking_note_id": pn_id})
+
+    child_pn = None
+    if remaining_items:
+        child_pn = await _create_followup_picking_note(pn, remaining_items, user)
+    if pn.get("issue_note_id"):
+        await _recompute_in_status(pn["issue_note_id"])
+    total_qty = sum(int(it.get("quantity") or 0) for it in items)
+    await _notify(
+        actor=user, type="stock_out.recorded", module="stock_out",
+        title=f"Stock Out recorded ({pn['pn_no']})",
+        message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{in_parent.get('assigned_to_name') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
+        audience="module", ref_collection="picking_notes", ref_id=pn_id,
+    )
+    return {"ok": True, "transactions_created": len(tx_docs), "remaining_picking_note": child_pn}

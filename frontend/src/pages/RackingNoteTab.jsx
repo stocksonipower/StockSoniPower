@@ -13,7 +13,7 @@ import {
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
-  DownloadSimple, ArrowsClockwise,
+  DownloadSimple, ArrowsClockwise, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
@@ -197,17 +197,19 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 
   return (
     <div className="mt-4" data-testid="rkn-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div />
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
             ref={searchInputRef}
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search"
-            className="rounded-sm font-mono h-9 w-80"
+            placeholder="Search racking notes…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
             data-testid="rkn-search-input"
           />
+        </div>
+        <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rkn-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>

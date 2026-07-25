@@ -18,7 +18,16 @@
       "Bash(lsof -nP -iTCP:8000 -sTCP:LISTEN)",
       "Bash(lsof -nP -iTCP:3000 -sTCP:LISTEN)",
       "Bash(curl -s http://localhost:8000/health)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(git check-ignore *)",
+      "Bash(python -c 'import ast,sys *)",
+      "Bash(python3 -)",
+      "Bash(pip list *)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python3 -m venv /tmp/ckvenv)",
+      "Bash(.venv/bin/python -c \"import server\")",
+      "Bash(.venv/bin/pip freeze *)",
+      "Bash(.venv/bin/python -m pytest tests/ -q)"
     ]
   }
 }

@@ -73,6 +73,23 @@ table {
     @apply px-3 py-2 text-sm text-slate-800 border-b border-slate-100;
 }
 
+/* Fixed-width column tables (currently: Stock Master) — every column has an
+   explicit px width, so table-layout:fixed + per-cell truncation keeps every
+   row's columns aligned instead of the browser auto-expanding a column to fit
+   one long unbroken value (which desyncs header/body widths and looks like
+   overlapping cells). Scoped via a modifier so other .data-table pages that
+   don't set per-column widths are unaffected. */
+.data-table-fixed {
+    table-layout: fixed;
+}
+
+.data-table-fixed th,
+.data-table-fixed td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .data-table tr:hover td {
     @apply bg-slate-50;
 }

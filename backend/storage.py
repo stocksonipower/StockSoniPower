@@ -1,73 +1,102 @@
-"""
-Emergent Object Storage helper.
+"""Cloudflare R2 (S3-compatible) storage helper.
 
-Initializes a session-scoped storage_key once at app startup and exposes
-synchronous put_object / get_object helpers used by upload + download routes.
+Talks to R2 directly via boto3's S3 client — no third-party proxy. Credentials
+and bucket/endpoint come from R2_* env vars (backend-only; never exposed to
+the frontend). Exposes put_object / get_object / delete_object used by the
+upload + serve routes, plus build_path for collision-free object naming.
 """
-import os
 import logging
-import requests
+import os
+import uuid as _uuid
+from functools import lru_cache
+from urllib.parse import urlparse
+
+import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = "stock-management"
 
-_storage_key = None
+
+def _endpoint_url() -> str:
+    """R2_ENDPOINT may include a trailing bucket path (as pasted from the R2
+    dashboard) — boto3 wants just the scheme+host, bucket is passed per-call."""
+    raw = os.environ.get("R2_ENDPOINT", "")
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("R2_ENDPOINT is not set / invalid in environment")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _emergent_key() -> str | None:
-    """Read EMERGENT_LLM_KEY at call time so we don't get bitten by import-order
-    issues with load_dotenv (server.py imports `storage` before `deps` calls load_dotenv)."""
-    return os.environ.get("EMERGENT_LLM_KEY")
+def _bucket() -> str:
+    bucket = os.environ.get("R2_BUCKET")
+    if not bucket:
+        raise RuntimeError("R2_BUCKET is not set in environment")
+    return bucket
 
 
-def init_storage() -> str:
-    """Initialise (or return cached) storage key. Safe to call multiple times."""
-    global _storage_key
-    if _storage_key:
-        return _storage_key
-    key = _emergent_key()
-    if not key:
-        raise RuntimeError("EMERGENT_LLM_KEY is not set in environment")
-    resp = requests.post(
-        f"{STORAGE_URL}/init",
-        json={"emergent_key": key},
-        timeout=30,
+@lru_cache(maxsize=1)
+def _client():
+    """Lazily build a boto3 S3 client bound to the R2 endpoint (cached — boto3
+    clients are thread-safe and cheap to reuse across requests)."""
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    if not (access_key and secret_key):
+        raise RuntimeError("R2 credentials are not fully set in environment")
+    return boto3.client(
+        "s3",
+        endpoint_url=_endpoint_url(),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name="auto",
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": 3, "mode": "standard"},
+            connect_timeout=10,
+            read_timeout=60,
+        ),
     )
-    resp.raise_for_status()
-    _storage_key = resp.json()["storage_key"]
-    logger.info("Emergent object storage initialised")
-    return _storage_key
+
+
+def init_storage() -> None:
+    """Validate R2 connectivity at boot. Safe to call multiple times."""
+    _client().head_bucket(Bucket=_bucket())
+    logger.info("R2 object storage initialised (bucket=%s)", _bucket())
 
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    """Upload bytes to storage. Returns {path, size, etag}."""
-    key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=120,
+    """Upload bytes to R2. Returns {path, size, etag}."""
+    resp = _client().put_object(
+        Bucket=_bucket(),
+        Key=path,
+        Body=data,
+        ContentType=content_type,
     )
-    resp.raise_for_status()
-    return resp.json()
+    return {"path": path, "size": len(data), "etag": (resp.get("ETag") or "").strip('"')}
 
 
 def get_object(path: str):
-    """Download bytes from storage. Returns (bytes, content_type)."""
-    key = init_storage()
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    """Download bytes from R2. Returns (bytes, content_type). Raises FileNotFoundError if missing."""
+    try:
+        resp = _client().get_object(Bucket=_bucket(), Key=path)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code in ("NoSuchKey", "404"):
+            raise FileNotFoundError(path) from e
+        raise
+    return resp["Body"].read(), resp.get("ContentType", "application/octet-stream")
 
 
-def build_path(user_id: str, ext: str) -> str:
-    """Convention: stock-management/uploads/{user_id}/{uuid}.{ext}"""
-    import uuid as _uuid
+def delete_object(path: str) -> None:
+    """Delete an object from R2. Deleting a missing key is a no-op in S3-compatible APIs."""
+    _client().delete_object(Bucket=_bucket(), Key=path)
+
+
+def build_path(user_id: str, ext: str, folder: str = "uploads") -> str:
+    """Convention: stock-management/{folder}/{user_id}/{uuid}.{ext} — UUID naming
+    guarantees no collisions/overwrites across concurrent or repeated uploads."""
     safe_ext = (ext or "bin").lower().lstrip(".")
-    return f"{APP_NAME}/uploads/{user_id}/{_uuid.uuid4()}.{safe_ext}"
+    safe_folder = (folder or "uploads").strip("/") or "uploads"
+    return f"{APP_NAME}/{safe_folder}/{user_id}/{_uuid.uuid4()}.{safe_ext}"

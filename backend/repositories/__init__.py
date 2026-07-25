@@ -5,11 +5,15 @@ UnitOfWork) so that a whole business operation can participate in a single
 multi-document transaction. Repositories contain NO business rules; they are a
 thin, testable seam over Motor collections.
 """
-from repositories.stock_in_repo import (
+from repositories.inventory_repo import (
     ReceiptNoteRepository,
     ShortReceivedNoteRepository,
     ExtraReceivedNoteRepository,
     RackingNoteRepository,
+    PickingNoteRepository,
+    IssueNoteRepository,
+    TransferNoteRepository,
+    TransferRequestRepository,
     TransactionRepository,
     AuditRepository,
 )
@@ -19,6 +23,10 @@ __all__ = [
     "ShortReceivedNoteRepository",
     "ExtraReceivedNoteRepository",
     "RackingNoteRepository",
+    "PickingNoteRepository",
+    "IssueNoteRepository",
+    "TransferNoteRepository",
+    "TransferRequestRepository",
     "TransactionRepository",
     "AuditRepository",
 ]

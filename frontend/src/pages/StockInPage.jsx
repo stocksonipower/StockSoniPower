@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, PencilSimple, Stack,
   DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning, Eye, X,
-  Receipt, Package as PackageIcon,
+  Receipt, Package as PackageIcon, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
@@ -209,6 +209,8 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load receipt notes");
     } finally { setLoading(false); }
   }, [page, search]);
 
@@ -270,17 +272,19 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
 
   return (
     <div className="mt-4" data-testid="rn-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div />
-        <div className="flex items-center gap-2">
-<Input
-            ref={searchInputRef}     
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search"
-            className="rounded-sm font-mono h-9 w-80"
+            placeholder="Search receipt notes…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
             data-testid="rn-search-input"
           />
+        </div>
+        <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="rn-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
           </Button>
@@ -2056,22 +2060,24 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   return (
     <div className="mt-4" data-testid={`${kind}-list-view`}>
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-  <div />
-  <div className="flex items-center gap-2">
-    <Input
-      ref={searchInputRef}
-      value={search}
-      onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-      placeholder={`Search`}
-      className="rounded-sm font-mono h-9 w-80"
-      data-testid={`${kind}-search-input`}
-    />
-    <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
-      <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
-    </Button>
-  </div>
-</div>
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder={`Search ${noun.toLowerCase()}s…`}
+            className="rounded-sm font-mono h-9 pl-10 w-full"
+            data-testid={`${kind}-search-input`}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={load} variant="outline" disabled={loading} className="rounded-sm border-slate-300" data-testid={`${kind}-refresh`}>
+            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+        </div>
+      </div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
         <table className="data-table w-full">
           <thead>

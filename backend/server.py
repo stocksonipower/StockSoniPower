@@ -57,6 +57,11 @@ def _parse_cors_origins(raw_value: str | None) -> list[str]:
 # -------------------- APP SETUP --------------------
 app = FastAPI(title="Stock Management API")
 cors_origins = _parse_cors_origins(os.environ.get("CORS_ORIGINS"))
+if cors_origins == ["*"]:
+    logger.warning(
+        "CORS_ORIGINS is not set — defaulting to '*' with allow_credentials=True. "
+        "Browsers will reflect any Origin as trusted. Set CORS_ORIGINS in production."
+    )
 logger.info("Configured CORS origins: %s", cors_origins)
 app.add_middleware(
     CORSMiddleware,
@@ -130,6 +135,8 @@ async def startup():
     await db.boxes.create_index("id", unique=True)
     await db.transactions.create_index("id", unique=True)
     await db.transactions.create_index([("part_no", 1), ("make", 1)])
+    # Supports the paginated /transactions ledger's default sort (created_at desc).
+    await db.transactions.create_index([("created_at", -1), ("_id", -1)])
     await db.receipt_notes.create_index("id", unique=True)
     await db.receipt_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
     await db.receipt_notes.create_index("created_at")
@@ -157,6 +164,12 @@ async def startup():
     await db.transfer_notes.create_index("created_at")
     await db.transfer_notes.create_index("status")
     await db.transfer_notes.create_index("transfer_request_id")
+    # `stock_out_locks` is a manual mutex collection guarding concurrent stock-out/
+    # transfer recording (see routes/stock_out.py, routes/transfer.py). Locks are
+    # explicitly released in a `finally` block, but a killed worker process can leave
+    # one behind forever. TTL as a safety net so an orphaned lock self-clears instead
+    # of permanently blocking that part/location combination.
+    await db.stock_out_locks.create_index("created_at", expireAfterSeconds=300)
    # ---- Receipt-note status migration ----
     # Default missing status to RACKING_NOTE_DRAFT (the new equivalent of legacy FINAL/RACKING_PENDING).
     await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_NOTE_DRAFT"}})
@@ -358,7 +371,13 @@ async def startup():
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@stockmgmt.com").lower()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+    if not admin_password:
+        admin_password = "admin123"
+        logger.warning(
+            "ADMIN_PASSWORD is not set — the seeded admin account will use the "
+            "well-known default password 'admin123'. Set ADMIN_PASSWORD in production."
+        )
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
         await db.users.insert_one({
@@ -422,6 +441,14 @@ PATH_TO_MODULE = [
 
 @app.middleware("http")
 async def module_access_middleware(request, call_next):
+    # For most modules this middleware is the ONLY place module_access is enforced
+    # (many routes only depend on get_current_user, which checks auth but not
+    # per-module ACL) — so a broad `except Exception: pass` here would silently
+    # disable the access-denied check on any unrelated failure (e.g. a DB hiccup),
+    # not just an invalid token. Only a genuine token-validation error is safe to
+    # swallow, since the route's own get_current_user dependency independently
+    # re-validates the same token and will correctly reject it with 401/403 —
+    # anything else (a lookup failure, a bug) should fail closed, not open.
     path = request.url.path
     matched = next((m for prefix, m in PATH_TO_MODULE if path.startswith(prefix)), None)
     if matched:
@@ -429,14 +456,15 @@ async def module_access_middleware(request, call_next):
         if auth.lower().startswith("bearer "):
             try:
                 payload = jwt.decode(auth.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            except jwt.InvalidTokenError:
+                payload = None
+            if payload is not None:
                 u = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "role": 1, "module_access": 1, "is_active": 1})
                 if u and u.get("is_active") is not False and u.get("role") != "admin":
                     access = u.get("module_access") or {}
                     if access.get(matched, True) is False:
                         from starlette.responses import JSONResponse as _JSON
                         return _JSON(status_code=403, content={"detail": f"Access denied: '{matched}' module is disabled for your account"})
-            except Exception:
-                pass
     return await call_next(request)
 
 @app.get("/health")

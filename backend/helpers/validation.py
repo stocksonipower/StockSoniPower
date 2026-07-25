@@ -287,9 +287,37 @@ async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = 
             )
 
 
-def _validate_transfer_note_items(items):
+async def _validate_transfer_note_items(items):
     if not items:
         raise HTTPException(status_code=400, detail="At least one item is required")
+
+    # Batch-fetch referenced locations once (avoids N+1 lookups per row) so we can
+    # confirm every godown/rack/box id still exists and hasn't been deleted/altered
+    # by another user since the dropdown was populated.
+    godown_ids, rack_ids, box_ids = set(), set(), set()
+    for it in items:
+        for gid in (it.src_godown_id, it.dest_godown_id):
+            if (gid or "").strip():
+                godown_ids.add(gid)
+        for rid in (it.src_rack_id, it.dest_rack_id):
+            if (rid or "").strip():
+                rack_ids.add(rid)
+        for bid in (it.src_box_id, it.dest_box_id):
+            if (bid or "").strip():
+                box_ids.add(bid)
+    valid_godowns = set()
+    if godown_ids:
+        async for g in db.godowns.find({"id": {"$in": list(godown_ids)}}, {"_id": 0, "id": 1}):
+            valid_godowns.add(g["id"])
+    racks_by_id = {}
+    if rack_ids:
+        async for rk in db.racks.find({"id": {"$in": list(rack_ids)}}, {"_id": 0, "id": 1, "godown_id": 1}):
+            racks_by_id[rk["id"]] = rk.get("godown_id")
+    boxes_by_id = {}
+    if box_ids:
+        async for bx in db.boxes.find({"id": {"$in": list(box_ids)}}, {"_id": 0, "id": 1, "rack_id": 1}):
+            boxes_by_id[bx["id"]] = bx.get("rack_id")
+
     for idx, it in enumerate(items, start=1):
         if not it.part_no.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
@@ -303,6 +331,32 @@ def _validate_transfer_note_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is required")
         if it.src_godown_id == it.dest_godown_id:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination godown must differ")
+        # Existence + referential-integrity checks (rack must belong to its stated
+        # godown, box must belong to its stated rack) — rejects stale/fabricated
+        # location ids, e.g. a godown/rack/box deleted after the form was loaded.
+        if it.src_godown_id not in valid_godowns:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown is invalid or no longer exists")
+        if it.src_rack_id not in racks_by_id:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack is invalid or no longer exists")
+        if racks_by_id[it.src_rack_id] != it.src_godown_id:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack does not belong to the selected Source Godown")
+        if (it.src_box_id or "").strip():
+            if it.src_box_id not in boxes_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is invalid or no longer exists")
+            if boxes_by_id[it.src_box_id] != it.src_rack_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box does not belong to the selected Source Rack")
+        if it.dest_godown_id not in valid_godowns:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is invalid or no longer exists")
+        if (it.dest_rack_id or "").strip():
+            if it.dest_rack_id not in racks_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Rack is invalid or no longer exists")
+            if racks_by_id[it.dest_rack_id] != it.dest_godown_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Rack does not belong to the selected Destination Godown")
+        if (it.dest_box_id or "").strip():
+            if it.dest_box_id not in boxes_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is invalid or no longer exists")
+            if (it.dest_rack_id or "").strip() and boxes_by_id[it.dest_box_id] != it.dest_rack_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box does not belong to the selected Destination Rack")
 
 
 async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None, assigned_items: Optional[list] = None):

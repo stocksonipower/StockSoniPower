@@ -104,10 +104,23 @@ async def item_details(part_no: str, make: str, user=Depends(get_current_user)):
     transfer_requests    = await _notes(db.transfer_requests,    None)
     transfer_notes       = await _notes(db.transfer_notes,       None)
 
-    # Stock ledger entries for this part
-    txns = await db.transactions.find(
-        {"part_no": pn, "make": mk}, {"_id": 0}
-    ).sort("created_at", -1).limit(2000).to_list(2000)
+    # Stock ledger entries for this part. Fetch the FULL history in true
+    # chronological order (created_at, then _id as a tiebreak for rows stamped
+    # with the same timestamp — e.g. a Transfer Note's OUT+IN pair) so the
+    # running balance below is accurate, then reverse to the newest-first order
+    # the UI expects and cap the page size for display.
+    all_txns = await db.transactions.find(
+        {"part_no": pn, "make": mk}
+    ).sort([("created_at", 1), ("_id", 1)]).to_list(20000)
+    running = 0
+    for tx in all_txns:
+        tx.pop("_id", None)
+        running += tx["quantity"] if tx.get("type") == "IN" else -tx["quantity"]
+        tx["balance_after"] = running
+        # Same document-reference precedence used by the Transactions page:
+        # racking note (Stock In) > picking note (Stock Out) > transfer note.
+        tx["ref_no"] = tx.get("racking_note_no") or tx.get("picking_note_no") or tx.get("transfer_note_no") or ""
+    txns = list(reversed(all_txns))[:2000]
 
     # Totals (best-effort from ledger; current_stock from balance sum)
     def _sum(rows, key):

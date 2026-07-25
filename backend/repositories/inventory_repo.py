@@ -1,12 +1,14 @@
-"""Stock In repositories.
+"""Inventory repositories — shared data-access layer for every inventory write
+operation (Stock In, Stock Out, Transfer, and future modules such as
+Adjustments/Returns/Cycle Count).
 
-Thin data-access wrappers over the Stock In collections. Each repository is
+Thin data-access wrappers over the inventory collections. Each repository is
 constructed with the shared ``db`` handle and an optional Mongo ``session``;
 when a session is supplied (by the UnitOfWork) every read and write joins that
 transaction, giving all-or-nothing semantics across collections.
 
 Deliberately free of business rules — validation, status computation and
-orchestration all live in ``services/stock_in_service.py``.
+orchestration live in the route/service layer.
 """
 from typing import Optional
 import uuid
@@ -45,6 +47,9 @@ class _BaseRepository:
     async def count(self, flt: dict) -> int:
         return await self.col.count_documents(flt, session=self.session)
 
+    async def aggregate(self, pipeline: list) -> list:
+        return await self.col.aggregate(pipeline, session=self.session).to_list(None)
+
     # ---- writes ----
     async def insert(self, doc: dict) -> dict:
         await self.col.insert_one(doc, session=self.session)
@@ -71,6 +76,27 @@ class _BaseRepository:
     async def delete_many(self, flt: dict) -> int:
         res = await self.col.delete_many(flt, session=self.session)
         return res.deleted_count
+
+    # ---- shared inventory-document lifecycle (status-CAS lock/finalize) ----
+    async def transition_status(
+        self,
+        doc_id: str,
+        *,
+        from_status: str,
+        to_status: str,
+        set_fields: Optional[dict] = None,
+        unset_fields: Optional[list] = None,
+    ) -> bool:
+        """Atomically CAS ``status`` from ``from_status`` to ``to_status`` (plus optional
+        extra field set/unset). Returns True only for the caller that won the race —
+        every inventory recording flow (Stock In's RECORDING claim, Stock Out's,
+        Transfer's) uses this same primitive instead of a bespoke read-modify-write.
+        """
+        update: dict = {"$set": {"status": to_status, **(set_fields or {})}}
+        if unset_fields:
+            update["$unset"] = {k: "" for k in unset_fields}
+        res = await self.col.update_one({"id": doc_id, "status": from_status}, update, session=self.session)
+        return res.modified_count == 1
 
 
 class ReceiptNoteRepository(_BaseRepository):
@@ -121,20 +147,30 @@ class RackingNoteRepository(_BaseRepository):
         Returns True only for the caller that won the race; concurrent callers get
         False and must surface a 409 rather than double-writing stock.
         """
-        res = await self.col.update_one(
-            {"id": rkn_id, "status": "DRAFT"},
-            {"$set": {"status": "RECORDING", "recording_started_at": now}},
-            session=self.session,
+        return await self.transition_status(
+            rkn_id, from_status="DRAFT", to_status="RECORDING", set_fields={"recording_started_at": now}
         )
-        return res.modified_count == 1
 
     async def release_recording_lock(self, rkn_id: str) -> int:
-        res = await self.col.update_one(
-            {"id": rkn_id, "status": "RECORDING"},
-            {"$set": {"status": "DRAFT"}, "$unset": {"recording_started_at": ""}},
-            session=self.session,
+        return await self.transition_status(
+            rkn_id, from_status="RECORDING", to_status="DRAFT", unset_fields=["recording_started_at"]
         )
-        return res.modified_count
+
+
+class PickingNoteRepository(_BaseRepository):
+    collection_name = "picking_notes"
+
+
+class IssueNoteRepository(_BaseRepository):
+    collection_name = "issue_notes"
+
+
+class TransferNoteRepository(_BaseRepository):
+    collection_name = "transfer_notes"
+
+
+class TransferRequestRepository(_BaseRepository):
+    collection_name = "transfer_requests"
 
 
 class TransactionRepository(_BaseRepository):

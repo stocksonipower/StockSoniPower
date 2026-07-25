@@ -56,11 +56,21 @@ def test_upload_png(auth_headers, png_bytes):
 
 
 def test_upload_jpg(auth_headers):
-    # Minimal JPEG SOI+EOI is invalid but server only checks content_type, not magic.
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), (255, 0, 0)).save(buf, format="JPEG")
+    files = {"file": ("t.jpg", buf.getvalue(), "image/jpeg")}
+    r = requests.post(f"{BASE_URL}/api/uploads/image", headers=auth_headers, files=files)
+    assert r.status_code == 200, r.text
+
+
+def test_upload_spoofed_content_type_rejected(auth_headers):
+    """A file claiming to be an image via Content-Type but containing non-image
+    bytes must be rejected — content_type alone is not trusted."""
     fake = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9"
     files = {"file": ("t.jpg", fake, "image/jpeg")}
     r = requests.post(f"{BASE_URL}/api/uploads/image", headers=auth_headers, files=files)
-    assert r.status_code == 200, r.text
+    assert r.status_code == 400, r.text
 
 
 def test_upload_unsupported_type(auth_headers):

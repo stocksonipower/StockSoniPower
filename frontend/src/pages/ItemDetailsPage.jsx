@@ -271,9 +271,7 @@ function ItemDetailsContent({ details, selected }) {
               <Field k="Make Part No" v={m.make_part_no} />
               <Field k="OEM" v={m.remarks_oem} />
               <Field k="Remarks" v={m.remarks_others} />
-              <Field k="Min Stock Qty" v={m.min_stock_qty} />
-              <Field k="Max Stock Qty" v={m.max_stock_qty} />
-              <Field k="Re-order Qty" v={m.reorder_qty || m.reorder_level} />
+              <Field k="Reorder Level" v={m.reorder_level} />
               <Field k="Unit" v={m.unit} />
             </div>
           ) : (
@@ -411,11 +409,11 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Transfer Requests" count={details.transfer_requests.length} icon={ArrowsLeftRight}>
         {details.transfer_requests.length === 0 ? <Empty>No transfer requests.</Empty> : (
           <Tbl
-            cols={["STR No", "Date", "From → To", "Qty", "Status"]}
+            cols={["STR No", "Date", "Destination", "Qty", "Status"]}
             align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_requests.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.str_no}</span>, fmtDate(r.str_date),
-              `${r.source_godown_name || "—"} → ${r.dest_godown_name || "—"}`,
+              it.dest_godown_name || "Any (chosen at Transfer Note stage)",
               num(it.quantity),
               <StatusPill s={r.status} />,
             ]))}
@@ -431,7 +429,7 @@ function ItemDetailsContent({ details, selected }) {
             align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.stn_no}</span>, fmtDate(r.stn_date),
-              `${r.source_godown_name || "—"} → ${r.dest_godown_name || "—"}`,
+              `${it.src_godown_name || "—"} → ${it.dest_godown_name || "—"}`,
               num(it.quantity),
               <StatusPill s={r.status} />,
             ]))}
@@ -448,10 +446,10 @@ function ItemDetailsContent({ details, selected }) {
             rows={details.transactions.map((tx) => [
               fmtDate(tx.created_at),
               <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm ${
-                tx.txn_type === "IN" ? "bg-emerald-100 text-emerald-800" :
-                tx.txn_type === "OUT" ? "bg-rose-100 text-rose-800" : "bg-violet-100 text-violet-800"
-              }`}>{tx.txn_type}</span>,
-              <span className="font-mono text-xs">{tx.ref_no || tx.ref_id || "—"}</span>,
+                tx.type === "IN" ? "bg-emerald-100 text-emerald-800" :
+                tx.type === "OUT" ? "bg-rose-100 text-rose-800" : "bg-violet-100 text-violet-800"
+              }`}>{tx.type}</span>,
+              <span className="font-mono text-xs">{tx.ref_no || "—"}</span>,
               `${tx.godown_name || "—"} / ${tx.rack_no || "—"} / ${tx.box_no || "—"}`,
               num(tx.quantity),
               num(tx.balance_after),

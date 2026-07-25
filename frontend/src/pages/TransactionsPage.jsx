@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api } from "../lib/api";
+import { api, formatApiError } from "../lib/api";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Button } from "../components/ui/button";
 import { CaretLeft, CaretRight, DownloadSimple, ArrowsClockwise } from "@phosphor-icons/react";
@@ -50,6 +50,8 @@ export default function TransactionsPage() {
       setTxns(r.data);
       const t = parseInt(r.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? r.data.length : t);
+    }).catch((err) => {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load transactions");
     }).finally(() => setLoading(false));
   };
 

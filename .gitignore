@@ -568,3 +568,5 @@ credentials.json
 !.env.example
 !backend/.env.example
 !frontend/.env.example
+.claude
+.emergent

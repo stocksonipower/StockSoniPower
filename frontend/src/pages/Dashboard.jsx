@@ -37,6 +37,7 @@ export default function Dashboard() {
   const [stockOut, setStockOut] = useState({ issuePending: null, pickingDraft: null });
   const [stockTransfer, setStockTransfer] = useState({ requestPending: null, noteDraft: null });
   const [refreshing, setRefreshing] = useState(false);
+  const inFlightRef = React.useRef(false);
   const navigate = useNavigate();
   const { isAdmin, canAccess } = useAuth();
 
@@ -51,6 +52,12 @@ export default function Dashboard() {
   };
 
   const fetchDashboardData = useCallback(() => {
+    // Guard against the 60s auto-refresh interval stacking a new round of 8 parallel
+    // calls on top of one that's still in flight (e.g. a slow response on a large
+    // dataset) — without this, overlapping fetches compound load and can resolve
+    // out of order, leaving stale data displayed after the newer one already landed.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setRefreshing(true);
     const calls = [
       api.get("/dashboard/stats")
@@ -105,21 +112,11 @@ export default function Dashboard() {
         setStockTransfer((prev) => ({ ...prev, noteDraft: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /transfer-notes failed:", e); }),
 
-      api.get("/stock-balance").then((r) => {
-        const rows = r.data;
-        const map = {};
-        rows.forEach((row) => {
-          const name = row.godown_name || "Unknown";
-          if (!map[name]) map[name] = 0;
-          map[name] += row.total_quantity || 0;
-        });
-        const summary = Object.entries(map)
-          .map(([godown_name, total_quantity]) => ({ godown_name, total_quantity }))
-          .sort((a, b) => a.godown_name.localeCompare(b.godown_name));
-        setGodownSummary(summary);
-      }).catch((e) => { console.error("[dashboard] /stock-balance failed:", e); }),
+      api.get("/dashboard/godown-summary").then((r) => {
+        setGodownSummary(r.data);
+      }).catch((e) => { console.error("[dashboard] /dashboard/godown-summary failed:", e); }),
     ];
-    Promise.all(calls).finally(() => setRefreshing(false));
+    Promise.all(calls).finally(() => { inFlightRef.current = false; setRefreshing(false); });
   }, []);
 
   useEffect(() => {

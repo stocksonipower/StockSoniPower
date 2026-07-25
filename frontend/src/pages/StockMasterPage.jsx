@@ -151,6 +151,7 @@ export default function StockMasterPage() {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(false);
   const [colFilters, setColFilters] = useState({});
@@ -222,6 +223,8 @@ export default function StockMasterPage() {
       setLoadedSearch(requestSearch);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not load stock master items");
     } finally { setLoading(false); }
   };
 
@@ -420,11 +423,13 @@ export default function StockMasterPage() {
   };
 
   const save = async () => {
+    if (saving) return;
     if (!form.part_no.trim() || !form.make.trim()) {
       toast.error("Part No. and Make are required");
       return;
     }
     const payload = { ...form, reorder_level: Math.max(0, parseInt(form.reorder_level, 10) || 0) };
+    setSaving(true);
     try {
       if (editing) await api.put(`/stock-master/${editing.id}`, payload);
       else await api.post("/stock-master", payload);
@@ -432,6 +437,8 @@ export default function StockMasterPage() {
       setOpen(false); load();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -600,15 +607,12 @@ export default function StockMasterPage() {
 
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-master-page">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-end justify-between mb-6">
         <div>
           <div className="label-sm mb-2">Catalog</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Master</h1>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
-            <ArrowsClockwise size={16} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </Button>
           {isAdmin && (
             <Button
               onClick={() => setColumnSettingsOpen(true)}
@@ -662,14 +666,11 @@ export default function StockMasterPage() {
           <Button onClick={() => excelInput.current?.click()} variant="outline" className="rounded-sm border-slate-300" data-testid="bulk-upload-button">
             <UploadSimple size={16} weight="bold" className="mr-2" /> Bulk Import
           </Button>
-          <Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
-            <Plus size={16} weight="bold" className="mr-2" /> Add New Item
-          </Button>
         </div>
       </div>
 
       <div className="flex items-center gap-3 mb-4 flex-wrap">
-        <div className="relative max-w-md flex-1">
+        <div className="relative flex-1 min-w-[240px]">
           <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
             ref={searchInputRef}
@@ -726,14 +727,24 @@ export default function StockMasterPage() {
           </div>
         )}
 
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span>{activeFilterCount > 0 ? `${activeFilterCount} column filter(s) active` : ""}</span>
-        </div>
+        {activeFilterCount > 0 && (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <FunnelSimple size={14} weight="bold" />
+            <span>{activeFilterCount} column filter(s) active</span>
+          </div>
+        )}
         {(activeFilterCount > 0 || sort.key) && (
           <Button onClick={() => { setColFilters({}); setSort({ key: null, dir: null }); }} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">
             <X size={12} weight="bold" className="mr-1" /> Clear filters & sort
           </Button>
         )}
+        <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
+          <ArrowsClockwise size={16} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+        </Button>
+        <div className="w-px h-6 bg-slate-200" aria-hidden="true" />
+        <Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
+          <Plus size={16} weight="bold" className="mr-2" /> Add New Item
+        </Button>
       </div>
 
       {/* Scroll container — both axes scroll, sticky header inside */}
@@ -742,12 +753,12 @@ export default function StockMasterPage() {
         style={{ maxHeight: "calc(100vh - 320px)", minHeight: "400px" }}
         data-testid="stock-master-scroller"
       >
-        <table className="data-table w-full">
+        <table className="data-table data-table-fixed w-full">
           <thead>
             <tr>
-              <th className={`${stickyTh} w-14`}>SL NO</th>
+              <th className={stickyTh} style={{ width: 56 }}>SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={stickyTh} style={{ minWidth: c.width, maxWidth: c.width }}>
+                <th key={c.key} className={stickyTh} style={{ width: c.width }}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -759,7 +770,7 @@ export default function StockMasterPage() {
                   />
                 </th>
               ))}
-              <th className={`${stickyTh} text-right`}>ACTIONS</th>
+              <th className={`${stickyTh} text-right`} style={{ width: 96 }}>ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -772,7 +783,7 @@ export default function StockMasterPage() {
               const renderCell = (c) => {
                 if (c.isImage) {
                   return (
-                    <td key={c.key} className={tdCls(idx, "images")} style={{ minWidth: c.width, maxWidth: c.width }}>
+                    <td key={c.key} className={tdCls(idx, "images")} style={{ width: c.width }}>
                       {(() => {
                         const list = Array.isArray(i.images) && i.images.length > 0 ? i.images : (i.image ? [i.image] : []);
                         if (list.length === 0) {
@@ -794,45 +805,46 @@ export default function StockMasterPage() {
                     </td>
                   );
                 }
-                // Per-key inner content + className. Keeps existing styling identical.
-                const tdStyle = { minWidth: c.width, maxWidth: c.width };
+                // Per-key inner content + className. `title` surfaces the full value on
+                // hover since every cell now truncates to its column's fixed width.
+                const tdStyle = { width: c.width };
                 switch (c.key) {
                   case "model":
-                    return <td key={c.key} ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")} style={tdStyle}>{i.model || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("model")} className={tdCls(idx, "model", "font-mono text-slate-600")} style={tdStyle} title={i.model || ""}>{i.model || "—"}</td>;
                   case "part_no":
-                    return <td key={c.key} ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")} style={tdStyle}><PartNoLink partNo={i.part_no} make={i.make} /></td>;
+                    return <td key={c.key} ref={cellRef("part_no")} className={tdCls(idx, "part_no", "font-mono font-semibold")} style={tdStyle} title={i.part_no || ""}><PartNoLink partNo={i.part_no} make={i.make} /></td>;
                   case "old_part_no":
-                    return <td key={c.key} ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.old_part_no || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("old_part_no")} className={tdCls(idx, "old_part_no", "font-mono text-slate-600")} style={tdStyle} title={i.old_part_no || ""}>{i.old_part_no || "—"}</td>;
                   case "new_part_no":
-                    return <td key={c.key} ref={cellRef("new_part_no")} className={tdCls(idx, "new_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.new_part_no || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("new_part_no")} className={tdCls(idx, "new_part_no", "font-mono text-slate-600")} style={tdStyle} title={i.new_part_no || ""}>{i.new_part_no || "—"}</td>;
                   case "make_part_no":
-                    return <td key={c.key} ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")} style={tdStyle}>{i.make_part_no || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("make_part_no")} className={tdCls(idx, "make_part_no", "font-mono text-slate-600")} style={tdStyle} title={i.make_part_no || ""}>{i.make_part_no || "—"}</td>;
                   case "description_1":
-                    return <td key={c.key} ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700 max-w-[200px] truncate")} style={tdStyle}>{i.description_1 || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("description_1")} className={tdCls(idx, "description_1", "text-slate-700")} style={tdStyle} title={i.description_1 || ""}>{i.description_1 || "—"}</td>;
                   case "description_2":
-                    return <td key={c.key} ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700 max-w-[200px] truncate")} style={tdStyle}>{i.description_2 || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("description_2")} className={tdCls(idx, "description_2", "text-slate-700")} style={tdStyle} title={i.description_2 || ""}>{i.description_2 || "—"}</td>;
                   case "remarks_oem":
-                    return <td key={c.key} ref={cellRef("remarks_oem")} className={tdCls(idx, "remarks_oem", "text-slate-600 max-w-[180px] truncate")} style={tdStyle}>{i.remarks_oem || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("remarks_oem")} className={tdCls(idx, "remarks_oem", "text-slate-600")} style={tdStyle} title={i.remarks_oem || ""}>{i.remarks_oem || "—"}</td>;
                   case "remarks_others":
-                    return <td key={c.key} ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600 max-w-[180px] truncate")} style={tdStyle}>{i.remarks_others || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("remarks_others")} className={tdCls(idx, "remarks_others", "text-slate-600")} style={tdStyle} title={i.remarks_others || ""}>{i.remarks_others || "—"}</td>;
                   case "make":
-                    return <td key={c.key} ref={cellRef("make")} className={tdCls(idx, "make")} style={tdStyle}>{i.make}</td>;
+                    return <td key={c.key} ref={cellRef("make")} className={tdCls(idx, "make")} style={tdStyle} title={i.make || ""}>{i.make}</td>;
                   case "item_category":
-                    return <td key={c.key} ref={cellRef("item_category")} className={tdCls(idx, "item_category")} style={tdStyle}>{i.item_category || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("item_category")} className={tdCls(idx, "item_category")} style={tdStyle} title={i.item_category || ""}>{i.item_category || "—"}</td>;
                   case "unit":
-                    return <td key={c.key} ref={cellRef("unit")} className={tdCls(idx, "unit", "font-mono text-slate-700")} style={tdStyle}>{i.unit || "—"}</td>;
+                    return <td key={c.key} ref={cellRef("unit")} className={tdCls(idx, "unit", "font-mono text-slate-700")} style={tdStyle} title={i.unit || ""}>{i.unit || "—"}</td>;
                   case "reorder_level":
                     return <td key={c.key} ref={cellRef("reorder_level")} className={tdCls(idx, "reorder_level", "font-mono text-slate-700")} style={tdStyle}>{i.reorder_level || 0}</td>;
                   default:
-                    return <td key={c.key} className={tdCls(idx, c.key)} style={tdStyle}>{i[c.key] ?? "—"}</td>;
+                    return <td key={c.key} className={tdCls(idx, c.key)} style={tdStyle} title={String(i[c.key] ?? "")}>{i[c.key] ?? "—"}</td>;
                 }
               };
               return (
                 <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
-                  <td className={tdCls(idx, null, "font-mono text-slate-500")}>{idx + 1}</td>
+                  <td className={tdCls(idx, null, "font-mono text-slate-500")} style={{ width: 56 }}>{idx + 1}</td>
                   {columns.map(renderCell)}
 
-                  <td className={tdCls(idx, null, "text-right whitespace-nowrap")}>
+                  <td className={tdCls(idx, null, "text-right whitespace-nowrap")} style={{ width: 96 }}>
                     <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
                       <Pencil size={14} />
                     </button>
@@ -878,61 +890,61 @@ export default function StockMasterPage() {
 
       {/* Add / Edit dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl rounded-sm">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-black">{editing ? "Edit Item" : "New Item"}</DialogTitle>
+        <DialogContent className="max-w-2xl rounded-sm p-0 gap-0 max-h-[85vh] flex flex-col">
+          <DialogHeader className="px-5 pt-5 pb-3 border-b border-slate-200">
+            <DialogTitle className="text-lg font-bold">{editing ? "Edit Item" : "New Item"}</DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Model" val={form.model} on={(v) => setForm({ ...form, model: v })} testid="form-model" />
-            <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
-            <Field label="Old Part No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
-            <Field label="New Part No." val={form.new_part_no} on={(v) => setForm({ ...form, new_part_no: v })} testid="form-new-part-no" />
-            <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
-            <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
-            <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
-            <div className="col-span-2 grid grid-cols-2 gap-4">
+          <div className="flex-1 overflow-y-auto px-5 py-4">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+              <Field label="Model" val={form.model} on={(v) => setForm({ ...form, model: v })} testid="form-model" />
+              <Field label="Part No. *" val={form.part_no} on={(v) => setForm({ ...form, part_no: v })} testid="form-part-no" />
+              <Field label="Old Part No." val={form.old_part_no} on={(v) => setForm({ ...form, old_part_no: v })} testid="form-old-part-no" />
+              <Field label="New Part No." val={form.new_part_no} on={(v) => setForm({ ...form, new_part_no: v })} testid="form-new-part-no" />
+              <Field label="Make Part No." val={form.make_part_no} on={(v) => setForm({ ...form, make_part_no: v })} testid="form-make-part-no" />
+              <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
+              <Field label="Description 1" val={form.description_1} on={(v) => setForm({ ...form, description_1: v })} testid="form-desc-1" />
+              <Field label="Description 2" val={form.description_2} on={(v) => setForm({ ...form, description_2: v })} testid="form-desc-2" />
               <div>
                 <Label className="label-sm">OEM</Label>
-                <Textarea value={form.remarks_oem} onChange={(e) => setForm({ ...form, remarks_oem: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-oem" />
+                <Textarea value={form.remarks_oem} onChange={(e) => setForm({ ...form, remarks_oem: e.target.value })} className="mt-1.5 rounded-sm" rows={2} data-testid="form-remarks-oem" />
               </div>
               <div>
                 <Label className="label-sm">Remarks</Label>
-                <Textarea value={form.remarks_others} onChange={(e) => setForm({ ...form, remarks_others: e.target.value })} className="mt-2 rounded-sm" rows={2} data-testid="form-remarks-others" />
+                <Textarea value={form.remarks_others} onChange={(e) => setForm({ ...form, remarks_others: e.target.value })} className="mt-1.5 rounded-sm" rows={2} data-testid="form-remarks-others" />
               </div>
-            </div>
-            <Field label="Make *" val={form.make} on={(v) => setForm({ ...form, make: v })} testid="form-make" />
-            <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
-            <Field label="Unit" val={form.unit} on={(v) => setForm({ ...form, unit: v })} testid="form-unit" />
-            <div>
-              <Label className="label-sm">Reorder Level</Label>
-              <Input
-                type="number" min="0" inputMode="numeric"
-                value={form.reorder_level ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setForm({ ...form, reorder_level: v === "" ? "" : Math.max(0, parseInt(v, 10) || 0) });
-                }}
-                onBlur={(e) => {
-                  if (e.target.value === "" || isNaN(parseInt(e.target.value, 10))) {
-                    setForm((f) => ({ ...f, reorder_level: 0 }));
-                  }
-                }}
-                className="mt-2 rounded-sm font-mono"
-                data-testid="form-reorder-level"
-              />
-              <div className="text-[11px] text-slate-500 mt-1">Item shows in Low Stock when current qty ≤ this value. Set 0 to disable.</div>
-            </div>
-            <div className="col-span-2">
-              <Label className="label-sm">Images</Label>
-              <div className="mt-2">
-                <StockMasterImageUploader value={form.images} onChange={(images) => setForm((f) => ({ ...f, images }))} testid="form-images" />
+              <Field label="Item Category" val={form.item_category} on={(v) => setForm({ ...form, item_category: v })} testid="form-category" />
+              <Field label="Unit" val={form.unit} on={(v) => setForm({ ...form, unit: v })} testid="form-unit" />
+              <div>
+                <Label className="label-sm">Reorder Level</Label>
+                <Input
+                  type="number" min="0" inputMode="numeric"
+                  value={form.reorder_level ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setForm({ ...form, reorder_level: v === "" ? "" : Math.max(0, parseInt(v, 10) || 0) });
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === "" || isNaN(parseInt(e.target.value, 10))) {
+                      setForm((f) => ({ ...f, reorder_level: 0 }));
+                    }
+                  }}
+                  className="mt-1.5 rounded-sm font-mono"
+                  data-testid="form-reorder-level"
+                />
+                <div className="text-[11px] text-slate-500 mt-1">Shows in Low Stock when qty ≤ this value. 0 to disable.</div>
+              </div>
+              <div className="col-span-2">
+                <Label className="label-sm">Images</Label>
+                <div className="mt-1.5">
+                  <StockMasterImageUploader value={form.images} onChange={(images) => setForm((f) => ({ ...f, images }))} testid="form-images" />
+                </div>
               </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-sm">Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="form-save-button">
-              {editing ? "Update" : "Create"}
+          <DialogFooter className="px-5 py-3 border-t border-slate-200">
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={saving} className="rounded-sm">Cancel</Button>
+            <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="form-save-button">
+              {saving ? "Saving…" : (editing ? "Update" : "Create")}
             </Button>
           </DialogFooter>
         </DialogContent>

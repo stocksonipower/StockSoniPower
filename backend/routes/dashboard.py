@@ -96,7 +96,14 @@ async def stock_balance(search: Optional[str] = None, user=Depends(get_current_u
             if any(s in str(row.get(f, "") or "").lower() for f in search_fields)
         ]
 
-    out.sort(key=lambda r: (r.get("part_no", ""), r.get("make", "")))
+    # Full deterministic ordering: MongoDB's $group does not guarantee stable output
+    # order, so without a tiebreak beyond (part_no, make) the multiple location rows
+    # a single item can have (different godown/rack/box) could shuffle relative to
+    # each other on every refresh. Sorting on the complete row identity fixes that.
+    out.sort(key=lambda r: (
+        r.get("part_no", ""), r.get("make", ""),
+        r.get("godown_name", ""), r.get("rack_no", ""), r.get("box_no", ""),
+    ))
     return out
 
 
@@ -106,9 +113,13 @@ async def low_stock(user=Depends(get_current_user)):
     items = await db.stock_master.find({"reorder_level": {"$gt": 0}}, {"_id": 0}).to_list(50000)
     if not items:
         return []
-    pairs = [{"part_no": i["part_no"], "make": i["make"]} for i in items]
+    # A single indexed $in on part_no (the compound (part_no, make) index already
+    # covers this) scales far better than an $or of one clause per item — at large
+    # catalogs (tens of thousands of low-stock-tracked items) an $or that size is
+    # past what the query planner handles well and risks a full collection scan.
+    part_nos = list({i["part_no"] for i in items})
     pipeline = [
-        {"$match": {"$or": pairs}},
+        {"$match": {"part_no": {"$in": part_nos}}},
         {"$group": {
             "_id": {"part_no": "$part_no", "make": "$make"},
             "total_quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
@@ -131,7 +142,45 @@ async def low_stock(user=Depends(get_current_user)):
                 "reorder_level": rl,
                 "total_quantity": qty,
             })
-    out.sort(key=lambda x: x["total_quantity"])
+    # Tiebreak on (part_no, make): ties on total_quantity are common (e.g. several
+    # items sitting at exactly 0), and without a full tiebreak their relative order
+    # depends on the unordered stock_master scan above, which can shuffle on every
+    # refresh — same class of instability fixed for Stock Summary and Transactions.
+    out.sort(key=lambda x: (x["total_quantity"], x["part_no"], x["make"]))
+    return out
+
+
+@router.get("/dashboard/godown-summary")
+async def dashboard_godown_summary(user=Depends(get_current_user)):
+    """Total quantity per godown — same semantics as summing the positive-balance
+    location rows from /stock-balance grouped by godown name, but computed entirely
+    in the database. The Dashboard widget only needs one row per godown; fetching
+    the full per-(part, make, location) Stock Summary just to sum it client-side
+    doesn't scale (the response grows with the whole catalog, not with the number
+    of godowns)."""
+    pipeline = [
+        {"$group": {
+            "_id": {
+                "godown_id": "$godown_id", "rack_id": "$rack_id", "box_id": "$box_id",
+                "part_no": "$part_no", "make": "$make",
+            },
+            "quantity": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+        }},
+        {"$match": {"quantity": {"$gt": 0}}},
+        {"$group": {"_id": "$_id.godown_id", "total_quantity": {"$sum": "$quantity"}}},
+    ]
+    rows = await db.transactions.aggregate(pipeline).to_list(20000)
+    godown_ids = [r["_id"] for r in rows if r["_id"]]
+    g_map = {}
+    if godown_ids:
+        async for g in db.godowns.find({"id": {"$in": godown_ids}}, {"_id": 0, "id": 1, "godown_name": 1}):
+            g_map[g["id"]] = g.get("godown_name", "")
+    by_name = {}
+    for r in rows:
+        name = g_map.get(r["_id"], "") or "Unknown"
+        by_name[name] = by_name.get(name, 0) + r["total_quantity"]
+    out = [{"godown_name": name, "total_quantity": qty} for name, qty in by_name.items()]
+    out.sort(key=lambda x: x["godown_name"])
     return out
 
 

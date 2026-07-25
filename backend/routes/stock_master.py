@@ -1,19 +1,42 @@
 """Stock Master routes — extracted from server.py with zero logic changes."""
 import io
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 
-from deps import db, get_current_user, _notify, now_iso
+from deps import db, get_current_user, logger, _notify, now_iso
 from models import StockMaster, StockMasterCreate
 from routes._helpers import _csv_response, _csv_safe_value, _csv_streaming_response, _normalize_col
+from storage import delete_object
 
 router = APIRouter()
+
+
+async def _cleanup_removed_images(paths: List[str]) -> None:
+    """Best-effort delete of no-longer-referenced R2 objects + mark uploads soft-deleted.
+    Never raises — an R2 cleanup failure must not block the stock-master write that
+    already succeeded in Mongo."""
+    for path in paths:
+        if not path:
+            continue
+        try:
+            # boto3 is synchronous — run off the event loop so one slow R2 call
+            # doesn't stall every other concurrent request.
+            await run_in_threadpool(delete_object, path)
+            await db.uploads.update_one(
+                {"storage_path": path},
+                {"$set": {"is_deleted": True, "deleted_at": now_iso()}},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to clean up orphaned image {path}: {e}")
 
 
 @router.post("/stock-master", response_model=StockMaster)
@@ -72,7 +95,11 @@ def _build_stock_master_query(request: Request, search: Optional[str] = None) ->
 
     if search:
         s = search.strip()
-        search_clauses = [{field: {"$regex": s, "$options": "i"}} for field in _SEARCH_FIELDS]
+        # Escape regex metacharacters — `search` is free text, not a pattern; without
+        # this a literal "." or "|" matches unintentionally, and a pathological
+        # pattern (e.g. "(a+)+$") could cause expensive backtracking server-side.
+        s_escaped = re.escape(s)
+        search_clauses = [{field: {"$regex": s_escaped, "$options": "i"}} for field in _SEARCH_FIELDS]
         try:
             numeric_search = int(float(s))
             if float(s) == numeric_search:
@@ -451,8 +478,21 @@ async def update_stock_master(item_id: str, payload: StockMasterCreate, user=Dep
         if conflict:
             raise HTTPException(status_code=400, detail="Item with this part_no + make already exists")
     update_doc = payload.model_dump()
-    await db.stock_master.update_one({"id": item_id}, {"$set": update_doc})
+    try:
+        await db.stock_master.update_one({"id": item_id}, {"$set": update_doc})
+    except DuplicateKeyError:
+        # Two concurrent PUTs can both pass the find_one check above before either
+        # writes — the unique (part_no, make) index is the real guard; surface it
+        # as the same 400 the create path already returns instead of a bare 500.
+        raise HTTPException(status_code=400, detail="Item with this part_no + make already exists")
     item = await db.stock_master.find_one({"id": item_id}, {"_id": 0})
+
+    old_images = set(existing.get("images") or [])
+    new_images = set(payload.images or [])
+    removed = old_images - new_images
+    if removed:
+        await _cleanup_removed_images(list(removed))
+
     return item
 
 
@@ -475,6 +515,8 @@ async def delete_stock_master(item_id: str, user=Depends(get_current_user)):
         message=f"{user.get('email')} deleted {item.get('part_no')} / {item.get('make')}.",
         audience="module", ref_collection="stock_master", ref_id=item_id,
     )
+    if item.get("images"):
+        await _cleanup_removed_images(item["images"])
     return {"ok": True}
 
 
