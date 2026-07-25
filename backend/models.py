@@ -137,12 +137,12 @@ class StockOutCreate(BaseModel):
 class ReceiptNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: Optional[float] = None      # what the invoice claims; omitted for GENERAL stock-in
-    received_qty: Optional[float] = None     # what physically arrived (None on draft)
+    invoice_qty: Optional[int] = None      # what the invoice claims; omitted for GENERAL stock-in
+    received_qty: Optional[int] = None     # what physically arrived (None on draft)
     description_1: Optional[str] = ""        # denormalized from stock_master.description_1 (read-only display)
     # Legacy alias — kept so existing racking code keeps working without changes.
     # Always written equal to received_qty when finalized, else equal to invoice_qty.
-    quantity: Optional[float] = None
+    quantity: Optional[int] = None
 
 
 class ReceiptNoteCreate(BaseModel):
@@ -189,10 +189,10 @@ class ReceiptNote(BaseModel):
 class ShortReceivedNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: float = 0                    # qty on the original invoice (carried from parent RN row)
-    received_qty: float = 0                   # qty already received on the parent RN row (carried over)
-    short_qty: float                          # qty that was short on the parent (= invoice_qty - received_qty)
-    fulfilled_qty: Optional[float] = None     # qty user has now received against the shortfall (filled at finalize)
+    invoice_qty: int = 0                    # qty on the original invoice (carried from parent RN row)
+    received_qty: int = 0                   # qty already received on the parent RN row (carried over)
+    short_qty: int                          # qty that was short on the parent (= invoice_qty - received_qty)
+    fulfilled_qty: Optional[int] = None     # qty user has now received against the shortfall (filled at finalize)
     # Master snapshot — denormalized for display
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
@@ -205,7 +205,7 @@ class ShortReceivedNoteItem(BaseModel):
     item_category: Optional[str] = ""
     unit: Optional[str] = ""
     # Legacy alias - mirrors fulfilled_qty so racking flow can read it like any other note.
-    quantity: Optional[float] = None
+    quantity: Optional[int] = None
     # Slice-model: list of fulfilled batches. Each entry references a child SRN
     # holding the fulfilled portion. {child_srn_id, child_srn_no, fulfilled_qty,
     # fulfilled_date, created_at}.
@@ -250,11 +250,11 @@ class ShortReceivedNote(BaseModel):
 class ExtraReceivedNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: float = 0                    # invoice qty on the parent RN row
-    received_qty: float = 0                   # received qty on the parent RN row
-    extra_qty: float                          # qty over the invoice (= received_qty - invoice_qty)
-    accepted_qty: Optional[float] = None      # filled when finalized; rackable
-    rejected_qty: Optional[float] = None      # filled when finalized; returned to supplier (NOT rackable)
+    invoice_qty: int = 0                    # invoice qty on the parent RN row
+    received_qty: int = 0                   # received qty on the parent RN row
+    extra_qty: int                          # qty over the invoice (= received_qty - invoice_qty)
+    accepted_qty: Optional[int] = None      # filled when finalized; rackable
+    rejected_qty: Optional[int] = None      # filled when finalized; returned to supplier (NOT rackable)
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -264,7 +264,7 @@ class ExtraReceivedNoteItem(BaseModel):
     remarks_others: Optional[str] = ""
     item_category: Optional[str] = ""
     # Legacy alias - mirrors accepted_qty for the racking pipeline.
-    quantity: Optional[float] = None
+    quantity: Optional[int] = None
     # Slice-model: list of accepted batches. Each entry references a child ERN
     # holding the accepted portion. {child_ern_id, child_ern_no, accepted_qty,
     # accepted_date, created_at}.
@@ -305,7 +305,7 @@ class ExtraReceivedNote(BaseModel):
 class RackingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: int
     # Denormalized stock master fields (filled at create time)
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
@@ -366,7 +366,7 @@ class RackingNote(BaseModel):
 class IssueNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: int
     # Optional office-selected godown preference. Rack/box allocation belongs to Picking.
     selected_godown_id: Optional[str] = None
     selected_godown_name: Optional[str] = None
@@ -377,7 +377,6 @@ class IssueNoteItem(BaseModel):
 
 
 class IssueNoteCreate(BaseModel):
-    issued_to: str = ""
     items: List[IssueNoteItem] = []
     assigned_to_user_id: Optional[str] = None
 
@@ -388,7 +387,6 @@ class IssueNote(BaseModel):
     in_date: str
     fy: str
     serial: int
-    issued_to: str = ""
     items: List[IssueNoteItem] = []
     status: str = "PICKING_PENDING"  # PICKING_PENDING | PARTIALLY_PICKED | FULLY_PICKED
     picked_at: Optional[str] = None
@@ -402,7 +400,7 @@ class IssueNote(BaseModel):
 class PickingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: int
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -435,7 +433,6 @@ class PickingNote(BaseModel):
     issue_note_no: str = ""
     issue_note_date: str = ""
     parent_picking_note_id: Optional[str] = None
-    issued_to: str = ""
     assigned_items: List[IssueNoteItem] = []
     items: List[PickingNoteItem] = []
     status: str = "PENDING"  # PENDING | DRAFT | COMPLETED | RECORDED(legacy)
@@ -448,7 +445,7 @@ class PickingNote(BaseModel):
 class TransferRequestItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: int
     # Optional destination preference (the Transfer Note can override)
     dest_godown_id: Optional[str] = ""
     dest_godown_name: Optional[str] = ""
@@ -485,7 +482,7 @@ class TransferRequest(BaseModel):
 class TransferNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: int
     # Master snapshot
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""

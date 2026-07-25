@@ -253,7 +253,6 @@ def test_issue_note_assignment_blocks_other_staff(admin_h, alice, bob, seed_mast
     inn = requests.post(
         f"{BASE_URL}/api/issue-notes",
         json={
-            "issued_to": "Workshop",
             "items": [{"part_no": seed_master["part_no"], "make": seed_master["make"], "quantity": 5}],
             "assigned_to_user_id": alice["id"],
         },
@@ -271,7 +270,6 @@ def test_issue_note_assignment_blocks_other_staff(admin_h, alice, bob, seed_mast
         upd = requests.put(
             f"{BASE_URL}/api/issue-notes/{inn_doc['id']}",
             json={
-                "issued_to": "Workshop2",
                 "items": [{"part_no": seed_master["part_no"], "make": seed_master["make"], "quantity": 6}],
                 "assigned_to_user_id": alice["id"],
             },
@@ -311,7 +309,6 @@ def test_picking_note_blocked_for_other_when_in_assigned(admin_h, alice, bob, se
     inn = requests.post(
         f"{BASE_URL}/api/issue-notes",
         json={
-            "issued_to": "Lab",
             "items": [{"part_no": seed_master["part_no"], "make": seed_master["make"], "quantity": 4}],
             "assigned_to_user_id": alice["id"],
         },

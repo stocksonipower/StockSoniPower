@@ -41,15 +41,15 @@ function Detail({ k, v }) {
 }
 
 function qtySum(items) {
-  return (items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+  return (items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
 }
 
 function transferAssignedQty(stn) {
-  return parseFloat(stn.assigned_qty_total) || qtySum(stn.assigned_items || []);
+  return parseInt(stn.assigned_qty_total) || qtySum(stn.assigned_items || []);
 }
 
 function transferMovedQty(stn) {
-  return parseFloat(stn.transferred_qty_total) || qtySum(stn.items || []);
+  return parseInt(stn.transferred_qty_total) || qtySum(stn.items || []);
 }
 
 function transferNoteDone(stn) {
@@ -146,8 +146,8 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     { key: "str_no", label: "TRANSFER REQUEST NO", value: (r) => r.str_no || "" },
     { key: "purpose", label: "PURPOSE", value: (r) => r.purpose || "" },
     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "REQUESTED", value: (r) => parseFloat(r.requested_qty_total) || qtySum(r.items)},
-    { key: "progress", label: "TRANSFERRED", value: (r) => `${parseFloat(r.transferred_qty_total) || 0} / ${parseFloat(r.requested_qty_total) || qtySum(r.items)}`},
+    { key: "qty_total", label: "REQUESTED", value: (r) => parseInt(r.requested_qty_total) || qtySum(r.items)},
+    { key: "progress", label: "TRANSFERRED", value: (r) => `${parseInt(r.transferred_qty_total) || 0} / ${parseInt(r.requested_qty_total) || qtySum(r.items)}`},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -205,8 +205,8 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = parseFloat(r.requested_qty_total) || qtySum(r.items);
-              const movedQty = parseFloat(r.transferred_qty_total) || 0;
+              const totalQty = parseInt(r.requested_qty_total) || qtySum(r.items);
+              const movedQty = parseInt(r.transferred_qty_total) || 0;
               const isFully = r.status === "COMPLETED" || r.status === "FULLY_TRANSFERRED";
               const isPartial = r.status === "IN_PROGRESS" || r.status === "PARTIALLY_TRANSFERRED";
               const hasNotes = true;
@@ -496,7 +496,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
     items.forEach((r) => {
       if (!r.part_no || !r.make) return;
       const k = `${r.part_no}||${r.make}`;
-      m[k] = (m[k] || 0) + (parseFloat(r.quantity) || 0);
+      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return m;
   }, [items]);
@@ -507,7 +507,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
       const it = items[i];
       if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return; }
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
-      const q = parseFloat(it.quantity);
+      const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
       if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock`);
@@ -529,7 +529,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
         purpose: purpose.trim(),
         assigned_to_user_id: assignedToUserId || null,
         items: items.map((it) => ({
-          part_no: it.part_no.trim(), make: it.make.trim(), quantity: parseFloat(it.quantity),
+          part_no: it.part_no.trim(), make: it.make.trim(), quantity: parseInt(it.quantity),
           dest_godown_id: it.dest_godown_id || "", dest_godown_name: it.dest_godown_name || "",
           dest_rack_id: it.dest_rack_id || "", dest_rack_no: it.dest_rack_no || "",
           dest_box_id: it.dest_box_id || "", dest_box_no: it.dest_box_no || "", dest_box_category: it.dest_box_category || "",
@@ -601,7 +601,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const overStock = it.available_qty !== undefined && (parseFloat(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+                const overStock = it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
                 const destBoxes = boxesByRack[it.dest_rack_id] || [];
                 return (
@@ -630,7 +630,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                       </Select>
                     </td>
                     <td className="w-28">
-                      <Input type="number" min="0.001" step="any" value={it.quantity} disabled={!it.make}
+                      <Input type="number" min="1" step="1" value={it.quantity} disabled={!it.make}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                         placeholder="0" className={`rounded-sm font-mono h-8 text-center ${overStock ? "border-red-400" : ""}`}
                         data-testid={`str-qty-${idx}`} />
@@ -1069,7 +1069,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       if (srcHasBoxes && !it.src_box_id) { toast.error(`Row ${i + 1}: pick Source Box`); return; }
       const destHasBoxes = it.dest_rack_id ? (boxesByRack[it.dest_rack_id] || []).length > 0 : false;
       if (destHasBoxes && !it.dest_box_id) { toast.error(`Row ${i + 1}: pick Destination Box`); return; }
-      const q = parseFloat(it.quantity);
+      const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
       if (it.src_godown_id === it.dest_godown_id) {
         toast.error(`Row ${i + 1}: source and destination godown must differ`); return;
@@ -1080,7 +1080,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       const payload = {
         transfer_request_id: selectedStrId,
         items: items.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -1164,7 +1164,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   const srcBoxes = boxesByRack[it.src_rack_id] || [];
                   const destRacks = racksByGodown[it.dest_godown_id] || [];
                   const destBoxes = boxesByRack[it.dest_rack_id] || [];
-                  const overPending = (parseFloat(it.quantity) || 0) > (it.pending_qty || 0) + 1e-6;
+                  const overPending = (parseInt(it.quantity) || 0) > (it.pending_qty || 0) + 1e-6;
                   return (
                     <tr key={idx} data-testid={`stn-item-row-${idx}`} className={overPending ? "bg-red-50 align-top" : "align-top"}>
                       <td className="font-mono text-slate-500 pt-3">{idx + 1}</td>
@@ -1175,7 +1175,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                       </td>
                       <td className="text-center pt-3">
                         <div className="font-mono text-[11px] text-slate-500">req {it.requested_qty} · pend <b className="text-slate-900">{it.pending_qty}</b></div>
-                        <Input type="number" min="0.001" step="any" value={it.quantity}
+                        <Input type="number" min="1" step="1" value={it.quantity}
                           onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                           className={`rounded-sm font-mono h-8 text-center mt-1 w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
                           data-testid={`stn-qty-${idx}`} />

@@ -378,11 +378,11 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Issue Notes" count={details.issue_notes.length} icon={ArrowUp}>
         {details.issue_notes.length === 0 ? <Empty>No issue notes.</Empty> : (
           <Tbl
-            cols={["IN No", "Date", "Issued To", "Qty", "Status"]}
+            cols={["IN No", "Date", "Assigned To", "Qty", "Status"]}
             align={["left", "left", "left", "center", "left"]}
             rows={details.issue_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.in_no}</span>, fmtDate(r.in_date),
-              r.issued_to_name || r.issued_to || "—",
+              r.assigned_to_name || "—",
               num(it.issued_qty || it.quantity),
               <StatusPill s={r.status} />,
             ]))}

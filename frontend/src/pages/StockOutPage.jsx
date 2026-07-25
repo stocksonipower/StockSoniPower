@@ -53,11 +53,11 @@ function pickingAssignedItems(pn) {
 }
 
 function pickingAssignedQty(pn) {
-  return pickingAssignedItems(pn).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+  return pickingAssignedItems(pn).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
 }
 
 function pickingPickedQty(pn) {
-  return (pn.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+  return (pn.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
 }
 
 function pickingDisplayItems(pn) {
@@ -112,7 +112,7 @@ function printPickingNote(pn) {
     <div><div class="label">Issue Number</div><div class="value">${htmlEscape(pn.issue_note_no || "")}</div></div>
     <div><div class="label">Picking Number</div><div class="value">${htmlEscape(pn.pn_no || "")}</div></div>
     <div><div class="label">Date</div><div class="value">${htmlEscape(fmtDate(pn.pn_date))}</div></div>
-    <div><div class="label">Issued To</div><div class="value">${htmlEscape(pn.issued_to || "")}</div></div>
+    <div><div class="label">Assigned To</div><div class="value">${htmlEscape(pn.parent_assigned_to_name || "")}</div></div>
     <div><div class="label">Picker</div><div class="value">${htmlEscape(pn.created_by || "")}</div></div>
     <div><div class="label">Status</div><div class="value">${htmlEscape(pn.status || "")}</div></div>
   </div>
@@ -244,9 +244,9 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   const columns = useMemo(() => [
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.in_date) },
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.in_no || "" },
-    { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
+    { key: "assigned_to_name", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || "" },
      { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0)},
+    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0)},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -304,7 +304,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+              const totalQty = (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
               const isFully = r.status === "COMPLETED" || r.status === "FULLY_PICKED";
               const isPartial = r.status === "PICKING_IN_PROGRESS" || r.status === "PICKED" || r.status === "PARTIALLY_PICKED";
               const hasPicking = isFully || isPartial;
@@ -325,7 +325,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                       {r.in_no}
                     </button>
                   </td>
-                  <td className="text-slate-700">{r.issued_to || "—"}</td>
+                  <td className="text-slate-700">{r.assigned_to_name || "—"}</td>
                                     <td className="font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="font-mono font-bold text-slate-900">{totalQty}</td>
                   <td>
@@ -401,7 +401,6 @@ function IssueNoteDetailDialog({ inn, onClose }) {
             </DialogHeader>
             <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
               <Detail k="Issue Note Date" v={fmtDate(inn.in_date)} />
-              <Detail k="Issued To" v={inn.issued_to || "—"} />
               <Detail k="Status" v={inn.status} />
               <Detail k="Created At" v={new Date(inn.created_at).toLocaleString()} />
               <div className="col-span-2">
@@ -479,7 +478,6 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const isEdit = !!editing;
   const [inNo, setInNo] = useState("");
   const [inDate, setInDate] = useState("");
-  const [issuedTo, setIssuedTo] = useState("");
   const [items, setItems] = useState([emptyIssueItem()]);
   const [saving, setSaving] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
@@ -488,7 +486,6 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     if (isEdit) {
       setInNo(editing.in_no || "");
       setInDate(editing.in_date || "");
-      setIssuedTo(editing.issued_to || "");
       setAssignedToUserId(editing.assigned_to_user_id || "");
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "", make: it.make || "", quantity: it.quantity ?? "",
@@ -595,7 +592,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     items.forEach((r) => {
       if (!r.part_no || !r.make) return;
       const k = `${r.part_no}||${r.make}`;
-      m[k] = (m[k] || 0) + (parseFloat(r.quantity) || 0);
+      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return m;
   }, [items]);
@@ -605,7 +602,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     items.forEach((r) => {
       if (!r.part_no || !r.make || !r.selected_godown_id) return;
       const k = `${r.part_no}||${r.make}||${r.selected_godown_id}`;
-      m[k] = (m[k] || 0) + (parseFloat(r.quantity) || 0);
+      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return m;
   }, [items]);
@@ -616,7 +613,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       const it = items[i];
       if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return; }
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
-      const q = parseFloat(it.quantity);
+      const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
       if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock, cannot issue ${q}`);
@@ -652,12 +649,11 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     setSaving(true);
     try {
       const payload = {
-        issued_to: issuedTo.trim(),
         assigned_to_user_id: assignedToUserId || null,
         items: items.map((it) => ({
           part_no: it.part_no.trim(),
           make: it.make.trim(),
-          quantity: parseFloat(it.quantity),
+          quantity: parseInt(it.quantity),
           selected_godown_id: it.selected_godown_id || null,
           selected_godown_name: it.selected_godown_name || null,
         })),
@@ -692,11 +688,6 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           <Label className="label-sm">Issue Note No</Label>
           <Input value={inNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="in-no-input" />
         </div>
-        <div>
-          <Label className="label-sm">Issued To *</Label>
-          <Input value={issuedTo} onChange={(e) => setIssuedTo(e.target.value)} placeholder="User / department"
-            className="mt-2 rounded-sm" data-testid="in-issued-to-input" />
-        </div>
         <div className="col-span-2">
           <AssigneeSelect
             value={assignedToUserId}
@@ -726,9 +717,9 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           </thead>
           <tbody>
             {items.map((it, idx) => {
-              const overStock = it.available_qty !== undefined && (parseFloat(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+              const overStock = it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
               const selectedGodown = (it.godowns || []).find((g) => g.godown_id === it.selected_godown_id);
-              const overGodown = !!it.selected_godown_id && selectedGodown && (parseFloat(it.quantity) || 0) > (selectedGodown.available_qty || 0) + 1e-6;
+              const overGodown = !!it.selected_godown_id && selectedGodown && (parseInt(it.quantity) || 0) > (selectedGodown.available_qty || 0) + 1e-6;
               return (
               <tr key={idx} data-testid={`in-item-row-${idx}`} className={(overStock || overGodown) ? "bg-red-50" : ""}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -765,7 +756,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                   </Select>
                 </td>
                 <td className="w-32">
-                  <Input type="number" min="0.001" step="any" value={it.quantity}
+                  <Input type="number" min="1" step="1" value={it.quantity}
                     disabled={!it.make}
                     onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                     placeholder="0"
@@ -875,7 +866,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
     { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
     { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
-    { key: "issued_to", label: "ISSUED TO", value: (r) => r.issued_to || "" },
+    { key: "parent_assigned_to_name", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || "" },
     { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r),},
     { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r)},
     { key: "picked_qty", label: "PICKED", value: (r) => pickingPickedQty(r)},
@@ -961,7 +952,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`pn-open-${r.pn_no}`}>{r.pn_no}</button>
                   </td>
-                  <td className="text-slate-700">{r.issued_to || "—"}</td>
+                  <td className="text-slate-700">{r.parent_assigned_to_name || "—"}</td>
                   <td className="font-mono text-slate-600">{pickingDisplayCount(r)}</td>
                   <td className="font-mono font-bold text-slate-900">{totalQty}</td>
                   <td className="font-mono font-bold text-slate-900">{pickedQty}</td>
@@ -1041,7 +1032,6 @@ function PickingNoteDetailDialog({ pn, onClose }) {
             <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
               <Detail k="Picking Note Date" v={fmtDate(pn.pn_date)} />
               <Detail k="Issue Note No" v={pn.issue_note_no || "—"} />
-              <Detail k="Issued To" v={pn.issued_to || "—"} />
               <Detail k="Status" v={pn.status} />
               <Detail k="Created By" v={pn.created_by || "—"} />
               <Detail k="Created At" v={new Date(pn.created_at).toLocaleString()} />
@@ -1081,7 +1071,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   const [pnDate, setPnDate] = useState("");
   const [pendingIns, setPendingIns] = useState([]);
   const [selectedInId, setSelectedInId] = useState("");
-  const [issuedTo, setIssuedTo] = useState("");
+  const [assignedToName, setAssignedToName] = useState("");
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
 
@@ -1096,8 +1086,8 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       setPnNo(editing.pn_no);
       setPnDate(editing.pn_date);
       setSelectedInId(editing.issue_note_id);
-      setIssuedTo(editing.issued_to || "");
-      setPendingIns([{ id: editing.issue_note_id, in_no: editing.issue_note_no, in_date: editing.issue_note_date, issued_to: editing.issued_to }]);
+      setAssignedToName(editing.parent_assigned_to_name || "");
+      setPendingIns([{ id: editing.issue_note_id, in_no: editing.issue_note_no, in_date: editing.issue_note_date, assigned_to_name: editing.parent_assigned_to_name }]);
       api.get(`/picking-notes/prepare/${editing.issue_note_id}`, { params: { exclude_pn_id: editing.id } })
         .then((r) => {
           setItems(buildPickingEditItems(editing, r.data.items || []));
@@ -1129,9 +1119,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
 
   const handleInChange = async (id) => {
     setSelectedInId(id);
-    if (!id) { setItems([]); setIssuedTo(""); return; }
+    if (!id) { setItems([]); setAssignedToName(""); return; }
     const inn = pendingIns.find((x) => x.id === id);
-    setIssuedTo(inn?.issued_to || "");
+    setAssignedToName(inn?.assigned_to_name || "");
     try {
       const { data } = await api.get(`/picking-notes/prepare/${id}`);
       setItems(data.items || []);
@@ -1184,7 +1174,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     items.forEach((r) => {
       if (isDisplayOnlyRemainingRow(r)) return;
       const k = `${r.part_no}||${r.make}`;
-      m[k] = (m[k] || 0) + (parseFloat(r.quantity) || 0);
+      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return m;
   }, [items]);
@@ -1199,7 +1189,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       if (!it.godown_id || !it.rack_id) { toast.error(`Row ${rowNo}: pick Godown / Rack`); return; }
       const hasBoxes = (boxesByRack[it.rack_id] || []).length > 0;
       if (hasBoxes && !it.box_id) { toast.error(`Row ${rowNo}: pick Box`); return; }
-      const q = parseFloat(it.quantity);
+      const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${rowNo}: quantity must be > 0`); return; }
       // Per-location available check (client-side)
       const loc = (it.available_locations || []).find((L) => (L.box_id || "") === (it.box_id || ""));
@@ -1228,7 +1218,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       const payload = {
         issue_note_id: selectedInId,
           items: pickRows.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -1276,15 +1266,15 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
             <SelectContent>
               {pendingIns.map((inn) => (
                 <SelectItem key={inn.id} value={inn.id} data-testid={`pn-in-option-${inn.in_no}`}>
-                  <span className="font-mono">{inn.in_no}</span><span className="ml-3 text-slate-500 text-xs">{fmtDate(inn.in_date)} · {inn.issued_to || "—"}</span>
+                  <span className="font-mono">{inn.in_no}</span><span className="ml-3 text-slate-500 text-xs">{fmtDate(inn.in_date)} · {inn.assigned_to_name || "—"}</span>
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label className="label-sm">Issued To</Label>
-          <Input value={issuedTo} disabled className="mt-2 rounded-sm bg-slate-50" data-testid="pn-issued-to" />
+          <Label className="label-sm">Assigned To</Label>
+          <Input value={assignedToName} disabled className="mt-2 rounded-sm bg-slate-50" data-testid="pn-assigned-to" />
         </div>
       </div>
 
@@ -1319,7 +1309,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 const overAllocated = pending !== undefined && allocated > pending + 1e-6;
                 const currentLoc = (it.available_locations || []).find((L) => (L.box_id || "") === (it.box_id || ""));
                 const availAtCurrent = currentLoc ? (currentLoc.available_qty ?? currentLoc.current_qty) : null;
-                const overAtLoc = availAtCurrent !== null && (parseFloat(it.quantity) || 0) > availAtCurrent + 1e-6;
+                const overAtLoc = availAtCurrent !== null && (parseInt(it.quantity) || 0) > availAtCurrent + 1e-6;
                 return (
                   <tr key={idx} data-testid={`pn-item-row-${idx}`} className={(overAllocated || overAtLoc) ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -1330,7 +1320,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="font-mono text-[11px] text-slate-600">{it.row_status || "Draft Pick"}</td>
                     <td className="text-center">
-                      <Input type="number" min="0.001" step="any" value={it.quantity}
+                      <Input type="number" min="1" step="1" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                         className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated || overAtLoc ? "border-red-400" : ""}`}
                         data-testid={`pn-qty-${idx}`} />

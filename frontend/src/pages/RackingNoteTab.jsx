@@ -37,7 +37,7 @@ function hasCompleteRackingLocations(rkn) {
     (it.godown_id || "").trim() &&
     (it.rack_id || "").trim() &&
     (it.box_id || "").trim() &&
-    (parseFloat(it.quantity) || 0) > 0
+    (parseInt(it.quantity) || 0) > 0
   );
 }
 
@@ -244,7 +244,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+              const totalQty = (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const assigneeId = r.parent_assigned_to_user_id;
               const assigneeName = r.parent_assigned_to_name;
@@ -625,7 +625,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     const map = {};
     items.forEach((r) => {
       const k = `${r.part_no}||${r.make}`;
-      map[k] = (map[k] || 0) + (parseFloat(r.quantity) || 0);
+      map[k] = (map[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return map;
   }, [items]);
@@ -644,7 +644,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       if (!it.box_id) {
         toast.error(`Row ${i + 1}: pick Box`); return;
       }
-      const q = parseFloat(it.quantity);
+      const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
     }
     // Cumulative-vs-pending check (client-side; backend re-validates)
@@ -671,7 +671,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         receipt_note_id: sourceType === "RN" ? sourceId : (selectedSource?.parent_rn_id || undefined),
         narration: narration.trim(),
         items: items.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -800,7 +800,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="text-center">
-                      <Input type="number" min="0.001" step="any" value={it.quantity}
+                      <Input type="number" min="1" step="1" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                         className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
                       {pending !== undefined && (

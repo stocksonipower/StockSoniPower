@@ -13,7 +13,12 @@
       "PowerShell(head -50)",
       "Bash(Get-ChildItem -Path \"d:\\\\GitHubRepo\\\\01-STOCK-APP-SS1\" -Recurse -Directory)",
       "Bash(Format-Table FullName)",
-      "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")"
+      "Bash(grep -E \"\\\\.\\(py|js|json\\)$\")",
+      "Bash(find /Users/deviduttamishra/Desktop/01-STOCKAPP01 -maxdepth 2 -iname .env*)",
+      "Bash(lsof -nP -iTCP:8000 -sTCP:LISTEN)",
+      "Bash(lsof -nP -iTCP:3000 -sTCP:LISTEN)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl *)"
     ]
   }
 }

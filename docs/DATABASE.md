@@ -79,7 +79,7 @@ Unique index: `(part_no, make)`.
 
 ### `transactions` (the ledger)
 No single formal model in the reviewed excerpt; document shape built inline at each write site:
-`id, type ("IN"|"OUT"), part_no, make`, denormalized stock-master snapshot (`model, old_part_no, make_part_no, description_1/2, remarks_oem/others, item_category, image`), `quantity, godown_id/name, rack_id/no, box_id/no/category`, linkage fields depending on origin (`racking_note_id/no, source_type/id/no, receipt_note_id/no` for stock-in; `picking_note_id/no, issue_note_id/no, issued_to` for stock-out; `transfer_note_id/no, transfer_request_id/no` for transfers), `created_at, created_by (email)`.
+`id, type ("IN"|"OUT"), part_no, make`, denormalized stock-master snapshot (`model, old_part_no, make_part_no, description_1/2, remarks_oem/others, item_category, image`), `quantity, godown_id/name, rack_id/no, box_id/no/category`, linkage fields depending on origin (`racking_note_id/no, source_type/id/no, receipt_note_id/no` for stock-in; `picking_note_id/no, issue_note_id/no` for stock-out; `transfer_note_id/no, transfer_request_id/no` for transfers), `created_at, created_by (email)`.
 Append-only ledger — no explicit before/after quantity snapshot per row; current balance is always recomputed by aggregation. Legacy simple-movement models `StockInCreate`/`StockOutCreate{part_no, make, quantity, godown_id, rack_id, box_id}` still exist but their direct-creation endpoints are largely disabled (see [WORKFLOWS.md](WORKFLOWS.md)).
 
 ### `receipt_notes`
@@ -102,13 +102,14 @@ Append-only ledger — no explicit before/after quantity snapshot per row; curre
 
 ### `issue_notes`
 `IssueNoteItem{part_no, make, quantity, selected_godown_id/name? (office preference), [denormalized fields]}`.
-`IssueNoteCreate{issued_to="", items, assigned_to_user_id?}`.
-`IssueNote{id, in_no, in_date, fy, serial, issued_to="", items, status="PICKING_PENDING" (active set: PICKING_PENDING, PICKING_IN_PROGRESS, PARTIALLY_PICKED, FULLY_PICKED, OPEN-fallback), picked_at, created_at, created_by="", assigned_to_user_id/name/email}`.
+`IssueNoteCreate{items, assigned_to_user_id?}`.
+`IssueNote{id, in_no, in_date, fy, serial, items, status="PICKING_PENDING" (active set: PICKING_PENDING, PICKING_IN_PROGRESS, PARTIALLY_PICKED, FULLY_PICKED, OPEN-fallback), picked_at, created_at, created_by="", assigned_to_user_id/name/email}`.
 
 ### `picking_notes`
 `PickingNoteItem{part_no, make, quantity, [denormalized master + full location fields]}`.
 `PickingNoteCreate{issue_note_id (required), items}`.
-`PickingNote{id, pn_no, pn_date, fy, serial, issue_note_id, issue_note_no/date, parent_picking_note_id? (partial-pick chain), issued_to="", assigned_items: [IssueNoteItem]=[] (frozen snapshot of the request), items (what was actually picked), status="PENDING" (active: PENDING, DRAFT, RECORDING-transient, COMPLETED; legacy RECORDED referenced only in guard clauses, never written), recorded_at, created_at, created_by=""}`.
+`PickingNote{id, pn_no, pn_date, fy, serial, issue_note_id, issue_note_no/date, parent_picking_note_id? (partial-pick chain), assigned_items: [IssueNoteItem]=[] (frozen snapshot of the request), items (what was actually picked), status="PENDING" (active: PENDING, DRAFT, RECORDING-transient, COMPLETED; legacy RECORDED referenced only in guard clauses, never written), recorded_at, created_at, created_by=""}`.
+Assignee (who this Picking Note is for) is not stored on the Picking Note itself — it's joined in at read time from the parent Issue Note's `assigned_to_user_id/name/email` (see `_enrich_with_parent_assignee` in `backend/helpers/stock_helpers.py`), exposed as `parent_assigned_to_user_id/name/email`.
 
 ### `transfer_requests`
 `TransferRequestItem{part_no, make, quantity, dest_godown_id/name?, dest_rack_id/no?, dest_box_id/no?, dest_box_category?}`.

@@ -50,7 +50,7 @@ function todayISO() {
 /** Numeric helper — empty/blank -> null, else float. */
 function toNum(v) {
   if (v === "" || v === null || v === undefined) return null;
-  const n = parseFloat(v);
+  const n = parseInt(v);
   return isNaN(n) ? null : n;
 }
 
@@ -1126,13 +1126,13 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
         if (!part_no && (invQ === "" || invQ == null) && (recQ === "" || recQ == null)) continue;
         if (!part_no) { toast.error("Skipped row — Part No missing"); continue; }
         // In GENERAL mode, invoice_qty is ignored (will be forced to received_qty server-side).
-        let inv = parseFloat(invQ);
+        let inv = parseInt(invQ);
         if (isGeneral) {
           inv = ""; // not used
         } else {
           if (isNaN(inv) || inv <= 0) { toast.error(`Row for ${part_no} skipped — Invoice Qty must be > 0`); continue; }
         }
-        const rec = recQ === "" || recQ == null ? "" : (isNaN(parseFloat(recQ)) ? "" : parseFloat(recQ));
+        const rec = recQ === "" || recQ == null ? "" : (isNaN(parseInt(recQ)) ? "" : parseInt(recQ));
         newRows.push({
           part_no, make,
           invoice_qty: inv,
@@ -1576,8 +1576,8 @@ const canFinalize = useMemo(() => {
                     <td className="w-28">
                       <Input
                         type="number"
-                        min="0.001"
-                        step="any"
+                        min="1"
+                        step="1"
                         value={displayedInvoice}
                         disabled={isGeneral}
                         onChange={(e) => updateItem(idx, { invoice_qty: e.target.value })}
@@ -1591,7 +1591,7 @@ const canFinalize = useMemo(() => {
                       <Input
                         type="number"
                         min="0"
-                        step="any"
+                        step="1"
                         value={it.received_qty}
                         onChange={(e) => updateItem(idx, { received_qty: e.target.value })}
                         placeholder="0"
@@ -2033,9 +2033,9 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
   // Item-aggregation helpers for the list display
   const sumQty = (r) => {
     if (isSrn) {
-      return (r.items || []).reduce((acc, it) => acc + (parseFloat(it.short_qty) || 0), 0);
+      return (r.items || []).reduce((acc, it) => acc + (parseInt(it.short_qty) || 0), 0);
     }
-    return (r.items || []).reduce((acc, it) => acc + (parseFloat(it.extra_qty) || 0), 0);
+    return (r.items || []).reduce((acc, it) => acc + (parseInt(it.extra_qty) || 0), 0);
   };
 
   const columns = useMemo(() => {
@@ -2279,17 +2279,17 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
             <tbody>
               {(doc.items || []).map((it, idx) => {
                 if (isSrn) {
-                  const shortQ = parseFloat(it.short_qty) || 0;
+                  const shortQ = parseInt(it.short_qty) || 0;
                   // Inline-child model: total received + not_receivable across children
                   const childRcv = (it.children || []).reduce(
-                    (s, c) => s + (parseFloat(c.received_qty) || 0), 0,
+                    (s, c) => s + (parseInt(c.received_qty) || 0), 0,
                   );
                   const childNRcv = (it.children || []).reduce(
-                    (s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0,
+                    (s, c) => s + (parseInt(c.not_receivable_qty) || 0), 0,
                   );
                   const ful = (it.children || []).length > 0
                     ? childRcv
-                    : (it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0));
+                    : (it.fulfilled_qty == null ? null : (parseInt(it.fulfilled_qty) || 0));
                   const pending = ful == null ? shortQ : (shortQ - ful - childNRcv);
                   return (
                     <tr key={idx}>
@@ -2297,28 +2297,28 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                       <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                       <td className="text-slate-700">{it.description_1 || "—"}</td>
                       <td>{it.make}</td>
-                      <td className="text-center font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                      <td className="text-center font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                      <td className="text-center font-mono font-bold text-red-700">{shortQ.toFixed(2)}</td>
-                      <td className="text-center font-mono">{ful == null ? "—" : ful.toFixed(2)}</td>
-                      <td className={`text-center font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                      <td className="text-center font-mono">{(parseInt(it.invoice_qty) || 0).toFixed(0)}</td>
+                      <td className="text-center font-mono">{(parseInt(it.received_qty) || 0).toFixed(0)}</td>
+                      <td className="text-center font-mono font-bold text-red-700">{shortQ.toFixed(0)}</td>
+                      <td className="text-center font-mono">{ful == null ? "—" : ful.toFixed(0)}</td>
+                      <td className={`text-center font-mono font-bold ${pending > 0 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(0)}</td>
                       <td className="text-center">{renderChildren(it)}</td>
                     </tr>
                   );
                 }
-                const extraQ = parseFloat(it.extra_qty) || 0;
+                const extraQ = parseInt(it.extra_qty) || 0;
                 const childAcc = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.accepted_qty) || 0), 0,
+                  (s, c) => s + (parseInt(c.accepted_qty) || 0), 0,
                 );
                 const childRej = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.rejected_qty) || 0), 0,
+                  (s, c) => s + (parseInt(c.rejected_qty) || 0), 0,
                 );
                 const acc = (it.children || []).length > 0
                   ? childAcc
-                  : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
+                  : (it.accepted_qty == null ? null : (parseInt(it.accepted_qty) || 0));
                 const rej = (it.children || []).length > 0
                   ? childRej
-                  : (it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0));
+                  : (it.rejected_qty == null ? null : (parseInt(it.rejected_qty) || 0));
                 const undecided = extraQ - (acc || 0) - (rej || 0);
                 return (
                   <tr key={idx}>
@@ -2326,12 +2326,12 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td className="text-slate-700">{it.description_1 || "—"}</td>
                     <td>{it.make}</td>
-                    <td className="text-center font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
-                    <td className="text-center font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
-                    <td className="text-center font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
-                    <td className="text-center font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
-                    <td className="text-center font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
-                    <td className={`text-center font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
+                    <td className="text-center font-mono">{(parseInt(it.invoice_qty) || 0).toFixed(0)}</td>
+                    <td className="text-center font-mono">{(parseInt(it.received_qty) || 0).toFixed(0)}</td>
+                    <td className="text-center font-mono font-bold text-amber-700">{extraQ.toFixed(0)}</td>
+                    <td className="text-center font-mono">{acc == null ? "—" : acc.toFixed(0)}</td>
+                    <td className="text-center font-mono">{rej == null ? "—" : rej.toFixed(0)}</td>
+                    <td className={`text-center font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(0)}</td>
                     <td className="text-center">{renderChildren(it)}</td>
                   </tr>
                 );
@@ -2374,21 +2374,21 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
 
   const totals = (it) => {
     const children = it.children || [];
-    const rcv = children.reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0);
-    const nrcv = children.reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0);
-    const pending = (parseFloat(it.short_qty) || 0) - rcv - nrcv;
+    const rcv = children.reduce((s, c) => s + (parseInt(c.received_qty) || 0), 0);
+    const nrcv = children.reduce((s, c) => s + (parseInt(c.not_receivable_qty) || 0), 0);
+    const pending = (parseInt(it.short_qty) || 0) - rcv - nrcv;
     return { rcv, nrcv, pending };
   };
 
   const saveNewChild = async (idx) => {
     const it = parent.items[idx];
     const d = drafts[idx] || {};
-    const rcv = parseFloat(d.received_qty || 0);
-    const nrcv = parseFloat(d.not_receivable_qty || 0);
+    const rcv = parseInt(d.received_qty || 0);
+    const nrcv = parseInt(d.not_receivable_qty || 0);
     if (!rcv && !nrcv) { toast.error("Enter Received Qty or Not Receivable Qty"); return; }
     const { pending } = totals(it);
     if (rcv + nrcv > pending + 1e-6) {
-      toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return;
+      toast.error(`Exceeds Pending Qty (${pending.toFixed(0)})`); return;
     }
     setBusy(true);
     try {
@@ -2410,8 +2410,8 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     if (!editing) return;
     const { itemIdx, child_srn_no, received_qty, not_receivable_qty } = editing;
     const it = parent.items[itemIdx];
-    const rcv = parseFloat(received_qty || 0);
-    const nrcv = parseFloat(not_receivable_qty || 0);
+    const rcv = parseInt(received_qty || 0);
+    const nrcv = parseInt(not_receivable_qty || 0);
     if (!rcv && !nrcv) { toast.error("Enter Received or Not Receivable Qty"); return; }
     setBusy(true);
     try {
@@ -2505,10 +2505,10 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                   <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
                   <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-xs text-slate-700 truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-center font-mono font-bold text-red-700">{(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
-                  <td className="text-center font-mono font-bold text-green-700">{rcv.toFixed(2)}</td>
-                  <td className="text-center font-mono text-slate-700">{nrcv.toFixed(2)}</td>
-                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-red-700">{(parseInt(it.short_qty) || 0).toFixed(0)}</td>
+                  <td className="text-center font-mono font-bold text-green-700">{rcv.toFixed(0)}</td>
+                  <td className="text-center font-mono text-slate-700">{nrcv.toFixed(0)}</td>
+                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(0)}</td>
                   <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
                   <td className="text-right">
                     {pending > 1e-6 && drafts[idx] === undefined && (
@@ -2536,17 +2536,17 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                     <td className="font-mono text-blue-700 text-xs">{c.child_srn_no}</td>
                     <td>
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.received_qty}
+                        <Input type="number" min="0" step="1" value={editing.received_qty}
                           onChange={(e) => setEditing({ ...editing, received_qty: e.target.value })}
                           className="rounded-sm font-mono h-7 text-center" />
-                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.received_qty) || 0).toFixed(2)}</span>}
+                      ) : <span className="font-mono font-bold text-green-800">{(parseInt(c.received_qty) || 0).toFixed(0)}</span>}
                     </td>
                     <td>
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.not_receivable_qty}
+                        <Input type="number" min="0" step="1" value={editing.not_receivable_qty}
                           onChange={(e) => setEditing({ ...editing, not_receivable_qty: e.target.value })}
                           className="rounded-sm font-mono h-7 text-center" />
-                      ) : <span className="font-mono text-slate-700">{(parseFloat(c.not_receivable_qty) || 0).toFixed(2)}</span>}
+                      ) : <span className="font-mono text-slate-700">{(parseInt(c.not_receivable_qty) || 0).toFixed(0)}</span>}
                     </td>
                     <td className="text-right">
                       {isEdit ? (
@@ -2590,11 +2590,11 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                   <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`srn-draft-${idx}`}>
                     <td className="font-mono text-blue-600 text-[10px]">+</td>
                     <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
-                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
+                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(0)}
                     </td>
                     <td className="font-mono text-slate-400 italic text-xs">auto…</td>
                     <td>
-                      <Input type="number" min="0" step="any" max={pending}
+                      <Input type="number" min="0" step="1" max={pending}
                         value={d.received_qty || ""}
                         onChange={(e) => setDraft(idx, { received_qty: e.target.value })}
                         placeholder="0"
@@ -2602,7 +2602,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                         data-testid={`srn-input-rcv-${idx}`} />
                     </td>
                     <td>
-                      <Input type="number" min="0" step="any" max={pending}
+                      <Input type="number" min="0" step="1" max={pending}
                         value={d.not_receivable_qty || ""}
                         onChange={(e) => setDraft(idx, { not_receivable_qty: e.target.value })}
                         placeholder="0"
@@ -2687,20 +2687,20 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
 
   const totals = (it) => {
     const children = it.children || [];
-    const acc = children.reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
-    const rej = children.reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
-    const pending = (parseFloat(it.extra_qty) || 0) - acc - rej;
+    const acc = children.reduce((s, c) => s + (parseInt(c.accepted_qty) || 0), 0);
+    const rej = children.reduce((s, c) => s + (parseInt(c.rejected_qty) || 0), 0);
+    const pending = (parseInt(it.extra_qty) || 0) - acc - rej;
     return { acc, rej, pending };
   };
 
   const saveNew = async (idx) => {
     const it = parent.items[idx];
     const d = drafts[idx] || {};
-    const acc = parseFloat(d.accepted_qty || 0);
-    const rej = parseFloat(d.rejected_qty || 0);
+    const acc = parseInt(d.accepted_qty || 0);
+    const rej = parseInt(d.rejected_qty || 0);
     if (!acc && !rej) { toast.error("Enter Accepted Qty or Rejected Qty"); return; }
     const { pending } = totals(it);
-    if (acc + rej > pending + 1e-6) { toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return; }
+    if (acc + rej > pending + 1e-6) { toast.error(`Exceeds Pending Qty (${pending.toFixed(0)})`); return; }
     setBusy(true);
     try {
       const res = await api.post(`/extra-received-notes/${parent.id}/children`, {
@@ -2720,8 +2720,8 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
     if (!editing) return;
     const { itemIdx, child_ern_no, accepted_qty, rejected_qty } = editing;
     const it = parent.items[itemIdx];
-    const acc = parseFloat(accepted_qty || 0);
-    const rej = parseFloat(rejected_qty || 0);
+    const acc = parseInt(accepted_qty || 0);
+    const rej = parseInt(rejected_qty || 0);
     if (!acc && !rej) { toast.error("Enter Accepted or Rejected Qty"); return; }
     setBusy(true);
     try {
@@ -2813,10 +2813,10 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                   <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
                   <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-xs text-slate-700 truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-center font-mono font-bold text-amber-700">{(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
-                  <td className="text-center font-mono font-bold text-green-700">{acc.toFixed(2)}</td>
-                  <td className="text-center font-mono text-red-700">{rej.toFixed(2)}</td>
-                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
+                  <td className="text-center font-mono font-bold text-amber-700">{(parseInt(it.extra_qty) || 0).toFixed(0)}</td>
+                  <td className="text-center font-mono font-bold text-green-700">{acc.toFixed(0)}</td>
+                  <td className="text-center font-mono text-red-700">{rej.toFixed(0)}</td>
+                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(0)}</td>
                   <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
                   <td className="text-right">
                     {pending > 1e-6 && drafts[idx] === undefined && (
@@ -2842,17 +2842,17 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                     <td className="font-mono text-blue-700 text-xs">{c.child_ern_no}</td>
                     <td>
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.accepted_qty}
+                        <Input type="number" min="0" step="1" value={editing.accepted_qty}
                           onChange={(e) => setEditing({ ...editing, accepted_qty: e.target.value })}
                           className="rounded-sm font-mono h-7 text-center" />
-                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.accepted_qty) || 0).toFixed(2)}</span>}
+                      ) : <span className="font-mono font-bold text-green-800">{(parseInt(c.accepted_qty) || 0).toFixed(0)}</span>}
                     </td>
                     <td>
                       {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.rejected_qty}
+                        <Input type="number" min="0" step="1" value={editing.rejected_qty}
                           onChange={(e) => setEditing({ ...editing, rejected_qty: e.target.value })}
                           className="rounded-sm font-mono h-7 text-center" />
-                      ) : <span className="font-mono text-red-700">{(parseFloat(c.rejected_qty) || 0).toFixed(2)}</span>}
+                      ) : <span className="font-mono text-red-700">{(parseInt(c.rejected_qty) || 0).toFixed(0)}</span>}
                     </td>
                     <td className="text-right">
                       {isEdit ? (
@@ -2894,11 +2894,11 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                   <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`ern-draft-${idx}`}>
                     <td className="font-mono text-blue-600 text-[10px]">+</td>
                     <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
-                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
+                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(0)}
                     </td>
                     <td className="font-mono text-slate-400 italic text-xs">auto…</td>
                     <td>
-                      <Input type="number" min="0" step="any" max={pending}
+                      <Input type="number" min="0" step="1" max={pending}
                         value={d.accepted_qty || ""}
                         onChange={(e) => setDraft(idx, { accepted_qty: e.target.value })}
                         placeholder="0"
@@ -2906,7 +2906,7 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
                         data-testid={`ern-input-acc-${idx}`} />
                     </td>
                     <td>
-                      <Input type="number" min="0" step="any" max={pending}
+                      <Input type="number" min="0" step="1" max={pending}
                         value={d.rejected_qty || ""}
                         onChange={(e) => setDraft(idx, { rejected_qty: e.target.value })}
                         placeholder="0"

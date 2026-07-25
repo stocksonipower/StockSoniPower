@@ -97,7 +97,6 @@ class TestIssueQtyValidation:
         part, make, avail = chosen
         over = int(avail) + 100
         r = client.post(f"{API}/issue-notes", json={
-            "issued_to": "TEST_QA_overstock",
             "items": [{"part_no": part, "make": make, "quantity": over}],
         })
         assert r.status_code == 400, f"expected 400, got {r.status_code}: {r.text}"
@@ -112,7 +111,6 @@ class TestIssueQtyValidation:
         part, make, avail = chosen
         # Create with qty=1 (well within stock)
         create = client.post(f"{API}/issue-notes", json={
-            "issued_to": "TEST_QA_put_overstock",
             "items": [{"part_no": part, "make": make, "quantity": 1}],
         })
         assert create.status_code == 200, create.text
@@ -121,7 +119,6 @@ class TestIssueQtyValidation:
             # PUT with qty=avail+50 should be rejected
             over = int(avail) + 50
             put = client.put(f"{API}/issue-notes/{in_id}", json={
-                "issued_to": "TEST_QA_put_overstock",
                 "items": [{"part_no": part, "make": make, "quantity": over}],
             })
             assert put.status_code == 400, f"expected 400, got {put.status_code}: {put.text}"
@@ -137,7 +134,6 @@ class TestIssueQtyValidation:
         part, make, avail = chosen
         # Use a small positive qty that we know is <= avail (use avail itself)
         r = client.post(f"{API}/issue-notes", json={
-            "issued_to": "TEST_QA_boundary",
             "items": [{"part_no": part, "make": make, "quantity": int(avail)}],
         })
         assert r.status_code == 200, f"boundary qty=avail rejected: {r.text}"

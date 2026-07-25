@@ -73,12 +73,11 @@ class TestIssueNoteCreate:
         assert data["next_in_no"].split("/")[2].isdigit()
 
     def test_post_requires_items(self, client):
-        r = client.post(f"{API}/issue-notes", json={"issued_to": "T", "items": []})
+        r = client.post(f"{API}/issue-notes", json={"items": []})
         assert r.status_code == 400
 
     def test_post_qty_must_be_positive(self, client, seed):
         r = client.post(f"{API}/issue-notes", json={
-            "issued_to": "TEST_QA",
             "items": [{"part_no": seed["part_no"], "make": seed["make"], "quantity": 0}],
         })
         assert r.status_code == 400
@@ -89,7 +88,6 @@ class TestIssueNoteCreate:
 def fresh_in(client, seed):
     # create IN with qty=4 (split-able into 2+2 across PNs)
     r = client.post(f"{API}/issue-notes", json={
-        "issued_to": f"TEST_QA_{uuid.uuid4().hex[:6]}",
         "items": [{"part_no": seed["part_no"], "make": seed["make"], "quantity": 4}],
     })
     assert r.status_code == 200, r.text
@@ -169,7 +167,6 @@ class TestPickingNoteFlow:
 
     def test_in_edit_blocked_when_pn_exists(self, client, fresh_in, seed):
         r = client.put(f"{API}/issue-notes/{fresh_in['id']}", json={
-            "issued_to": "Other",
             "items": [{"part_no": seed["part_no"], "make": seed["make"], "quantity": 5}],
         })
         assert r.status_code == 409
@@ -244,7 +241,6 @@ class TestPerLocationConstraint:
         loc = seed["loc"]
         # find current_qty at this loc via prepare on a fresh IN
         r = client.post(f"{API}/issue-notes", json={
-            "issued_to": "TEST_QA_LOC",
             "items": [{"part_no": seed["part_no"], "make": seed["make"], "quantity": 99999}],
         })
         # If quantity validation rejects we just skip

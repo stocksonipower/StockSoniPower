@@ -108,7 +108,7 @@ function PickingBody({ d }) {
         <Detail k="Picking Date" v={fmtDate(d.pn_date)} />
         <Detail k="Issue Note No" v={d.issue_note_no || "—"} />
         <Detail k="Issue Note Date" v={fmtDate(d.issue_note_date)} />
-        <Detail k="Issued To" v={d.issued_to || "—"} />
+        <Detail k="Assigned To" v={d.parent_assigned_to_name || "—"} />
         <Detail k="Status" v={d.status} />
         <Detail k="Created By" v={d.created_by || "—"} />
       </div>

@@ -56,7 +56,6 @@ async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional
             "issue_note_no": inn["in_no"],
             "issue_note_date": inn["in_date"],
             "parent_picking_note_id": None,
-            "issued_to": inn.get("issued_to", ""),
             "assigned_items": inn.get("items", []),
             "items": [],
             "status": "PENDING",
@@ -95,7 +94,6 @@ async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[di
             "issue_note_no": parent_pn.get("issue_note_no", ""),
             "issue_note_date": parent_pn.get("issue_note_date", ""),
             "parent_picking_note_id": parent_pn["id"],
-            "issued_to": parent_pn.get("issued_to", ""),
             "assigned_items": assigned_items,
             "items": [],
             "status": "PENDING",
@@ -277,7 +275,6 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             "in_date": today.date().isoformat(),
             "fy": fy,
             "serial": serial,
-            "issued_to": (payload.issued_to or "").strip(),
             "items": stored_items,
             "status": "PICKING_PENDING",
             "created_at": now_iso(),
@@ -296,7 +293,7 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             await _notify(
                 actor=user, type="issue_note.created", module="stock_out",
                 title=f"Issue Note {in_no}",
-                message=f"{user.get('email')} created {in_no} for '{doc['issued_to'] or '—'}' with {len(doc['items'])} item(s) — picking pending.",
+                message=f"{user.get('email')} created {in_no} for '{doc.get('assigned_to_name') or '—'}' with {len(doc['items'])} item(s) — picking pending.",
                 audience="module", ref_collection="issue_notes", ref_id=doc["id"],
             )
             if assignee.get("assigned_to_user_id"):
@@ -363,7 +360,6 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     stored_items = await _issue_items_for_storage(payload.items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     update = {
-        "issued_to": (payload.issued_to or "").strip(),
         "items": stored_items,
         "updated_at": now_iso(),
         **assignee,
@@ -371,7 +367,6 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     await db.issue_notes.update_one({"id": in_id}, {"$set": update})
     if linked_pn:
         await db.picking_notes.update_one({"id": linked_pn["id"]}, {"$set": {
-            "issued_to": update["issued_to"],
             "items": [],
             "updated_at": now_iso(),
         }})
@@ -478,7 +473,7 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
     return {
         "issue_note": {
             "id": inn["id"], "in_no": inn["in_no"], "in_date": inn["in_date"],
-            "issued_to": inn.get("issued_to", ""), "status": inn.get("status"),
+            "status": inn.get("status"),
         },
         "items": items_out,
     }
@@ -515,7 +510,6 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
             "issue_note_id": inn["id"],
             "issue_note_no": inn["in_no"],
             "issue_note_date": inn["in_date"],
-            "issued_to": inn.get("issued_to", ""),
             "assigned_items": inn.get("items", []),
             "items": [it.model_dump() for it in payload.items],
             "status": "DRAFT",
@@ -704,7 +698,6 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
                 "box_id": it["box_id"], "box_no": it.get("box_no", ""), "box_category": it.get("box_category", ""),
                 "picking_note_id": pn["id"], "picking_note_no": pn["pn_no"],
                 "issue_note_id": pn.get("issue_note_id", ""), "issue_note_no": pn.get("issue_note_no", ""),
-                "issued_to": pn.get("issued_to", ""),
                 "created_at": now, "created_by": user.get("email"),
             })
         if tx_docs:
@@ -723,7 +716,7 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
         await _notify(
             actor=user, type="stock_out.recorded", module="stock_out",
             title=f"Stock Out recorded ({pn['pn_no']})",
-            message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{pn.get('issued_to') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
+            message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty} to '{in_parent.get('assigned_to_name') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
             audience="module", ref_collection="picking_notes", ref_id=pn_id,
         )
         return {"ok": True, "transactions_created": len(tx_docs), "remaining_picking_note": child_pn}
