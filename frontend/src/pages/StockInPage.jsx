@@ -21,7 +21,7 @@ import {
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import PartNoLink from "../components/PartNoLink";
-import DocumentDetailDialog, { LinkedDocsBar, isChildEditable, isRknEditable } from "../components/DocumentDetailDialog";
+import DocumentDetailDialog, { isChildEditable, isRknEditable } from "../components/DocumentDetailDialog";
 import { useAuth } from "../lib/auth";
 import { StockInNavContext, useStockInNav } from "../lib/stockInNav";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
@@ -88,7 +88,14 @@ export function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
 
 
 // Status metadata. The backend emits exactly 12 active values across all 4
-// note types — anything else falls through to the default chip.
+// note types — anything else falls through to the default chip. Every value
+// is displayed under one of three standard labels:
+//   Pending     — the document is created but the racking workflow hasn't started.
+//   In Process  — material has entered the workflow but racking isn't fully complete yet
+//                 (partial racking, pending SRN/ERN quantity, undecided ERN lines, etc).
+//   Complete    — the entire receipt workflow for this document has finished.
+// This is purely a display mapping — the underlying raw status values (and the
+// business logic that computes them) are unchanged.
 //   Receipt Note:  DRAFT, RACKING_NOTE_DRAFT, PARTIALLY_RACKED, FULLY_RACKED
 //   SRN:           PENDING, PARTIALLY_RECEIVED, COMPLETE
 //   ERN:           PENDING, PARTIALLY_ACCEPTED, COMPLETE
@@ -96,23 +103,23 @@ export function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
 function statusMeta(status) {
   switch (status) {
     case "DRAFT":
-      return { label: "Draft", cls: "bg-slate-100 text-slate-700" };
-    case "RACKING_NOTE_DRAFT":
-      return { label: "Racking Note Draft", cls: "bg-orange-50 text-orange-800 border border-orange-200" };
-    case "PARTIALLY_RACKED":
-      return { label: "Partially Racked", cls: "bg-blue-50 text-blue-800" };
-    case "FULLY_RACKED":
-      return { label: "Fully Racked", cls: "bg-green-100 text-green-800" };
-    case "PENDING":
       return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
+    case "RACKING_NOTE_DRAFT":
+      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
+    case "PARTIALLY_RACKED":
+      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
+    case "FULLY_RACKED":
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
+    case "PENDING":
+      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_RECEIVED":
-      return { label: "Partially Received", cls: "bg-blue-50 text-blue-800" };
+      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_ACCEPTED":
-      return { label: "Partially Accepted", cls: "bg-blue-50 text-blue-800" };
+      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "COMPLETE":
       return { label: "Complete", cls: "bg-green-100 text-green-800" };
     case "RECORDED":
-      return { label: "Fully Racked", cls: "bg-green-100 text-green-800" };
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
     default:
       return { label: status || "—", cls: "bg-slate-100 text-slate-700" };
   }
@@ -906,17 +913,17 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
 <title>${escapeHtml(rn.rn_no)} — Receipt Note</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #0f172a; }
-  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #020617; }
+  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; color: #000000; }
   .type-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; background: #e0e7ff; color: #3730a3; }
   .status-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; background: #f1f5f9; color: #334155; }
   .header-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  .field-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
-  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; }
-  .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #475569; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px; }
+  .field-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; color: #0f172a; }
+  .section-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px; }
   table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
-  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
-  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: #0f172a; }
   .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 20px; page-break-inside: avoid; }
   .note-card { border: 1px solid #e2e8f0; border-radius: 4px; padding: 8px; font-size: 10px; background: #f8fafc; margin-bottom: 6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; line-height: 1.6; }
   .note-no { font-weight: 700; color: #1e3a8a; margin-bottom: 4px; }
@@ -991,6 +998,131 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* --------------------------------------------------------------
+   Print view for SRN / ERN — standalone print window, styled to
+   match the Receipt Note print layout/typography.
+   -------------------------------------------------------------- */
+function printChildDoc(doc, kind) {
+  if (!doc) return;
+  const isSrn = kind === "srn";
+  const idField = isSrn ? "srn_no" : "ern_no";
+  const dateField = isSrn ? "srn_date" : "ern_date";
+  const meta = statusMeta(doc.status);
+  const title = isSrn ? "Short Receipt Note" : "Extra Receipt Note";
+
+  const pField = (label, value) =>
+    `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(value ?? "—"))}</div></div>`;
+
+  const items = (doc.items || []).map((it, idx) => {
+    const inv = fmtQty(it.invoice_qty);
+    const rec = fmtQty(it.received_qty);
+    if (isSrn) {
+      const shortQ = parseFloat(it.short_qty) || 0;
+      const childRcv = (it.children || []).reduce((s, c) => s + (parseFloat(c.received_qty) || 0), 0);
+      const childNRcv = (it.children || []).reduce((s, c) => s + (parseFloat(c.not_receivable_qty) || 0), 0);
+      const ful = (it.children || []).length > 0 ? childRcv : (it.fulfilled_qty == null ? null : (parseFloat(it.fulfilled_qty) || 0));
+      const pending = ful == null ? shortQ : (shortQ - ful - childNRcv);
+      return `<tr>
+        <td>${idx + 1}</td>
+        <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
+        <td>${escapeHtml(it.description_1 || "—")}</td>
+        <td>${escapeHtml(it.make || "")}</td>
+        <td style="text-align:right">${inv}</td>
+        <td style="text-align:right">${rec}</td>
+        <td style="text-align:right">${shortQ.toFixed(2)}</td>
+        <td style="text-align:right">${ful == null ? "—" : ful.toFixed(2)}</td>
+        <td style="text-align:right">${pending.toFixed(2)}</td>
+      </tr>`;
+    }
+    const extraQ = parseFloat(it.extra_qty) || 0;
+    const childAcc = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
+    const childRej = (it.children || []).reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
+    const acc = (it.children || []).length > 0 ? childAcc : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
+    const rej = (it.children || []).length > 0 ? childRej : (it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0));
+    return `<tr>
+      <td>${idx + 1}</td>
+      <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(it.make || "")}</td>
+      <td style="text-align:right">${inv}</td>
+      <td style="text-align:right">${rec}</td>
+      <td style="text-align:right">${extraQ.toFixed(2)}</td>
+      <td style="text-align:right">${acc == null ? "—" : acc.toFixed(2)}</td>
+      <td style="text-align:right">${rej == null ? "—" : rej.toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+
+  const extraCols = isSrn
+    ? `<th style="text-align:right">Short Qty</th><th style="text-align:right">Fulfilled Qty</th><th style="text-align:right">Pending Qty</th>`
+    : `<th style="text-align:right">Extra Qty</th><th style="text-align:right">Accepted Qty</th><th style="text-align:right">Rejected Qty</th>`;
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<title>${escapeHtml(doc[idField])} — ${escapeHtml(title)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #020617; }
+  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; color: #000000; }
+  .status-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; background: #f1f5f9; color: #334155; }
+  .header-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  .field-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; color: #0f172a; }
+  .section-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
+  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: #0f172a; }
+  .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  @media print { body { padding: 12mm; } }
+</style></head>
+<body>
+  <h1>${escapeHtml(title)}</h1>
+  <div style="text-align:center;margin-bottom:12px;">
+    <span class="status-pill">${escapeHtml(meta.label)}</span>
+  </div>
+
+  <div class="header-grid">
+    <div>
+      ${pField(isSrn ? "SRN No" : "ERN No", doc[idField])}
+      ${pField(isSrn ? "SRN Date" : "ERN Date", fmtDate(doc[dateField]))}
+      ${pField("Related Receipt Note", `${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date)})`)}
+      ${pField("Invoice No", doc.invoice_no || "—")}
+      ${pField("Invoice Date", fmtDate(doc.invoice_date))}
+      ${pField("Status", meta.label)}
+    </div>
+    <div>
+      ${isSrn ? pField("Pending Quantity", fmtQty(sumSrnQty(doc))) : pField("Extra Quantity", fmtQty(sumErnQty(doc)))}
+      ${isSrn ? pField("Received Quantity", fmtQty(sumSrnReceived(doc))) : pField("Accepted Quantity", fmtQty(sumErnAccepted(doc)))}
+      ${isSrn ? pField("Remaining Quantity", fmtQty(Math.max(0, sumSrnQty(doc) - sumSrnReceived(doc) - sumSrnNotReceivable(doc)))) : pField("Rejected Quantity", fmtQty(sumErnRejected(doc)))}
+      ${pField("Created By", doc.created_by || "—")}
+      ${pField("Assigned To", doc.assigned_to_name || doc.assigned_to_email || "—")}
+    </div>
+  </div>
+
+  <div class="section-title">Items (${(doc.items || []).length})</div>
+  <table>
+    <thead><tr>
+      <th>Sl No</th><th>Part No</th><th>Description 1</th><th>Make</th>
+      <th style="text-align:right">Invoice Qty</th>
+      <th style="text-align:right">Received Qty</th>
+      ${extraCols}
+    </tr></thead>
+    <tbody>${items}</tbody>
+  </table>
+
+  <div class="footer">
+    Printed: ${escapeHtml(new Date().toLocaleString())}
+    &nbsp;·&nbsp; Printed by: ${escapeHtml(doc.created_by || "—")}
+  </div>
+  <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
+</body></html>`;
+
+  const w = window.open("", "_blank", "width=1000,height=750");
+  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }
 
 /* --------------------------------------------------------------
@@ -2149,11 +2281,11 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const columns = useMemo(() => {
     const cols = [
+      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
+      { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
       { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
       { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.parent_rn_date) },
       { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.parent_rn_no || "" },
-      { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
-      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
     ];
     return cols;
@@ -2213,6 +2345,16 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`${kind}-open-${r[idField]}`}
+                    >
+                      {r[idField]}
+                    </button>
+                  </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
+                  <td>
                     {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
                       <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
                             data-testid={`${kind}-stock-in-type-${r[idField]}`}>
@@ -2231,16 +2373,6 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                         {r.parent_rn_no}
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
-                  </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
-                  <td>
-                    <button
-                      onClick={() => onOpen(r)}
-                      className="font-mono font-semibold text-blue-700 hover:underline"
-                      data-testid={`${kind}-open-${r[idField]}`}
-                    >
-                      {r[idField]}
-                    </button>
                   </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>
@@ -2304,12 +2436,37 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 }
 
 /** Read-only detail dialog for SRN/ERN — shows all rows with quantities. */
-function ChildDetailDialog({ kind, doc, onClose, onOpen, related, onNavigate }) {
-  if (!doc) return null;
+function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
   const isSrn = kind === "srn";
   const idField = isSrn ? "srn_no" : "ern_no";
   const dateField = isSrn ? "srn_date" : "ern_date";
+  const path = isSrn ? "/short-received-notes" : "/extra-received-notes";
+
+  const [doc, setDoc] = useState(docProp);
+  const [refreshing, setRefreshing] = useState(false);
+  const [syncedId, setSyncedId] = useState(docProp?.id ?? null);
+  // Keep local `doc` (mutable via Refresh) in sync with the `doc` prop whenever
+  // the caller swaps in a different document — done during render (not a
+  // useEffect) so `doc` never lags a render behind `docProp` here below.
+  if ((docProp?.id ?? null) !== syncedId) {
+    setSyncedId(docProp?.id ?? null);
+    setDoc(docProp);
+  }
+
+  if (!doc) return null;
   const meta = statusMeta(doc.status);
+
+  const handleRefresh = async () => {
+    if (!doc?.id) return;
+    setRefreshing(true);
+    try {
+      const { data } = await api.get(`${path}/${doc.id}`);
+      setDoc(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not refresh");
+    } finally { setRefreshing(false); }
+  };
+  const handlePrint = () => printChildDoc(doc, kind);
 
   const renderChildren = (it) => {
     const list = it.children || [];
@@ -2338,31 +2495,58 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen, related, onNavigate }) 
 
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-5xl rounded-sm" data-testid={`${kind}-detail-dialog`}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-3">
-            <span className="font-mono">{doc[idField]}</span>
-            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>
-          </DialogTitle>
-        </DialogHeader>
-        {related && onNavigate && (
-          <LinkedDocsBar related={related} onNavigate={onNavigate} excludeType={kind} excludeId={doc.id} />
-        )}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-          <Detail k={`${isSrn ? "SRN" : "ERN"} Date`} v={fmtDate(doc[dateField])} />
-          <Detail k="Parent RN" v={`${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date) || "—"})`} />
-          <Detail k="Invoice No" v={doc.invoice_no || "—"} />
-          <Detail k="Invoice Date" v={fmtDate(doc.invoice_date)} />
-          {isSrn && <Detail k="Fulfilment Date" v={fmtDate(doc.fulfillment_date)} />}
-          <Detail k="Assigned To" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
-          <Detail k="Created By" v={doc.created_by || "—"} />
-          {doc.parent_srn_no && <Detail k="Parent SRN" v={doc.parent_srn_no} />}
-          {doc.parent_ern_no && <Detail k="Parent ERN" v={doc.parent_ern_no} />}
+      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid={`${kind}-detail-dialog`}>
+        {/* ── HEADING ── */}
+        <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+          {isSrn ? "SHORT RECEIPT NOTE" : "EXTRA RECEIPT NOTE"}
         </div>
+
+        {/* ── HEADER: LEFT / RIGHT ── */}
+        <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+          {/* Left */}
+          <div className="space-y-2">
+            <Detail k={isSrn ? "SRN NO" : "ERN NO"} v={doc[idField]} />
+            <Detail k={isSrn ? "SRN DATE" : "ERN DATE"} v={fmtDate(doc[dateField])} />
+            <Detail k="RELATED RECEIPT NOTE" v={`${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date)})`} />
+            {isSrn ? (
+              <>
+                <Detail k="PENDING QUANTITY" v={fmtQty(sumSrnQty(doc))} />
+                <Detail k="RECEIVED QUANTITY" v={fmtQty(sumSrnReceived(doc))} />
+                <Detail k="REMAINING QUANTITY" v={fmtQty(Math.max(0, sumSrnQty(doc) - sumSrnReceived(doc) - sumSrnNotReceivable(doc)))} />
+              </>
+            ) : (
+              <>
+                <Detail k="EXTRA QUANTITY" v={fmtQty(sumErnQty(doc))} />
+                <Detail k="ACCEPTED QUANTITY" v={fmtQty(sumErnAccepted(doc))} />
+                <Detail k="REJECTED QUANTITY" v={fmtQty(sumErnRejected(doc))} />
+              </>
+            )}
+            <Detail k="STATUS" v={
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>
+                {meta.label}
+              </span>
+            } />
+          </div>
+          {/* Right */}
+          <div className="space-y-2">
+            <Detail k="INVOICE NO" v={doc.invoice_no || "—"} />
+            <Detail k="INVOICE DATE" v={fmtDate(doc.invoice_date)} />
+            {isSrn && <Detail k="FULFILMENT DATE" v={fmtDate(doc.fulfillment_date)} />}
+            <Detail k="ASSIGNED TO" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
+            <Detail k="CREATED BY" v={doc.created_by || "—"} />
+            {doc.parent_srn_no && <Detail k="PARENT SRN" v={doc.parent_srn_no} />}
+            {doc.parent_ern_no && <Detail k="PARENT ERN" v={doc.parent_ern_no} />}
+          </div>
+        </div>
+
         {doc.chain_remarks && (
           <div className="text-xs text-slate-600 italic mt-2">{doc.chain_remarks}</div>
         )}
-        <div className="overflow-x-auto mt-4">
+
+        {/* ── ITEMS TABLE ── */}
+        <div className="mt-4">
+          <div className="label-sm mb-2">Items ({(doc.items || []).length})</div>
+          <div className="overflow-x-auto">
           <table className="data-table w-full text-xs">
             <thead>
               <tr>
@@ -2452,6 +2636,20 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen, related, onNavigate }) 
               })}
             </tbody>
           </table>
+          </div>
+        </div>
+
+        {/* ── ACTION BUTTONS ── */}
+        <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-2">
+          <Button variant="outline" size="sm" className="rounded-sm" onClick={handleRefresh} disabled={refreshing}>
+            {refreshing
+              ? <CircleNotch size={14} weight="bold" className="mr-1.5 animate-spin" />
+              : <ArrowsClockwise size={14} weight="bold" className="mr-1.5" />}
+            Refresh
+          </Button>
+          <Button variant="outline" size="sm" className="rounded-sm" onClick={handlePrint} data-testid={`${kind}-detail-print`}>
+            <Printer size={14} weight="bold" className="mr-1.5" /> Print
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

@@ -8,11 +8,11 @@ import {
 } from "../components/ui/select";
 import PartNoLink from "../components/PartNoLink";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent,
 } from "../components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
+  Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
   DownloadSimple, ArrowsClockwise, MagnifyingGlass, Printer, CircleNotch,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
@@ -105,14 +105,14 @@ async function exportRackingNote(rkn) {
 <title>${escapeHtml(rkn.rkn_no)} — Racking Note</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #0f172a; }
-  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #020617; }
+  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; color: #000000; }
   .header-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  .field-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
-  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; }
+  .field-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; color: #0f172a; }
   table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
-  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
-  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; vertical-align: top; }
+  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; vertical-align: top; color: #0f172a; }
   .blank-cell { min-width: 90px; border-left: 1px dashed #94a3b8; background: repeating-linear-gradient(0deg, transparent, transparent 17px, #e2e8f0 18px); }
   .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
   @media print { body { padding: 12mm; } }
@@ -122,7 +122,7 @@ async function exportRackingNote(rkn) {
   <div class="header-grid">
     <div><div class="field-label">Racking Note No</div><div class="field-value">${escapeHtml(rkn.rkn_no)}</div></div>
     <div><div class="field-label">Racking Note Date</div><div class="field-value">${escapeHtml(fmtDate(rkn.rkn_date))}</div></div>
-    <div><div class="field-label">Status</div><div class="field-value">${escapeHtml(rkn.status === "RECORDED" ? "Fully Racked" : "Draft")}</div></div>
+    <div><div class="field-label">Status</div><div class="field-value">${escapeHtml(rkn.status === "RECORDED" ? "Complete" : "In Process")}</div></div>
     <div><div class="field-label">Racked Against</div><div class="field-value">${escapeHtml(rkn.source_type || "RN")} · ${escapeHtml(rkn.source_no || rkn.receipt_note_no || "—")}</div></div>
     <div><div class="field-label">Receipt Note No</div><div class="field-value">${escapeHtml(rkn.receipt_note_no || "—")}</div></div>
     <div><div class="field-label">Created By</div><div class="field-value">${escapeHtml(rkn.created_by || "—")}</div></div>
@@ -243,17 +243,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const handleDelete = async (rkn) => {
-    if (!window.confirm(`Delete ${rkn.rkn_no}?`)) return;
-    try {
-      await api.delete(`/racking-notes/${rkn.id}`);
-      toast.success(`${rkn.rkn_no} deleted`);
-      load();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
-    }
-  };
-
   const handleRecord = async (rkn) => {
     if (!hasCompleteRackingLocations(rkn)) {
       toast.error("Complete Godown, Rack, Box and Qty before recording Stock In");
@@ -287,13 +276,13 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   };
 
   const columns = useMemo(() => [
+    { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
+    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
     { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
-    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
-    { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
     { key: "material_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
-    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Fully Racked" : "Draft" },
+    { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Complete" : "In Process" },
   ], []);
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
@@ -328,9 +317,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           </Button>
           <Button onClick={load} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="rkn-refresh-button">
             <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </Button>
-          <Button onClick={onCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="create-rkn-button">
-            <Plus size={16} weight="bold" className="mr-2" /> Create New Racking Note
           </Button>
         </div>
       </div>
@@ -370,14 +356,22 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               const recordDisabled = lock || !locationsComplete || recordingId === r.id;
               const editTitle = recorded ? "Cannot edit — already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
-              const deleteTitle = recorded ? "Cannot delete — already recorded"
-                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Delete");
               const recordTitle = recorded ? "Already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}`
                   : (!locationsComplete ? "Complete Godown, Rack, Box and Qty before recording" : "Record as Stock In"));
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td>
+                    <button
+                      onClick={() => onOpen(r)}
+                      className="font-mono font-semibold text-blue-700 hover:underline"
+                      data-testid={`rkn-open-${r.rkn_no}`}
+                    >
+                      {r.rkn_no}
+                    </button>
+                  </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
                   <td>
                     {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
                       <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
@@ -398,21 +392,11 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
-                  <td>
-                    <button
-                      onClick={() => onOpen(r)}
-                      className="font-mono font-semibold text-blue-700 hover:underline"
-                      data-testid={`rkn-open-${r.rkn_no}`}
-                    >
-                      {r.rkn_no}
-                    </button>
-                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
                   <td>
-                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-amber-50 text-amber-700"}`}
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-blue-50 text-blue-800"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
-                      {recorded ? "Fully Racked" : "Draft"}
+                      {recorded ? "Complete" : "In Process"}
                     </span>
                   </td>
                   <td className="text-left whitespace-nowrap">
@@ -425,15 +409,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                         data-testid={`rkn-edit-${r.rkn_no}`}
                       >
                         <Pencil size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(r)}
-                        disabled={lock}
-                        title={deleteTitle}
-                        className={`p-1.5 rounded-sm ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                        data-testid={`rkn-delete-${r.rkn_no}`}
-                      >
-                        <Trash size={14} />
                       </button>
                       <button
                         onClick={() => handlePrint(r)}
@@ -494,8 +469,18 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 }
 
 /* ---------- DETAIL DIALOG (read-only) ---------- */
-function RackingNoteDetailDialog({ rkn, onClose }) {
+function RackingNoteDetailDialog({ rkn: rknProp, onClose }) {
+  const [rkn, setRkn] = useState(rknProp);
   const [printing, setPrinting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [syncedId, setSyncedId] = useState(rknProp?.id ?? null);
+  // Sync local `rkn` (mutable via Refresh) with the `rkn` prop during render
+  // whenever the caller swaps in a different document.
+  if ((rknProp?.id ?? null) !== syncedId) {
+    setSyncedId(rknProp?.id ?? null);
+    setRkn(rknProp);
+  }
+
   const handlePrint = async () => {
     setPrinting(true);
     try {
@@ -504,72 +489,119 @@ function RackingNoteDetailDialog({ rkn, onClose }) {
       toast.error("Could not prepare print — try again");
     } finally { setPrinting(false); }
   };
+
+  const handleRefresh = async () => {
+    if (!rkn?.id) return;
+    setRefreshing(true);
+    try {
+      const { data } = await api.get(`/racking-notes/${rkn.id}`);
+      setRkn(data);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not refresh");
+    } finally { setRefreshing(false); }
+  };
+
+  const rackedQty = (rkn?.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
+  const racks = [...new Set((rkn?.items || []).map((it) => it.rack_no).filter(Boolean))];
+  const boxes = [...new Set((rkn?.items || []).map((it) => it.box_no).filter(Boolean))];
+
   return (
     <Dialog open={!!rkn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-6xl rounded-sm" data-testid="rkn-detail-dialog">
+      <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="rkn-detail-dialog">
         {rkn && (
           <>
-            <DialogHeader className="flex-row items-center justify-between pr-8">
-              <DialogTitle className="text-2xl font-black font-mono">{rkn.rkn_no}</DialogTitle>
+            {/* ── HEADING ── */}
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              RACKING NOTE
+            </div>
+
+            {/* ── HEADER: LEFT / RIGHT ── */}
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              {/* Left */}
+              <div className="space-y-2">
+                <Detail k="RACKING NOTE NO" v={rkn.rkn_no} />
+                <Detail k="RACKING NOTE DATE" v={fmtDate(rkn.rkn_date)} />
+                <Detail k="RELATED RECEIPT NOTE" v={`${rkn.receipt_note_no || "—"} (${fmtDate(rkn.receipt_note_date)})`} />
+                <Detail k="RACK DETAILS" v={racks.length ? racks.join(", ") : "—"} />
+                <Detail k="BOX DETAILS" v={boxes.length ? boxes.join(", ") : "—"} />
+                <Detail k="RACKED QUANTITY" v={rackedQty || "—"} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${rkn.status === "RECORDED" ? "bg-green-100 text-green-800" : "bg-blue-50 text-blue-800"}`}>
+                    {rkn.status === "RECORDED" ? "Complete" : "In Process"}
+                  </span>
+                } />
+              </div>
+              {/* Right */}
+              <div className="space-y-2">
+                <div>
+                  <div className="label-sm">RACKED AGAINST</div>
+                  <div className="font-mono mt-1 text-slate-900 flex items-center gap-2" data-testid="rkn-detail-source">
+                    <SourceTypeBadge type={rkn.source_type || "RN"} />
+                    <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
+                  </div>
+                </div>
+                <Detail k="CREATED BY" v={rkn.created_by || "—"} />
+                <Detail k="CREATED AT" v={rkn.created_at ? new Date(rkn.created_at).toLocaleString() : "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO</div>
+                  <div className="mt-1"><AssigneeBadge name={rkn.parent_assigned_to_name} email={rkn.parent_assigned_to_email} /></div>
+                </div>
+              </div>
+            </div>
+
+            {/* ── ITEMS TABLE ── */}
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({(rkn.items || []).length})</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full text-xs">
+                  <thead>
+                    <tr>
+                      <th>SL</th>
+                      <th>PART NO</th>
+                      <th>MAKE</th>
+                      <th>MODEL</th>
+                      <th>DESCRIPTION</th>
+                      <th>CATEGORY</th>
+                      <th className="text-center">QTY</th>
+                      <th>GODOWN</th>
+                      <th>RACK</th>
+                      <th>BOX</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(rkn.items || []).map((it, idx) => (
+                      <tr key={idx}>
+                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                        <td className="font-mono text-slate-600">{it.make || "—"}</td>
+                        <td className="font-mono text-slate-600">{it.model || "—"}</td>
+                        <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                        <td className="text-slate-600">{it.item_category || "—"}</td>
+                        <td className="text-center font-mono font-bold">{it.quantity}</td>
+                        <td className="font-mono">{it.godown_name || "—"}</td>
+                        <td className="font-mono">{it.rack_no || "—"}</td>
+                        <td className="font-mono">{it.box_no || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* ── ACTION BUTTONS ── */}
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-2">
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={handleRefresh} disabled={refreshing}>
+                {refreshing
+                  ? <CircleNotch size={14} weight="bold" className="mr-1.5 animate-spin" />
+                  : <ArrowsClockwise size={14} weight="bold" className="mr-1.5" />}
+                Refresh
+              </Button>
               <Button variant="outline" size="sm" className="rounded-sm" onClick={handlePrint} disabled={printing} data-testid="rkn-detail-print">
                 {printing
                   ? <CircleNotch size={14} weight="bold" className="mr-1.5 animate-spin" />
                   : <Printer size={14} weight="bold" className="mr-1.5" />}
                 Print
               </Button>
-            </DialogHeader>
-            <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Racking Note Date" v={fmtDate(rkn.rkn_date)} />
-              <Detail k="Receipt Note No" v={rkn.receipt_note_no || "—"} />
-              <Detail k="Receipt Note Date" v={fmtDate(rkn.receipt_note_date)} />
-              <div>
-                <div className="label-sm">Racked Against</div>
-                <div className="font-mono mt-1 text-slate-900 flex items-center gap-2" data-testid="rkn-detail-source">
-                  <SourceTypeBadge type={rkn.source_type || "RN"} />
-                  <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
-                </div>
-              </div>
-              <Detail k="Status" v={rkn.status === "RECORDED" ? "Fully Racked" : (rkn.status || "Draft")} />
-              <Detail k="Created By" v={rkn.created_by || "—"} />
-              <Detail k="Created At" v={new Date(rkn.created_at).toLocaleString()} />
-              <div>
-                <div className="label-sm">Assigned To (from Receipt Note)</div>
-                <div className="mt-1"><AssigneeBadge name={rkn.parent_assigned_to_name} email={rkn.parent_assigned_to_email} /></div>
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="data-table w-full text-xs">
-                <thead>
-                  <tr>
-                    <th>SL</th>
-                    <th>PART NO</th>
-                    <th>MAKE</th>
-                    <th>MODEL</th>
-                    <th>DESCRIPTION</th>
-                    <th>CATEGORY</th>
-                    <th className="text-center">QTY</th>
-                    <th>GODOWN</th>
-                    <th>RACK</th>
-                    <th>BOX</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(rkn.items || []).map((it, idx) => (
-                    <tr key={idx}>
-                      <td className="font-mono text-slate-500">{idx + 1}</td>
-                      <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                      <td className="font-mono text-slate-600">{it.make || "—"}</td>
-                      <td className="font-mono text-slate-600">{it.model || "—"}</td>
-                      <td className="text-slate-700 max-w-[260px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
-                      <td className="text-slate-600">{it.item_category || "—"}</td>
-                      <td className="text-center font-mono font-bold">{it.quantity}</td>
-                      <td className="font-mono">{it.godown_name || "—"}</td>
-                      <td className="font-mono">{it.rack_no || "—"}</td>
-                      <td className="font-mono">{it.box_no || "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           </>
         )}
