@@ -12,7 +12,7 @@ from helpers.stock_helpers import _enrich_items, _enrich_note_items, _enrich_wit
 from helpers.note_helpers import current_fy_label, _alloc_serial, _no_future_date, _key, _next_letter_suffix, _qty_diff, _rn_items_have_all_received
 from helpers.auto_create import _auto_create_srn_for_rn, _auto_create_ern_for_rn, _auto_create_rkn_for_source
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_srn_racking_status, _recompute_ern_racking_status, _is_source_fully_racked, _aggregate_other_rkn_qty_by_source, _recompute_source_status_after_rkn
-from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic
+from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic, _validate_racking_locations
 from services.unit_of_work import unit_of_work
 from services import stock_in_service as svc
 
@@ -121,6 +121,12 @@ class ErnChildBody(BaseModel):
 class ErnRejectBody(BaseModel):
     """Optional row-level reject payload. Empty body rejects all pending extra qty."""
     items: List[dict] = []
+
+
+class ErnReturnedBody(BaseModel):
+    """Marks whether the physical material behind a rejected child row has actually
+    been handed back to the supplier."""
+    returned: bool = True
 
 
 def _receipt_stock_in_type(payload_or_doc) -> str:
@@ -273,9 +279,19 @@ async def next_receipt_note_no(user=Depends(get_current_user)):
 
 
 @router.post("/receipt-notes", response_model=ReceiptNote)
-async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(_module_dep("stock_in"))):
     """Create a Receipt Note. Always lands as DRAFT — Final Save happens via the
     /finalize endpoint after received_qty is filled for every row."""
+    # Idempotent replay: if the client already sent this exact submit (double-click,
+    # retried request after a dropped response), return the existing document instead
+    # of creating a duplicate draft.
+    if payload.client_token:
+        existing = await db.receipt_notes.find_one(
+            {"client_token": payload.client_token, "created_by": user.get("email", "")}, {"_id": 0}
+        )
+        if existing:
+            return existing
+
     stock_in_type = _receipt_stock_in_type(payload)
 
     # Date validation
@@ -299,12 +315,14 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(get_curre
             "fy": fy,
             "serial": serial,
             "stock_in_type": stock_in_type,
+            "supplier_name": (payload.supplier_name or "").strip(),
             "invoice_no": (payload.invoice_no or "").strip(),
             "invoice_date": (payload.invoice_date or "").strip(),
             "goods_received_date": (payload.goods_received_date or "").strip(),
             "items": items_out,
             "status": "DRAFT",
             "narration": (payload.narration or "").strip(),
+            "client_token": payload.client_token,
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
             **assignee,
@@ -385,7 +403,7 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
 
 
 @router.put("/receipt-notes/{rn_id}", response_model=ReceiptNote)
-async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(get_current_user)):
+async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depends(_module_dep("stock_in"))):
     """Edit a Receipt Note.
 
     Mutability rule (WMS semantics): the note stays editable for as long as no
@@ -417,6 +435,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
 
     update = {
         "stock_in_type": stock_in_type,
+        "supplier_name": (payload.supplier_name or "").strip(),
         "invoice_no": (payload.invoice_no or "").strip(),
         "invoice_date": (payload.invoice_date or "").strip(),
         "goods_received_date": (payload.goods_received_date or "").strip(),
@@ -461,7 +480,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
     return doc
 
 @router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
-async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get_current_user)):
+async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(_module_dep("stock_in"))):
     """Promote a DRAFT receipt note to RACKING_NOTE_DRAFT.
 
     Requires: received_qty is a non-negative number for every row (0 is allowed
@@ -570,7 +589,7 @@ async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(get
     return doc
 
 @router.delete("/receipt-notes/{rn_id}")
-async def delete_receipt_note(rn_id: str, user=Depends(get_current_user)):
+async def delete_receipt_note(rn_id: str, user=Depends(_module_dep("stock_in"))):
     """Delete a Receipt Note and cascade-remove every pending artifact derived
     from it, so no orphan racking notes / SRNs / ERNs are left behind.
 
@@ -625,6 +644,14 @@ async def prepare_racking_note(rn_id: str, exclude_rkn_id: Optional[str] = None,
 
 @router.post("/racking-notes", response_model=RackingNote)
 async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_dep("stock_in"))):
+    # Idempotent replay: a retried/duplicated submit returns the existing document.
+    if payload.client_token:
+        existing = await db.racking_notes.find_one(
+            {"client_token": payload.client_token, "created_by": user.get("email", "")}, {"_id": 0}
+        )
+        if existing:
+            return existing
+
     src_type, src_id, parent_doc, ultimate_rn = await _resolve_racking_source(payload.model_dump())
     _enforce_assignee(parent_doc, user, "create a racking note for this source")
     # Disallow if source is fully racked
@@ -636,6 +663,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
         raise HTTPException(status_code=409, detail="This Extra Received Note is already fully racked")
 
     _validate_racking_items(payload.items)
+    await _validate_racking_locations(payload.items)
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, payload.items, exclude_rkn_id=None)
 
     today = datetime.now(timezone.utc)
@@ -678,6 +706,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
             "items": [it.model_dump() for it in payload.items],
             "status": "DRAFT",
             "narration": (payload.narration or "").strip(),
+            "client_token": payload.client_token,
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
         }
@@ -981,7 +1010,11 @@ async def prepare_racking_for_source(
         ]
         raw_locs = await db.transactions.aggregate(pipeline).to_list(1000)
         existing_locations = [{**rr["_id"], "current_qty": rr["quantity"]} for rr in raw_locs]
-        prefill = existing_locations[0] if len(existing_locations) == 1 else None
+        # Always prefill the old rack/box when the part has one or more existing
+        # locations — pick the one holding the most stock as the primary suggestion.
+        # Every location is still returned in `existing_locations` so the user can
+        # override with a different one if this pick isn't the right bin.
+        prefill = max(existing_locations, key=lambda l: l.get("current_qty") or 0) if existing_locations else None
         items_out.append({
             "part_no": part_no, "make": make,
             "rackable_qty": avail,
@@ -1038,6 +1071,7 @@ async def update_racking_note(rkn_id: str, payload: RackingNoteCreate, user=Depe
     _enforce_assignee(parent_doc, user, "edit this racking note")
 
     _validate_racking_items(payload.items)
+    await _validate_racking_locations(payload.items)
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, payload.items, exclude_rkn_id=rkn_id)
     update = {
         "items": [it.model_dump() for it in payload.items],
@@ -1089,6 +1123,9 @@ async def record_racking_note(rkn_id: str, response: Response, user=Depends(_mod
             raise HTTPException(status_code=400, detail=f"Row {idx}: quantity must be > 0")
 
     item_models = [RackingNoteItem(**it) for it in items]
+    # Defense in depth: a godown/rack/box selected when the note was saved could have
+    # been deleted since — re-verify existence right before stock actually moves.
+    await _validate_racking_locations(item_models)
     await _validate_cumulative_qty_polymorphic(src_type, src_id, parent_doc, item_models, exclude_rkn_id=rkn_id)
 
     now = now_iso()
@@ -1230,17 +1267,14 @@ async def get_short_received_note(srn_id: str, user=Depends(_module_dep("stock_i
 async def update_short_received_note(srn_id: str, payload: ShortReceivedNoteUpdate, response: Response,
                                      user=Depends(_module_dep("stock_in"))):
     """Edit fulfilled_qty / fulfillment_date on an SRN that hasn't been fully received yet.
-    Also recompute status. Cannot edit if SRN is COMPLETE already."""
-    existing = await db.short_received_notes.find_one({"id": srn_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Short Received Note not found")
-    _enforce_assignee(existing, user, "edit this Short Received Note")
-    if existing.get("status") == "COMPLETE":
-        raise HTTPException(status_code=409, detail="Cannot edit — this SRN is already fully received")
+    Also recompute status. Cannot edit if SRN is COMPLETE already.
 
+    Runs as a transactional read-modify-write (see the SRN/ERN child-row endpoints for
+    the same rationale): two operators editing the same SRN concurrently would otherwise
+    both read the same items array and the second write would silently discard the first.
+    """
     _no_future_date(payload.fulfillment_date, "Fulfillment Date")
 
-    # Build a lookup from payload by (part_no, make)
     payload_map = {}
     for r in (payload.items or []):
         if not r.get("part_no") or not r.get("make"):
@@ -1248,47 +1282,71 @@ async def update_short_received_note(srn_id: str, payload: ShortReceivedNoteUpda
         key = (r["part_no"], r["make"])
         payload_map[key] = r
 
-    items_out = []
-    for it in existing.get("items", []):
-        new_it = dict(it)
-        key = (it.get("part_no"), it.get("make"))
-        if key in payload_map:
-            ful = payload_map[key].get("fulfilled_qty")
-            if ful is None or ful == "":
-                new_it["fulfilled_qty"] = None
-                new_it["quantity"] = None
-            else:
-                try:
-                    f = float(ful)
-                except Exception:
-                    raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty must be a number")
-                if f < 0:
-                    raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty cannot be negative")
-                short_q = float(it.get("short_qty") or 0)
-                if f > short_q + 1e-6:
-                    raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty ({f}) cannot exceed short_qty ({short_q})")
-                new_it["fulfilled_qty"] = f
-                new_it["quantity"] = f   # legacy mirror for racking
-        items_out.append(new_it)
+    try:
+        async with unit_of_work() as uow:
+            existing = await uow.srn.get(srn_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Short Received Note not found")
+            _enforce_assignee(existing, user, "edit this Short Received Note")
+            if existing.get("status") == "COMPLETE":
+                raise HTTPException(status_code=409, detail="Cannot edit — this SRN is already fully received")
 
-    racked = await _aggregate_other_rkn_qty_by_source("SRN", srn_id, exclude_rkn_id=None)
-    for it in items_out:
-        already = float(racked.get(_key(it.get("part_no"), it.get("make")), 0))
-        new_total = float(it.get("fulfilled_qty") or 0)
-        if already > new_total + 1e-6:
+            items_out = []
+            for it in existing.get("items", []):
+                new_it = dict(it)
+                key = (it.get("part_no"), it.get("make"))
+                if key in payload_map:
+                    ful = payload_map[key].get("fulfilled_qty")
+                    if ful is None or ful == "":
+                        new_it["fulfilled_qty"] = None
+                        new_it["quantity"] = None
+                    else:
+                        try:
+                            f = float(ful)
+                        except Exception:
+                            raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty must be a number")
+                        if f < 0:
+                            raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty cannot be negative")
+                        short_q = float(it.get("short_qty") or 0)
+                        if f > short_q + 1e-6:
+                            raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: fulfilled_qty ({f}) cannot exceed short_qty ({short_q})")
+                        new_it["fulfilled_qty"] = f
+                        new_it["quantity"] = f   # legacy mirror for racking
+                items_out.append(new_it)
+
+            racked = await _aggregate_other_rkn_qty_by_source("SRN", srn_id, exclude_rkn_id=None)
+            for it in items_out:
+                already = float(racked.get(_key(it.get("part_no"), it.get("make")), 0))
+                new_total = float(it.get("fulfilled_qty") or 0)
+                if already > new_total + 1e-6:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Cannot reduce — {already:.2f} already racked for {it.get('part_no')} / {it.get('make')}",
+                    )
+
+            update = {
+                "items": items_out,
+                "fulfillment_date": (payload.fulfillment_date or "").strip(),
+                "updated_at": now_iso(),
+            }
+            new_status = _compute_srn_status({"items": items_out})
+            update["status"] = new_status
+            await uow.srn.set_fields(srn_id, update)
+            await uow.audit.record(
+                action="srn.bulk_updated", actor=user,
+                ref_collection="short_received_notes", ref_id=srn_id,
+                old={"items": existing.get("items")}, new={"items": items_out},
+                reason="Fulfilled qty / fulfillment date edited",
+                links={"srn_no": existing.get("srn_no")},
+            )
+    except OperationFailure as exc:
+        if _is_write_conflict(exc):
             raise HTTPException(
                 status_code=409,
-                detail=f"Cannot reduce — {already:.2f} already racked for {it.get('part_no')} / {it.get('make')}",
+                detail="Another edit was saved against this SRN at the same time — reload and try again.",
             )
+        raise
 
-    update = {
-        "items": items_out,
-        "fulfillment_date": (payload.fulfillment_date or "").strip(),
-        "updated_at": now_iso(),
-    }
-    new_status = _compute_srn_status({"items": items_out})
-    update["status"] = new_status
-    await db.short_received_notes.update_one({"id": srn_id}, {"$set": update})
     await _recompute_srn_racking_status(srn_id)
     # Bubble up to the ultimate RN: its FULLY_RACKED check considers SRN fulfilled qty.
     if existing.get("parent_rn_id"):
@@ -1710,13 +1768,7 @@ async def get_extra_received_note(ern_id: str, user=Depends(_module_dep("stock_i
 @router.put("/extra-received-notes/{ern_id}", response_model=ExtraReceivedNote)
 async def update_extra_received_note(ern_id: str, payload: ExtraReceivedNoteUpdate, response: Response,
                                      user=Depends(_module_dep("stock_in"))):
-    existing = await db.extra_received_notes.find_one({"id": ern_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Extra Received Note not found")
-    _enforce_assignee(existing, user, "edit this Extra Received Note")
-    if existing.get("status") == "COMPLETE":
-        raise HTTPException(status_code=409, detail="Cannot edit — this ERN is already complete")
-
+    """Transactional read-modify-write — see update_short_received_note for rationale."""
     payload_map = {}
     for r in (payload.items or []):
         if not r.get("part_no") or not r.get("make"):
@@ -1724,47 +1776,71 @@ async def update_extra_received_note(ern_id: str, payload: ExtraReceivedNoteUpda
         key = (r["part_no"], r["make"])
         payload_map[key] = r
 
-    items_out = []
-    for it in existing.get("items", []):
-        new_it = dict(it)
-        key = (it.get("part_no"), it.get("make"))
-        if key in payload_map:
-            extra_q = float(it.get("extra_qty") or 0)
-            for fld in ("accepted_qty", "rejected_qty"):
-                v = payload_map[key].get(fld)
-                if v is None or v == "":
-                    new_it[fld] = None
-                else:
-                    try:
-                        f = float(v)
-                    except Exception:
-                        raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: {fld} must be a number")
-                    if f < 0:
-                        raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: {fld} cannot be negative")
-                    new_it[fld] = f
-            acc = float(new_it.get("accepted_qty") or 0)
-            rej = float(new_it.get("rejected_qty") or 0)
-            if acc + rej > extra_q + 1e-6:
-                raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: accepted+rejected ({acc + rej}) cannot exceed extra_qty ({extra_q})")
-            new_it["quantity"] = acc   # legacy mirror — racking only sees accepted
-        items_out.append(new_it)
+    try:
+        async with unit_of_work() as uow:
+            existing = await uow.ern.get(ern_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Extra Received Note not found")
+            _enforce_assignee(existing, user, "edit this Extra Received Note")
+            if existing.get("status") == "COMPLETE":
+                raise HTTPException(status_code=409, detail="Cannot edit — this ERN is already complete")
 
-    racked = await _aggregate_other_rkn_qty_by_source("ERN", ern_id, exclude_rkn_id=None)
-    for it in items_out:
-        already = float(racked.get(_key(it.get("part_no"), it.get("make")), 0))
-        new_total = float(it.get("accepted_qty") or 0)
-        if already > new_total + 1e-6:
+            items_out = []
+            for it in existing.get("items", []):
+                new_it = dict(it)
+                key = (it.get("part_no"), it.get("make"))
+                if key in payload_map:
+                    extra_q = float(it.get("extra_qty") or 0)
+                    for fld in ("accepted_qty", "rejected_qty"):
+                        v = payload_map[key].get(fld)
+                        if v is None or v == "":
+                            new_it[fld] = None
+                        else:
+                            try:
+                                f = float(v)
+                            except Exception:
+                                raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: {fld} must be a number")
+                            if f < 0:
+                                raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: {fld} cannot be negative")
+                            new_it[fld] = f
+                    acc = float(new_it.get("accepted_qty") or 0)
+                    rej = float(new_it.get("rejected_qty") or 0)
+                    if acc + rej > extra_q + 1e-6:
+                        raise HTTPException(status_code=400, detail=f"{it.get('part_no')}/{it.get('make')}: accepted+rejected ({acc + rej}) cannot exceed extra_qty ({extra_q})")
+                    new_it["quantity"] = acc   # legacy mirror — racking only sees accepted
+                items_out.append(new_it)
+
+            racked = await _aggregate_other_rkn_qty_by_source("ERN", ern_id, exclude_rkn_id=None)
+            for it in items_out:
+                already = float(racked.get(_key(it.get("part_no"), it.get("make")), 0))
+                new_total = float(it.get("accepted_qty") or 0)
+                if already > new_total + 1e-6:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Cannot reduce — {already:.2f} already racked for {it.get('part_no')} / {it.get('make')}",
+                    )
+
+            update = {
+                "items": items_out,
+                "updated_at": now_iso(),
+                "status": _compute_ern_status({"items": items_out}),
+            }
+            await uow.ern.set_fields(ern_id, update)
+            await uow.audit.record(
+                action="ern.bulk_updated", actor=user,
+                ref_collection="extra_received_notes", ref_id=ern_id,
+                old={"items": existing.get("items")}, new={"items": items_out},
+                reason="Accepted/rejected qty edited",
+                links={"ern_no": existing.get("ern_no")},
+            )
+    except OperationFailure as exc:
+        if _is_write_conflict(exc):
             raise HTTPException(
                 status_code=409,
-                detail=f"Cannot reduce — {already:.2f} already racked for {it.get('part_no')} / {it.get('make')}",
+                detail="Another edit was saved against this ERN at the same time — reload and try again.",
             )
+        raise
 
-    update = {
-        "items": items_out,
-        "updated_at": now_iso(),
-        "status": _compute_ern_status({"items": items_out}),
-    }
-    await db.extra_received_notes.update_one({"id": ern_id}, {"$set": update})
     await _recompute_ern_racking_status(ern_id)
     if existing.get("parent_rn_id"):
         await _recompute_rn_status(existing["parent_rn_id"])
@@ -1910,6 +1986,8 @@ async def reject_extra_received_note(ern_id: str, payload: ErnRejectBody = ErnRe
                 "rejected_qty": rej,
                 "created_at": now_iso(),
                 "status": "REJECTED",
+                "returned": False,
+                "returned_at": None,
             })
             new_it["children"] = children
             any_rejected = True
@@ -1982,6 +2060,8 @@ async def add_ern_child_row(ern_id: str, body: ErnChildBody, response: Response,
                 "rejected_qty": rej,
                 "created_at": now_iso(),
                 "status": "COMPLETE",
+                "returned": False if rej > 0 else None,
+                "returned_at": None,
             }
             children.append(child)
             new_items = []
@@ -2142,6 +2222,40 @@ async def delete_ern_child_row(ern_id: str, child_ern_no: str,
     if parent.get("parent_rn_id"):
         await _recompute_rn_status(parent["parent_rn_id"])
     return {"ok": True}
+
+
+@router.patch("/extra-received-notes/{ern_id}/children-returned/{child_ern_no:path}", response_model=ExtraReceivedNote)
+async def mark_ern_child_returned(ern_id: str, child_ern_no: str, body: ErnReturnedBody,
+                                  user=Depends(_module_dep("stock_in"))):
+    """Record whether the physical material behind a rejected child row has been
+    handed back to the supplier. Only meaningful for a row with rejected_qty > 0 —
+    this never touches accepted_qty, RKN creation, or stock, it is purely a
+    return-tracking flag."""
+    parent = await db.extra_received_notes.find_one({"id": ern_id})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent ERN not found")
+    _enforce_assignee(parent, user, "mark a row on this Extra Received Note as returned")
+
+    found = False
+    new_items = []
+    for it in parent.get("items") or []:
+        new_it = dict(it)
+        new_children = []
+        for c in (it.get("children") or []):
+            if c.get("child_ern_no") == child_ern_no:
+                if float(c.get("rejected_qty") or 0) <= 0:
+                    raise HTTPException(status_code=400, detail="Only a rejected row can be marked returned")
+                c = {**c, "returned": bool(body.returned),
+                     "returned_at": now_iso() if body.returned else None}
+                found = True
+            new_children.append(c)
+        new_it["children"] = new_children
+        new_items.append(new_it)
+    if not found:
+        raise HTTPException(status_code=404, detail="Child row not found")
+
+    await db.extra_received_notes.update_one({"id": ern_id}, {"$set": {"items": new_items}})
+    return await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
 
 
 @router.delete("/extra-received-notes/{ern_id}")

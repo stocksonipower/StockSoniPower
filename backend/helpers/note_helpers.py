@@ -58,7 +58,9 @@ def _key(p, m):
 
 
 def _next_letter_suffix(used: set) -> str:
-    """Return the next alphabetical suffix not in `used` (A..Z, AA..AZ, BA.. ZZ)."""
+    """Return the next unused suffix for a child SRN/ERN row: A..Z, then AA..ZZ,
+    then an unbounded numeric fallback (27, 28, ...). Lot count is never capped —
+    once the letter space (702 slices) is exhausted, numbering just keeps going."""
     import string
     letters = string.ascii_uppercase
     for ch in letters:
@@ -69,7 +71,10 @@ def _next_letter_suffix(used: set) -> str:
             cand = a + b
             if cand not in used:
                 return cand
-    raise HTTPException(status_code=409, detail="Cannot allocate child suffix — too many children")
+    n = 1
+    while str(n) in used:
+        n += 1
+    return str(n)
 
 
 def _qty_diff(it: dict) -> float:

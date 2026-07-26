@@ -132,6 +132,50 @@ async def _validate_cumulative_qty_polymorphic(source_type: str, source_id: str,
             )
 
 
+async def _validate_racking_locations(items):
+    """Confirm every godown/rack/box referenced by a racking-note row still exists and
+    that rack->godown / box->rack parentage is intact — mirrors the same check already
+    done for Transfer Notes (_validate_transfer_note_items). Without this, a rack/box
+    deleted after being selected on a Draft Racking Note could still be recorded as a
+    valid stock-in location."""
+    godown_ids, rack_ids, box_ids = set(), set(), set()
+    for it in items:
+        if (it.godown_id or "").strip():
+            godown_ids.add(it.godown_id)
+        if (it.rack_id or "").strip():
+            rack_ids.add(it.rack_id)
+        if (it.box_id or "").strip():
+            box_ids.add(it.box_id)
+
+    valid_godowns = set()
+    if godown_ids:
+        async for g in db.godowns.find({"id": {"$in": list(godown_ids)}}, {"_id": 0, "id": 1}):
+            valid_godowns.add(g["id"])
+    racks_by_id = {}
+    if rack_ids:
+        async for rk in db.racks.find({"id": {"$in": list(rack_ids)}}, {"_id": 0, "id": 1, "godown_id": 1}):
+            racks_by_id[rk["id"]] = rk.get("godown_id")
+    boxes_by_id = {}
+    if box_ids:
+        async for bx in db.boxes.find({"id": {"$in": list(box_ids)}}, {"_id": 0, "id": 1, "rack_id": 1}):
+            boxes_by_id[bx["id"]] = bx.get("rack_id")
+
+    for idx, it in enumerate(items, start=1):
+        gid, rid, bid = (it.godown_id or "").strip(), (it.rack_id or "").strip(), (it.box_id or "").strip()
+        if gid and gid not in valid_godowns:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown is invalid or no longer exists")
+        if rid:
+            if rid not in racks_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Rack is invalid or no longer exists")
+            if gid and racks_by_id[rid] != gid:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Rack does not belong to the selected Godown")
+        if bid:
+            if bid not in boxes_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Box is invalid or no longer exists")
+            if rid and boxes_by_id[bid] != rid:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Box does not belong to the selected Rack")
+
+
 async def _box_id_required_for_rack(rack_id: str) -> bool:
     """A box must be picked only if the selected rack has at least one box defined."""
     return await db.boxes.count_documents({"rack_id": rack_id}) > 0

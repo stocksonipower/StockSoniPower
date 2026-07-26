@@ -119,7 +119,7 @@ class Box(BaseModel):
 class StockInCreate(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     godown_id: str
     rack_id: str
     box_id: str
@@ -128,7 +128,7 @@ class StockInCreate(BaseModel):
 class StockOutCreate(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     godown_id: str
     rack_id: str
     box_id: str
@@ -137,12 +137,12 @@ class StockOutCreate(BaseModel):
 class ReceiptNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: Optional[int] = None      # what the invoice claims; omitted for GENERAL stock-in
-    received_qty: Optional[int] = None     # what physically arrived (None on draft)
+    invoice_qty: Optional[float] = None      # what the invoice claims; omitted for GENERAL stock-in
+    received_qty: Optional[float] = None     # what physically arrived (None on draft)
     description_1: Optional[str] = ""        # denormalized from stock_master.description_1 (read-only display)
     # Legacy alias — kept so existing racking code keeps working without changes.
     # Always written equal to received_qty when finalized, else equal to invoice_qty.
-    quantity: Optional[int] = None
+    quantity: Optional[float] = None
 
 
 class ReceiptNoteCreate(BaseModel):
@@ -150,12 +150,16 @@ class ReceiptNoteCreate(BaseModel):
     # "GENERAL" -> no invoice (invoice_qty forced equal to received_qty -> qty_diff is always zero,
     # so no SRN/ERN ever auto-created from a GENERAL receipt).
     stock_in_type: str = "INVOICE"             # "INVOICE" | "GENERAL"
+    supplier_name: Optional[str] = ""
     invoice_no: Optional[str] = ""
     invoice_date: Optional[str] = ""           # ISO "YYYY-MM-DD"
     goods_received_date: Optional[str] = ""    # ISO "YYYY-MM-DD"
     items: List[ReceiptNoteItem] = []
     assigned_to_user_id: Optional[str] = None  # null = unassigned (anyone with module access can rack)
     narration: Optional[str] = ""
+    # Optional client-generated token so a retried/duplicated submit (double-click,
+    # network retry) returns the already-created document instead of creating a duplicate.
+    client_token: Optional[str] = None
 
 
 class ReceiptNote(BaseModel):
@@ -165,6 +169,7 @@ class ReceiptNote(BaseModel):
     fy: str
     serial: int
     stock_in_type: str = "INVOICE"
+    supplier_name: str = ""
     invoice_no: str = ""
     invoice_date: str = ""
     goods_received_date: str = ""
@@ -189,10 +194,10 @@ class ReceiptNote(BaseModel):
 class ShortReceivedNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: int = 0                    # qty on the original invoice (carried from parent RN row)
-    received_qty: int = 0                   # qty already received on the parent RN row (carried over)
-    short_qty: int                          # qty that was short on the parent (= invoice_qty - received_qty)
-    fulfilled_qty: Optional[int] = None     # qty user has now received against the shortfall (filled at finalize)
+    invoice_qty: float = 0                    # qty on the original invoice (carried from parent RN row)
+    received_qty: float = 0                   # qty already received on the parent RN row (carried over)
+    short_qty: float                          # qty that was short on the parent (= invoice_qty - received_qty)
+    fulfilled_qty: Optional[float] = None     # qty user has now received against the shortfall (filled at finalize)
     # Master snapshot — denormalized for display
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
@@ -205,7 +210,7 @@ class ShortReceivedNoteItem(BaseModel):
     item_category: Optional[str] = ""
     unit: Optional[str] = ""
     # Legacy alias - mirrors fulfilled_qty so racking flow can read it like any other note.
-    quantity: Optional[int] = None
+    quantity: Optional[float] = None
     # Slice-model: list of fulfilled batches. Each entry references a child SRN
     # holding the fulfilled portion. {child_srn_id, child_srn_no, fulfilled_qty,
     # fulfilled_date, created_at}.
@@ -250,11 +255,11 @@ class ShortReceivedNote(BaseModel):
 class ExtraReceivedNoteItem(BaseModel):
     part_no: str
     make: str
-    invoice_qty: int = 0                    # invoice qty on the parent RN row
-    received_qty: int = 0                   # received qty on the parent RN row
-    extra_qty: int                          # qty over the invoice (= received_qty - invoice_qty)
-    accepted_qty: Optional[int] = None      # filled when finalized; rackable
-    rejected_qty: Optional[int] = None      # filled when finalized; returned to supplier (NOT rackable)
+    invoice_qty: float = 0                    # invoice qty on the parent RN row
+    received_qty: float = 0                   # received qty on the parent RN row
+    extra_qty: float                          # qty over the invoice (= received_qty - invoice_qty)
+    accepted_qty: Optional[float] = None      # filled when finalized; rackable
+    rejected_qty: Optional[float] = None      # filled when finalized; returned to supplier (NOT rackable)
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -264,7 +269,7 @@ class ExtraReceivedNoteItem(BaseModel):
     remarks_others: Optional[str] = ""
     item_category: Optional[str] = ""
     # Legacy alias - mirrors accepted_qty for the racking pipeline.
-    quantity: Optional[int] = None
+    quantity: Optional[float] = None
     # Slice-model: list of accepted batches. Each entry references a child ERN
     # holding the accepted portion. {child_ern_id, child_ern_no, accepted_qty,
     # accepted_date, created_at}.
@@ -305,7 +310,7 @@ class ExtraReceivedNote(BaseModel):
 class RackingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     # Denormalized stock master fields (filled at create time)
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
@@ -333,6 +338,9 @@ class RackingNoteCreate(BaseModel):
     receipt_note_id: Optional[str] = None  # legacy field, ignored if source_id given
     items: List[RackingNoteItem] = []
     narration: Optional[str] = ""
+    # Optional client-generated token so a retried/duplicated submit (double-click,
+    # network retry) returns the already-created document instead of creating a duplicate.
+    client_token: Optional[str] = None
 
 
 class RackingNote(BaseModel):
@@ -366,7 +374,7 @@ class RackingNote(BaseModel):
 class IssueNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     # Optional office-selected godown preference. Rack/box allocation belongs to Picking.
     selected_godown_id: Optional[str] = None
     selected_godown_name: Optional[str] = None
@@ -400,7 +408,7 @@ class IssueNote(BaseModel):
 class PickingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -445,7 +453,7 @@ class PickingNote(BaseModel):
 class TransferRequestItem(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     # Optional destination preference (the Transfer Note can override)
     dest_godown_id: Optional[str] = ""
     dest_godown_name: Optional[str] = ""
@@ -482,7 +490,7 @@ class TransferRequest(BaseModel):
 class TransferNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: int
+    quantity: float
     # Master snapshot
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""

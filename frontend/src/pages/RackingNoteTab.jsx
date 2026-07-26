@@ -13,7 +13,7 @@ import {
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, CaretLeft, CaretRight, Pencil, CheckCircle, MapPin, ArrowsSplit,
-  DownloadSimple, ArrowsClockwise, MagnifyingGlass,
+  DownloadSimple, ArrowsClockwise, MagnifyingGlass, Printer, CircleNotch,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
@@ -37,7 +37,7 @@ function hasCompleteRackingLocations(rkn) {
     (it.godown_id || "").trim() &&
     (it.rack_id || "").trim() &&
     (it.box_id || "").trim() &&
-    (parseInt(it.quantity) || 0) > 0
+    (parseFloat(it.quantity) || 0) > 0
   );
 }
 
@@ -54,6 +54,99 @@ function SourceTypeBadge({ type }) {
       {s.label}
     </span>
   );
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* --------------------------------------------------------------
+   Export / Print — a physical pick-slip: shows the part's existing
+   rack/box elsewhere in the warehouse (for context) plus BLANK "New
+   Rack" / "New Box" fields the warehouse worker fills in by hand
+   while walking the note to the shelf.
+   -------------------------------------------------------------- */
+async function exportRackingNote(rkn) {
+  if (!rkn) return;
+  let existingByKey = {};
+  try {
+    const { data } = await api.get("/racking-notes/prepare-source", {
+      params: { source_type: rkn.source_type || "RN", source_id: rkn.source_id || rkn.receipt_note_id, exclude_rkn_id: rkn.id },
+    });
+    (data.items || []).forEach((it) => {
+      existingByKey[`${it.part_no}||${it.make}`] = it.existing_locations || [];
+    });
+  } catch {
+    // Non-fatal — print still works with whatever's on the note itself.
+  }
+
+  const rows = (rkn.items || []).map((it, idx) => {
+    const key = `${it.part_no}||${it.make}`;
+    const locs = existingByKey[key] || [];
+    const existing = locs.length === 0
+      ? "–"
+      : locs.map((l) => `${escapeHtml(l.godown_name || "—")}/${escapeHtml(l.rack_no || "—")}/${escapeHtml(l.box_no || "—")} (${l.current_qty})`).join("<br/>");
+    return `<tr>
+      <td>${idx + 1}</td>
+      <td>${escapeHtml(it.model || "—")}</td>
+      <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
+      <td>${escapeHtml(it.description_1 || "—")}</td>
+      <td>${escapeHtml(it.make || "")}</td>
+      <td style="text-align:right">${it.quantity ?? "—"}</td>
+      <td>${existing}</td>
+      <td class="blank-cell"></td>
+      <td class="blank-cell"></td>
+    </tr>`;
+  }).join("");
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<title>${escapeHtml(rkn.rkn_no)} — Racking Note</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #0f172a; }
+  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; }
+  .header-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  .field-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
+  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
+  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; vertical-align: top; }
+  .blank-cell { min-width: 90px; border-left: 1px dashed #94a3b8; background: repeating-linear-gradient(0deg, transparent, transparent 17px, #e2e8f0 18px); }
+  .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  @media print { body { padding: 12mm; } }
+</style></head>
+<body>
+  <h1>Racking Note</h1>
+  <div class="header-grid">
+    <div><div class="field-label">Racking Note No</div><div class="field-value">${escapeHtml(rkn.rkn_no)}</div></div>
+    <div><div class="field-label">Racking Note Date</div><div class="field-value">${escapeHtml(fmtDate(rkn.rkn_date))}</div></div>
+    <div><div class="field-label">Status</div><div class="field-value">${escapeHtml(rkn.status === "RECORDED" ? "Fully Racked" : "Draft")}</div></div>
+    <div><div class="field-label">Racked Against</div><div class="field-value">${escapeHtml(rkn.source_type || "RN")} · ${escapeHtml(rkn.source_no || rkn.receipt_note_no || "—")}</div></div>
+    <div><div class="field-label">Receipt Note No</div><div class="field-value">${escapeHtml(rkn.receipt_note_no || "—")}</div></div>
+    <div><div class="field-label">Created By</div><div class="field-value">${escapeHtml(rkn.created_by || "—")}</div></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Sl</th><th>Model</th><th>Part No</th><th>Description</th><th>Make</th>
+      <th style="text-align:right">Qty</th>
+      <th>Existing Rack / Box</th>
+      <th>New Rack</th>
+      <th>New Box</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="footer">
+    Printed: ${escapeHtml(new Date().toLocaleString())} &nbsp;·&nbsp; Printed by: ${escapeHtml(rkn.created_by || "—")}
+  </div>
+  <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
+</body></html>`;
+
+  const w = window.open("", "_blank", "width=1000,height=750");
+  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }
 
 
@@ -110,6 +203,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [recordingId, setRecordingId] = useState(null);
+  const [printingId, setPrintingId] = useState(null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef(null);
 
@@ -171,6 +265,15 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not record");
     } finally { setRecordingId(null); }
+  };
+
+  const handlePrint = async (rkn) => {
+    setPrintingId(rkn.id);
+    try {
+      await exportRackingNote(rkn);
+    } catch {
+      toast.error("Could not prepare print — try again");
+    } finally { setPrintingId(null); }
   };
 
   const columns = useMemo(() => [
@@ -246,7 +349,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
+              const totalQty = (r.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
               const recorded = r.status === "RECORDED";
               const assigneeId = r.parent_assigned_to_user_id;
               const assigneeName = r.parent_assigned_to_name;
@@ -322,6 +425,17 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       >
                         <Trash size={14} />
                       </button>
+                      <button
+                        onClick={() => handlePrint(r)}
+                        disabled={printingId === r.id}
+                        title="Print / export racking slip"
+                        className="p-1.5 rounded-sm hover:bg-slate-100 text-slate-600"
+                        data-testid={`rkn-print-${r.rkn_no}`}
+                      >
+                        {printingId === r.id
+                          ? <CircleNotch size={14} className="animate-spin" />
+                          : <Printer size={14} />}
+                      </button>
                       <Button
                         onClick={() => handleRecord(r)}
                         disabled={recordDisabled}
@@ -371,13 +485,28 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 
 /* ---------- DETAIL DIALOG (read-only) ---------- */
 function RackingNoteDetailDialog({ rkn, onClose }) {
+  const [printing, setPrinting] = useState(false);
+  const handlePrint = async () => {
+    setPrinting(true);
+    try {
+      await exportRackingNote(rkn);
+    } catch {
+      toast.error("Could not prepare print — try again");
+    } finally { setPrinting(false); }
+  };
   return (
     <Dialog open={!!rkn} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-6xl rounded-sm" data-testid="rkn-detail-dialog">
         {rkn && (
           <>
-            <DialogHeader>
+            <DialogHeader className="flex-row items-center justify-between pr-8">
               <DialogTitle className="text-2xl font-black font-mono">{rkn.rkn_no}</DialogTitle>
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={handlePrint} disabled={printing} data-testid="rkn-detail-print">
+                {printing
+                  ? <CircleNotch size={14} weight="bold" className="mr-1.5 animate-spin" />
+                  : <Printer size={14} weight="bold" className="mr-1.5" />}
+                Print
+              </Button>
             </DialogHeader>
             <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
               <Detail k="Racking Note Date" v={fmtDate(rkn.rkn_date)} />
@@ -462,11 +591,16 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([]);
   const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingStep, setSavingStep] = useState(""); // "" | "saving" | "recording" — drives the loader label
 
   // Cascading dropdown caches
   const [godowns, setGodowns] = useState([]);
   const [racksByGodown, setRacksByGodown] = useState({}); // {godown_id: [racks]}
   const [boxesByRack, setBoxesByRack] = useState({});
+
+  // One idempotency token per create session — a double-click / retried request on
+  // POST /racking-notes replays the same document instead of creating a duplicate.
+  const clientTokenRef = useRef(isEdit ? null : (crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`));
 
   useEffect(() => { api.get("/godowns").then((r) => setGodowns(r.data)); }, []);
 
@@ -627,11 +761,18 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     const map = {};
     items.forEach((r) => {
       const k = `${r.part_no}||${r.make}`;
-      map[k] = (map[k] || 0) + (parseInt(r.quantity) || 0);
+      map[k] = (map[k] || 0) + (parseFloat(r.quantity) || 0);
     });
     return map;
   }, [items]);
 
+  // Save and Record Stock In are the same user action: filling in the rack/box and
+  // clicking the button both finalizes the note AND moves stock in one step — there
+  // is no separate "Draft, then go back and record later" flow for a note the user is
+  // actively filling in here. (Racking Notes the system auto-creates elsewhere in the
+  // workflow still land as DRAFT until an operator opens/completes them the same way,
+  // or uses the list view's "Record Stock In" action as a fallback if this step fails
+  // partway — e.g. a concurrent recording conflict.)
   const save = async () => {
     if (!selectedSourceKey) { toast.error("Select a racking source (RN / SRN / ERN)"); return; }
     const [sourceType, sourceId] = selectedSourceKey.split(":");
@@ -646,7 +787,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       if (!it.box_id) {
         toast.error(`Row ${i + 1}: pick Box`); return;
       }
-      const q = parseInt(it.quantity);
+      const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
     }
     // Cumulative-vs-pending check (client-side; backend re-validates)
@@ -665,6 +806,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       }
     }
     setSaving(true);
+    setSavingStep("saving");
     try {
       const payload = {
         source_type: sourceType,
@@ -672,8 +814,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
         // Legacy back-compat: backend still accepts receipt_note_id; harmless when source_type/id is sent.
         receipt_note_id: sourceType === "RN" ? sourceId : (selectedSource?.parent_rn_id || undefined),
         narration: narration.trim(),
+        client_token: isEdit ? undefined : clientTokenRef.current,
         items: items.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseFloat(it.quantity),
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -686,11 +829,34 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       const { data } = isEdit
         ? await api.put(`/racking-notes/${editing.id}`, payload)
         : await api.post("/racking-notes", payload);
-      toast.success(`Racking Note ${data.rkn_no} ${isEdit ? "updated" : "saved"}`);
+
+      if (data.status === "RECORDED") {
+        // Already recorded (e.g. idempotent replay of an earlier successful submit).
+        toast.success(`Racking Note ${data.rkn_no} — Stock In already recorded`);
+        onSaved();
+        return;
+      }
+
+      setSavingStep("recording");
+      try {
+        const rec = await api.post(`/racking-notes/${data.id}/record`);
+        const autoRkn = rec.headers?.["x-auto-rkn-no"] || rec.data?.auto_rkn_no;
+        toast.success(
+          `Racking Note ${data.rkn_no} saved — Stock In recorded (${rec.data?.transactions_created ?? items.length} item(s))`
+          + (autoRkn ? ` · ${autoRkn} auto-created for remaining qty` : "")
+        );
+      } catch (recErr) {
+        // The note itself is safely saved even if the record step failed (e.g. a
+        // concurrent recording conflict) — tell the user exactly how to finish.
+        toast.error(
+          (formatApiError(recErr.response?.data?.detail) || "Could not record Stock In")
+          + ` — ${data.rkn_no} is saved; use "Record Stock In" from the list to finish.`
+        );
+      }
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
-    } finally { setSaving(false); }
+    } finally { setSaving(false); setSavingStep(""); }
   };
 
   return (
@@ -802,7 +968,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="text-center">
-                      <Input type="number" min="1" step="1" value={it.quantity}
+                      <Input type="number" min="0.001" step="any" value={it.quantity}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                         className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
                       {pending !== undefined && (
@@ -839,7 +1005,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     </td>
                     <td>
                       {(it.existing_locations || []).length === 0 ? (
-                        <span className="text-[11px] text-slate-400 italic">New part — pick any location</span>
+                        <span className="text-[11px] text-slate-400 font-mono" title="New part — pick any location">–</span>
                       ) : (
                         <div className="flex flex-wrap gap-1 max-w-[220px]">
                           {(it.existing_locations || []).map((loc, k) => {
@@ -903,8 +1069,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
             </div>
             <div className="flex items-center gap-2 pt-7">
               <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-6" data-testid="rkn-save-button">
-                <FloppyDisk size={14} weight="bold" className="mr-2" />
-                {saving ? "Saving…" : (isEdit ? "Update Racking Note" : "Save Racking Note")}
+                {saving
+                  ? <CircleNotch size={14} weight="bold" className="mr-2 animate-spin" />
+                  : <FloppyDisk size={14} weight="bold" className="mr-2" />}
+                {savingStep === "recording" ? "Recording Stock In…" : (saving ? "Saving…" : "Save & Record Stock In")}
               </Button>
             </div>
           </div>
