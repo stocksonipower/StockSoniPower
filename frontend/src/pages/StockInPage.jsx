@@ -21,8 +21,9 @@ import {
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
 import PartNoLink from "../components/PartNoLink";
-import DocumentDetailDialog from "../components/DocumentDetailDialog";
+import DocumentDetailDialog, { LinkedDocsBar, isChildEditable, isRknEditable } from "../components/DocumentDetailDialog";
 import { useAuth } from "../lib/auth";
+import { StockInNavContext, useStockInNav } from "../lib/stockInNav";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import { exportToExcel } from "../lib/exportExcel";
@@ -117,45 +118,65 @@ function statusMeta(status) {
   }
 }
 
+const TAB_FOR_DOC_TYPE = {
+  rn: "receipt-note",
+  srn: "short-received-note",
+  ern: "extra-received-note",
+  rkn: "racking-note",
+};
+
 export default function StockInPage() {
   const [tab, setTab] = useState("receipt-note");
+  // { type: "rn"|"srn"|"ern"|"rkn", doc, token } — a pending request (from a
+  // nested preview's Linked Docs bar) to open a document's edit form.
+  const [editRequest, setEditRequest] = useState(null);
+
+  const requestEdit = useCallback((type, doc) => {
+    setTab(TAB_FOR_DOC_TYPE[type] || "receipt-note");
+    setEditRequest({ type, doc, token: `${Date.now()}-${Math.random()}` });
+  }, []);
+  const clearEditRequest = useCallback(() => setEditRequest(null), []);
+  const navValue = useMemo(() => ({ editRequest, requestEdit, clearEditRequest }), [editRequest, requestEdit, clearEditRequest]);
+
   return (
-    <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-in-page">
-      <div className="mb-6">
-        <div className="label-sm mb-2">Inward</div>
-        <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock In</h1>
+    <StockInNavContext.Provider value={navValue}>
+      <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-in-page">
+        <div className="mb-6">
+          <div className="label-sm mb-2">Inward</div>
+          <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock In</h1>
+        </div>
+
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList className="rounded-sm">
+            <TabsTrigger value="receipt-note" className="rounded-sm" data-testid="tab-receipt-note">
+              <FileText size={14} weight="bold" className="mr-2" /> Receipt Note
+            </TabsTrigger>
+            <TabsTrigger value="short-received-note" className="rounded-sm" data-testid="tab-short-received-note">
+              <Warning size={14} weight="bold" className="mr-2" /> Short Received Note
+            </TabsTrigger>
+            <TabsTrigger value="extra-received-note" className="rounded-sm" data-testid="tab-extra-received-note">
+              <Plus size={14} weight="bold" className="mr-2" /> Extra Received Note
+            </TabsTrigger>
+            <TabsTrigger value="racking-note" className="rounded-sm" data-testid="tab-racking-note">
+              <Stack size={14} weight="bold" className="mr-2" /> Racking Note
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="receipt-note">
+            <ReceiptNoteTab />
+          </TabsContent>
+          <TabsContent value="short-received-note">
+            <ShortReceivedNoteTab />
+          </TabsContent>
+          <TabsContent value="extra-received-note">
+            <ExtraReceivedNoteTab />
+          </TabsContent>
+          <TabsContent value="racking-note">
+            <RackingNoteTab />
+          </TabsContent>
+        </Tabs>
       </div>
-
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="rounded-sm">
-          <TabsTrigger value="receipt-note" className="rounded-sm" data-testid="tab-receipt-note">
-            <FileText size={14} weight="bold" className="mr-2" /> Receipt Note
-          </TabsTrigger>
-          <TabsTrigger value="short-received-note" className="rounded-sm" data-testid="tab-short-received-note">
-            <Warning size={14} weight="bold" className="mr-2" /> Short Received Note
-          </TabsTrigger>
-          <TabsTrigger value="extra-received-note" className="rounded-sm" data-testid="tab-extra-received-note">
-            <Plus size={14} weight="bold" className="mr-2" /> Extra Received Note
-          </TabsTrigger>
-          <TabsTrigger value="racking-note" className="rounded-sm" data-testid="tab-racking-note">
-            <Stack size={14} weight="bold" className="mr-2" /> Racking Note
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="receipt-note">
-          <ReceiptNoteTab />
-        </TabsContent>
-        <TabsContent value="short-received-note">
-          <ShortReceivedNoteTab />
-        </TabsContent>
-        <TabsContent value="extra-received-note">
-          <ExtraReceivedNoteTab />
-        </TabsContent>
-        <TabsContent value="racking-note">
-          <RackingNoteTab />
-        </TabsContent>
-      </Tabs>
-    </div>
+    </StockInNavContext.Provider>
   );
 }
 
@@ -167,10 +188,19 @@ function ReceiptNoteTab() {
   const [editingRn, setEditingRn] = useState(null);
   const [openRn, setOpenRn] = useState(null); // detail dialog
   const [reloadKey, setReloadKey] = useState(0);
+  const nav = useStockInNav();
 
   const goCreate = () => { setEditingRn(null); setView("create"); };
   const goEdit = (rn) => { setEditingRn(rn); setView("edit"); };
   const goList = () => { setEditingRn(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  useEffect(() => {
+    if (nav?.editRequest?.type === "rn") {
+      setOpenRn(null);
+      goEdit(nav.editRequest.doc);
+      nav.clearEditRequest();
+    }
+  }, [nav?.editRequest?.token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <>
@@ -443,6 +473,8 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
   const [openSrn, setOpenSrn] = useState(null);
   const [openErn, setOpenErn] = useState(null);
   const [openRkn, setOpenRkn] = useState(null);
+  const nav = useStockInNav();
+  const { user: me, isAdmin } = useAuth();
 
   useEffect(() => {
     if (!rn) { setSrns([]); setErns([]); setRkns([]); setMasterData({}); return; }
@@ -480,6 +512,32 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
   }, [erns]);
 
   const handlePrint = () => printReceiptNote(rn, srns, erns, rkns, masterData, srnTree, ernTree);
+
+  // Navigate between the nested SRN/ERN/RKN preview dialogs (and back to this RN).
+  const navigateTo = (type, doc) => {
+    setOpenSrn(null); setOpenErn(null); setOpenRkn(null);
+    if (type === "srn") setOpenSrn(doc);
+    else if (type === "ern") setOpenErn(doc);
+    else if (type === "rkn") setOpenRkn({ kind: "racking", id: doc.id, no: doc.rkn_no });
+    // type === "rn" needs no action — closing the nested dialogs reveals this RN dialog.
+  };
+  const related = { rn, srns, erns, rkns };
+
+  // Clicking an SRN/ERN/RKN id in the 3-column section below opens its EDIT
+  // form directly (switching tabs); a locked/finalized doc falls back to the
+  // read-only preview since there's nothing to edit.
+  const goToSrn = (srn) => {
+    if (isChildEditable(srn) && nav?.requestEdit) nav.requestEdit("srn", srn);
+    else setOpenSrn(srn);
+  };
+  const goToErn = (ern) => {
+    if (isChildEditable(ern) && nav?.requestEdit) nav.requestEdit("ern", ern);
+    else setOpenErn(ern);
+  };
+  const goToRkn = (rkn) => {
+    if (isRknEditable(rkn, me, isAdmin) && nav?.requestEdit) nav.requestEdit("rkn", rkn);
+    else setOpenRkn({ kind: "racking", id: rkn.id, no: rkn.rkn_no });
+  };
 
   return (
     <Dialog open={!!rn} onOpenChange={(o) => !o && onClose()}>
@@ -588,7 +646,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                     return (
                       <div key={parent.id} className="mb-3">
                         <div className="rounded border border-slate-200 p-2 text-xs bg-slate-50">
-                          <button onClick={() => setOpenSrn(parent)}
+                          <button onClick={() => goToSrn(parent)}
                             className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
                             {parent.srn_no}
                           </button>
@@ -611,7 +669,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                           const cSm    = statusMeta(child.status);
                           return (
                             <div key={child.id} className="ml-3 mt-1 border-l-2 border-slate-300 pl-2 rounded-r border border-l-0 border-slate-200 p-1.5 text-xs bg-white">
-                              <button onClick={() => setOpenSrn(child)}
+                              <button onClick={() => goToSrn(child)}
                                 className="font-mono font-bold text-blue-600 hover:underline text-[11px]">
                                 {child.srn_no}
                               </button>
@@ -649,7 +707,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                     return (
                       <div key={parent.id} className="mb-3">
                         <div className="rounded border border-slate-200 p-2 text-xs bg-slate-50">
-                          <button onClick={() => setOpenErn(parent)}
+                          <button onClick={() => goToErn(parent)}
                             className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
                             {parent.ern_no}
                           </button>
@@ -672,7 +730,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                           const cEm   = statusMeta(child.status);
                           return (
                             <div key={child.id} className="ml-3 mt-1 border-l-2 border-slate-300 pl-2 rounded-r border border-l-0 border-slate-200 p-1.5 text-xs bg-white">
-                              <button onClick={() => setOpenErn(child)}
+                              <button onClick={() => goToErn(child)}
                                 className="font-mono font-bold text-blue-600 hover:underline text-[11px]">
                                 {child.ern_no}
                               </button>
@@ -705,7 +763,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                     const rm = statusMeta(rkn.status);
                     return (
                       <div key={rkn.id} className="rounded border border-slate-200 p-2 text-xs bg-slate-50 mb-2">
-                        <button onClick={() => setOpenRkn({ kind: "racking", id: rkn.id, no: rkn.rkn_no })}
+                        <button onClick={() => goToRkn(rkn)}
                           className="font-mono font-bold text-blue-700 hover:underline text-[11px]">
                           {rkn.rkn_no}
                         </button>
@@ -736,9 +794,9 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
             </div>
 
             {/* ── SUB-DIALOGS ── */}
-            <ChildDetailDialog kind="srn" doc={openSrn} onClose={() => setOpenSrn(null)} onOpen={() => {}} />
-            <ChildDetailDialog kind="ern" doc={openErn} onClose={() => setOpenErn(null)} onOpen={() => {}} />
-            <DocumentDetailDialog kind={openRkn?.kind} id={openRkn?.id} no={openRkn?.no} onClose={() => setOpenRkn(null)} />
+            <ChildDetailDialog kind="srn" doc={openSrn} onClose={() => setOpenSrn(null)} onOpen={() => {}} related={related} onNavigate={navigateTo} />
+            <ChildDetailDialog kind="ern" doc={openErn} onClose={() => setOpenErn(null)} onOpen={() => {}} related={related} onNavigate={navigateTo} />
+            <DocumentDetailDialog kind={openRkn?.kind} id={openRkn?.id} no={openRkn?.no} onClose={() => setOpenRkn(null)} related={related} onNavigate={navigateTo} />
           </>
         )}
       </DialogContent>
@@ -1910,9 +1968,18 @@ function ShortReceivedNoteTab() {
   const [openDetail, setOpenDetail] = useState(null);
   const [openRn, setOpenRn] = useState(null);          // parent RN detail dialog
   const [reloadKey, setReloadKey] = useState(0);
+  const nav = useStockInNav();
 
   const goEdit = (srn) => { setEditing(srn); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  useEffect(() => {
+    if (nav?.editRequest?.type === "srn") {
+      setOpenDetail(null);
+      goEdit(nav.editRequest.doc);
+      nav.clearEditRequest();
+    }
+  }, [nav?.editRequest?.token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleOpenRn = async (rnId) => {
     if (!rnId) return;
@@ -1962,9 +2029,18 @@ function ExtraReceivedNoteTab() {
   const [openDetail, setOpenDetail] = useState(null);
   const [openRn, setOpenRn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const nav = useStockInNav();
 
   const goEdit = (ern) => { setEditing(ern); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  useEffect(() => {
+    if (nav?.editRequest?.type === "ern") {
+      setOpenDetail(null);
+      goEdit(nav.editRequest.doc);
+      nav.clearEditRequest();
+    }
+  }, [nav?.editRequest?.token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleOpenRn = async (rnId) => {
     if (!rnId) return;
@@ -2228,7 +2304,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 }
 
 /** Read-only detail dialog for SRN/ERN — shows all rows with quantities. */
-function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
+function ChildDetailDialog({ kind, doc, onClose, onOpen, related, onNavigate }) {
   if (!doc) return null;
   const isSrn = kind === "srn";
   const idField = isSrn ? "srn_no" : "ern_no";
@@ -2269,6 +2345,9 @@ function ChildDetailDialog({ kind, doc, onClose, onOpen }) {
             <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>
           </DialogTitle>
         </DialogHeader>
+        {related && onNavigate && (
+          <LinkedDocsBar related={related} onNavigate={onNavigate} excludeType={kind} excludeId={doc.id} />
+        )}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
           <Detail k={`${isSrn ? "SRN" : "ERN"} Date`} v={fmtDate(doc[dateField])} />
           <Detail k="Parent RN" v={`${doc.parent_rn_no || "—"} (${fmtDate(doc.parent_rn_date) || "—"})`} />

@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from "react";
+import { PencilSimple, Eye } from "@phosphor-icons/react";
 import { api } from "../lib/api";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import PartNoLink from "./PartNoLink";
+import { useAuth } from "../lib/auth";
+import { useStockInNav } from "../lib/stockInNav";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -14,7 +17,7 @@ const fmtDate = (iso) => {
  * Fetches a Racking Note / Picking Note / Transfer Note by id+kind and renders its details.
  * `kind` ∈ "racking" | "picking" | "transfer"
  */
-export default function DocumentDetailDialog({ kind, id, no, onClose }) {
+export default function DocumentDetailDialog({ kind, id, no, onClose, related, onNavigate }) {
   const open = !!(kind && id);
   const [doc, setDoc] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -44,11 +47,101 @@ export default function DocumentDetailDialog({ kind, id, no, onClose }) {
         </DialogHeader>
         {loading && <div className="text-sm text-slate-500 py-6">Loading…</div>}
         {err && <div className="text-sm text-red-700 py-6">{err}</div>}
+        {doc && kind === "racking" && related && onNavigate && (
+          <LinkedDocsBar related={related} onNavigate={onNavigate} excludeType="rkn" excludeId={id} />
+        )}
         {doc && kind === "racking" && <RackingBody d={doc} />}
         {doc && kind === "picking" && <PickingBody d={doc} />}
         {doc && kind === "transfer" && <TransferBody d={doc} />}
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function isRnEditable(rn, me, isAdmin) {
+  if (!rn) return false;
+  const isDraft = rn.status === "DRAFT";
+  const hasRacking = rn.has_racking_note === true
+    || (rn.has_racking_note === undefined && (rn.status === "FULLY_RACKED" || rn.status === "PARTIALLY_RACKED"));
+  const isAssignedToOther = !isDraft && !!rn.assigned_to_user_id && rn.assigned_to_user_id !== me?.id && !isAdmin;
+  return !(hasRacking || isAssignedToOther);
+}
+export function isChildEditable(doc) { // SRN / ERN
+  return doc?.status !== "COMPLETE";
+}
+export function isRknEditable(rkn, me, isAdmin) {
+  if (!rkn) return false;
+  const recorded = rkn.status === "RECORDED";
+  const assigneeId = rkn.parent_assigned_to_user_id;
+  const isLockedToOther = !!assigneeId && assigneeId !== me?.id && !isAdmin;
+  return !(recorded || isLockedToOther);
+}
+
+/**
+ * Row of clickable buttons linking to the RN and its sibling SRN/ERN/RKN docs,
+ * so any of the four previews can jump directly to any other. Clicking a doc
+ * that's still editable opens its EDIT form (switching to that document's
+ * tab); a locked/finalized doc falls back to the read-only preview.
+ * `related` = { rn, srns, erns, rkns } — already fetched by the RN detail dialog.
+ * `excludeType`/`excludeId` hide the button for the document currently open.
+ */
+export function LinkedDocsBar({ related, onNavigate, excludeType, excludeId }) {
+  const { rn, srns = [], erns = [], rkns = [] } = related || {};
+  const nav = useStockInNav();
+  const { user: me, isAdmin } = useAuth();
+
+  const isEditable = (type, doc) => {
+    if (type === "rn") return isRnEditable(doc, me, isAdmin);
+    if (type === "rkn") return isRknEditable(doc, me, isAdmin);
+    return isChildEditable(doc);
+  };
+
+  const go = (type, doc) => {
+    if (isEditable(type, doc) && nav?.requestEdit) nav.requestEdit(type, doc);
+    else onNavigate?.(type, doc);
+  };
+
+  const chip = (label, no, doc, type, key) => {
+    const editable = isEditable(type, doc);
+    return (
+      <button
+        key={key}
+        onClick={() => go(type, doc)}
+        title={editable ? `Edit ${label} ${no}` : `View ${label} ${no} (read-only)`}
+        className={`inline-flex items-center gap-1 font-mono text-[11px] font-bold rounded-sm px-2 py-0.5 border ${
+          editable
+            ? "text-blue-700 hover:underline bg-blue-50 border-blue-100"
+            : "text-slate-500 bg-slate-50 border-slate-200"
+        }`}
+      >
+        {editable ? <PencilSimple size={10} weight="bold" /> : <Eye size={10} weight="bold" />}
+        {label}: {no}
+      </button>
+    );
+  };
+
+  const items = [];
+  if (rn && excludeType !== "rn") {
+    items.push(chip("RN", rn.rn_no, rn, "rn", "rn"));
+  }
+  srns.forEach((s) => {
+    if (excludeType === "srn" && s.id === excludeId) return;
+    items.push(chip("SRN", s.srn_no, s, "srn", `srn-${s.id}`));
+  });
+  erns.forEach((e) => {
+    if (excludeType === "ern" && e.id === excludeId) return;
+    items.push(chip("ERN", e.ern_no, e, "ern", `ern-${e.id}`));
+  });
+  rkns.forEach((r) => {
+    if (excludeType === "rkn" && r.id === excludeId) return;
+    items.push(chip("RKN", r.rkn_no, r, "rkn", `rkn-${r.id}`));
+  });
+  if (!items.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 py-2 border-b border-slate-200 mb-3">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">Linked Docs:</span>
+      {items}
+    </div>
   );
 }
 

@@ -20,6 +20,7 @@ import { AssigneeBadge } from "../components/AssigneeSelect";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import { ReceiptNoteDetailDialog, stockInTypeMeta, stockInTypeLabel } from "./StockInPage";
+import { useStockInNav } from "../lib/stockInNav";
 import { exportToExcel } from "../lib/exportExcel";
 
 const PAGE_SIZE = 100;
@@ -159,10 +160,19 @@ export default function RackingNoteTab() {
   const [openRkn, setOpenRkn] = useState(null);
   const [openRn, setOpenRn] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const nav = useStockInNav();
 
   const goCreate = () => { setEditing(null); setView("create"); };
   const goEdit = (rkn) => { setEditing(rkn); setView("edit"); };
   const goList = () => { setEditing(null); setView("list"); setReloadKey((k) => k + 1); };
+
+  useEffect(() => {
+    if (nav?.editRequest?.type === "rkn") {
+      setOpenRkn(null);
+      goEdit(nav.editRequest.doc);
+      nav.clearEditRequest();
+    }
+  }, [nav?.editRequest?.token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleOpenRn = async (rnId) => {
     if (!rnId) return;
