@@ -30,7 +30,13 @@
       "Bash(.venv/bin/python -m pytest tests/ -q)",
       "Bash(npm --version)",
       "Bash(BROWSER=none nohup npm run start)",
-      "Bash(disown)"
+      "Bash(disown)",
+      "Bash(python3 -m py_compile backend/helpers/validation.py backend/helpers/stock_helpers.py backend/routes/transfer.py backend/tests/test_stock_transfer.py)",
+      "Bash(node -e \"require\\('@babel/core'\\)\")",
+      "Bash(npx --no-install eslint frontend/src/pages/StockTransferPage.jsx)",
+      "Bash(timeout 60 node_modules/.bin/eslint src/pages/StockTransferPage.jsx)",
+      "Bash(node_modules/.bin/eslint src/pages/StockTransferPage.jsx)",
+      "Bash(node *)"
     ]
   }
 }

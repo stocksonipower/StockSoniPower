@@ -325,12 +325,23 @@ def _validate_transfer_request_items(items):
 
 
 async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = None):
-    """Block requesting more than current stock total for any (part,make)."""
-    from helpers.stock_helpers import _stock_total_for
+    """Block requesting more than available stock for any (part,make).
+
+    If a row names a source location (godown, optionally + rack/box), the qty is
+    checked against that specific location's balance — not the part/make grand
+    total — since the requester has already committed to a source. Rows that
+    leave the source blank fall back to the grand total (the exact location is
+    decided later, at Transfer Note stage)."""
+    from helpers.stock_helpers import _stock_total_for, _stock_at_location_for
     req = {}
+    loc_req = {}
     for it in items:
-        k = _key(it.part_no, it.make)
-        req[k] = req.get(k, 0) + (it.quantity or 0)
+        if (it.src_godown_id or "").strip():
+            lk = (it.part_no, it.make, it.src_godown_id, it.src_rack_id or "", it.src_box_id or "")
+            loc_req[lk] = loc_req.get(lk, 0) + (it.quantity or 0)
+        else:
+            k = _key(it.part_no, it.make)
+            req[k] = req.get(k, 0) + (it.quantity or 0)
     for k, q in req.items():
         part_no, make = k.split("||", 1)
         avail = await _stock_total_for(part_no, make)
@@ -338,6 +349,13 @@ async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = 
             raise HTTPException(
                 status_code=400,
                 detail=f"{part_no} / {make}: cannot transfer {q} — only {avail} in stock",
+            )
+    for (part_no, make, godown_id, rack_id, box_id), q in loc_req.items():
+        avail = await _stock_at_location_for(part_no, make, godown_id, rack_id, box_id)
+        if q > avail + 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{part_no} / {make}: cannot transfer {q} from the selected location — only {avail} there",
             )
 
 

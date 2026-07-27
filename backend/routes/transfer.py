@@ -128,6 +128,13 @@ async def transfer_lookup_makes(part_no: str, user=Depends(get_current_user)):
     return {"makes": [{"make": p["_id"]["make"], "available_qty": p["q"]} for p in pairs]}
 
 
+@router.get("/transfer-requests/lookup-locations/{part_no}/{make}")
+async def transfer_lookup_locations(part_no: str, make: str, user=Depends(get_current_user)):
+    """Locations currently holding stock for this part/make, so the requester's
+    optional Source dropdown can be capped per-location instead of by the grand total."""
+    return {"locations": await _stock_locations_for(part_no, make)}
+
+
 @router.get("/transfer-requests/next-no")
 async def next_transfer_request_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)

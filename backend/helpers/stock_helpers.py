@@ -29,6 +29,23 @@ async def _stock_total_for(part_no: str, make: str) -> float:
     return rows[0]["q"] if rows else 0
 
 
+async def _stock_at_location_for(part_no: str, make: str, godown_id: str = "", rack_id: str = "", box_id: str = "") -> float:
+    """Available qty for a part/make restricted to whichever of godown/rack/box
+    are given (a requester may know only the godown, or the full godown+rack+box)."""
+    match = {"part_no": part_no, "make": make}
+    if godown_id:
+        match["godown_id"] = godown_id
+    if rack_id:
+        match["rack_id"] = rack_id
+    if box_id:
+        match["box_id"] = box_id
+    rows = await db.transactions.aggregate([
+        {"$match": match},
+        {"$group": {"_id": None, "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}}}},
+    ]).to_list(1)
+    return rows[0]["q"] if rows else 0
+
+
 async def _stock_locations_for(part_no: str, make: str) -> list:
     """Aggregate current balance per location (positive only) for a part/make."""
     pipeline = [

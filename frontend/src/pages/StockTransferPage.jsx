@@ -716,36 +716,69 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
     updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0 });
   };
 
+  // Recompute the row's location-specific available qty (undefined = no source
+  // selected, fall back to the part/make grand total) whenever the source changes.
+  const refreshLocationQty = async (i, patch) => {
+    const row = { ...items[i], ...patch };
+    if (!row.src_godown_id) { updateItem(i, { location_available_qty: undefined }); return; }
+    try {
+      const { data } = await api.get(`/transfer-requests/lookup-locations/${encodeURIComponent(row.part_no)}/${encodeURIComponent(row.make)}`);
+      const locs = data.locations || [];
+      const match = locs.filter((L) =>
+        L.godown_id === row.src_godown_id &&
+        (!row.src_rack_id || L.rack_id === row.src_rack_id) &&
+        (!row.src_box_id || L.box_id === row.src_box_id)
+      );
+      const qty = match.reduce((s, L) => s + (L.current_qty || 0), 0);
+      updateItem(i, { location_available_qty: qty });
+    } catch { updateItem(i, { location_available_qty: 0 }); }
+  };
+
   const onSrcGodownChange = async (i, gid) => {
     if (gid === NO_LOCATION) {
-      updateItem(i, { src_godown_id: "", src_godown_name: "", src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" });
+      const patch = { src_godown_id: "", src_godown_name: "", src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" };
+      updateItem(i, patch);
+      await refreshLocationQty(i, patch);
       return;
     }
     const g = godowns.find((x) => x.id === gid);
-    updateItem(i, {
+    const patch = {
       src_godown_id: gid, src_godown_name: g?.godown_name || "",
       src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "",
-    });
+    };
+    updateItem(i, patch);
     await ensureRacks(gid);
+    await refreshLocationQty(i, patch);
   };
   const onSrcRackChange = async (i, rid) => {
     if (rid === NO_LOCATION) {
-      updateItem(i, { src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" });
+      const patch = { src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" };
+      updateItem(i, patch);
+      await refreshLocationQty(i, patch);
       return;
     }
     const racks = racksByGodown[items[i].src_godown_id] || [];
     const rk = racks.find((x) => x.id === rid);
-    updateItem(i, {
+    const patch = {
       src_rack_id: rid, src_rack_no: rk?.rack_no || "",
       src_box_id: "", src_box_no: "", src_box_category: "",
-    });
+    };
+    updateItem(i, patch);
     await ensureBoxes(rid);
+    await refreshLocationQty(i, patch);
   };
-  const onSrcBoxChange = (i, bid) => {
-    if (bid === NO_LOCATION) { updateItem(i, { src_box_id: "", src_box_no: "", src_box_category: "" }); return; }
+  const onSrcBoxChange = async (i, bid) => {
+    if (bid === NO_LOCATION) {
+      const patch = { src_box_id: "", src_box_no: "", src_box_category: "" };
+      updateItem(i, patch);
+      await refreshLocationQty(i, patch);
+      return;
+    }
     const boxes = boxesByRack[items[i].src_rack_id] || [];
     const bx = boxes.find((x) => x.id === bid);
-    updateItem(i, { src_box_id: bid, src_box_no: bx?.box_no || "", src_box_category: bx?.box_category || "" });
+    const patch = { src_box_id: bid, src_box_no: bx?.box_no || "", src_box_category: bx?.box_category || "" };
+    updateItem(i, patch);
+    await refreshLocationQty(i, patch);
   };
 
   const onDestGodownChange = async (i, gid) => {
@@ -789,7 +822,13 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
       const q = parseInt(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
-      if (q > (it.available_qty || 0) + 1e-6) {
+      if (it.src_godown_id) {
+        const locAvail = it.location_available_qty || 0;
+        if (q > locAvail + 1e-6) {
+          toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${locAvail} at the selected location`);
+          return;
+        }
+      } else if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock`);
         return;
       }
@@ -885,7 +924,8 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const overStock = it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+                const effAvail = it.src_godown_id ? (it.location_available_qty || 0) : it.available_qty;
+                const overStock = effAvail !== undefined && (parseInt(it.quantity) || 0) > (effAvail || 0) + 1e-6;
                 const srcRacks = racksByGodown[it.src_godown_id] || [];
                 const srcBoxes = boxesByRack[it.src_rack_id] || [];
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
@@ -922,7 +962,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                         data-testid={`str-qty-${idx}`} />
                       {it.make && (
                         <div className={`text-[10px] mt-0.5 ${overStock ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`str-avail-hint-${idx}`}>
-                          {overStock ? `Over ${it.quantity}/${it.available_qty}` : `Avail ${it.available_qty}`}
+                          {overStock ? `Over ${it.quantity}/${effAvail}` : `Avail ${effAvail}`}
                         </div>
                       )}
                     </td>

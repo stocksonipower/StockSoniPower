@@ -113,14 +113,19 @@ def test_full_transfer_flow_and_balance(admin_h, seed):
     stn_doc = stn.json()
     assert stn_doc["status"] == "DRAFT"
 
-    # STR should now be PARTIALLY (20 of 20 -> actually FULLY since it's all of it)
+    # STR stays PENDING until the STN is actually recorded — a DRAFT note doesn't
+    # count toward "processed" qty in the status rollup.
     str_after = requests.get(f"{BASE_URL}/api/transfer-requests/{str_doc['id']}", headers=admin_h, timeout=15).json()
-    assert str_after["status"] == "FULLY_TRANSFERRED"
+    assert str_after["status"] == "PENDING"
 
     # Record
     rec = requests.post(f"{BASE_URL}/api/transfer-notes/{stn_doc['id']}/record", headers=admin_h, timeout=15)
     assert rec.status_code == 200, rec.text
     assert rec.json()["transactions_created"] == 2  # 1 OUT + 1 IN
+
+    # STR should now be COMPLETE (20 of 20 requested qty transferred)
+    str_final = requests.get(f"{BASE_URL}/api/transfer-requests/{str_doc['id']}", headers=admin_h, timeout=15).json()
+    assert str_final["status"] == "COMPLETE"
 
     # Verify stock-balance now shows G2/R2 with 20 (and G1/R1 with 30 remaining)
     bal = requests.get(f"{BASE_URL}/api/stock-balance", params={"search": seed["part_no"]}, headers=admin_h, timeout=15).json()
