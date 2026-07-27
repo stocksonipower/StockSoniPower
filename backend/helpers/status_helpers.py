@@ -79,17 +79,18 @@ def _compute_ern_status(ern: dict) -> str:
 
 
 async def _recompute_rn_status(rn_id: str):
-    """Recompute racking-progress status. DRAFT receipts stay at DRAFT.
+    """Recompute racking-progress status. DRAFT (pre-finalize) receipts stay at DRAFT
+    — that's an internal pre-finalize marker only (gates the /finalize endpoint and
+    child-sync behavior), and always displays as "Pending" in the UI.
 
-    Status precedence (highest to lowest), active 4-status set only:
-      DRAFT                : manual; never auto-promoted
-      RACKING_NOTE_DRAFT   : finalized RN with at most DRAFT racking notes (or none yet —
-                             SRN/ERN tree may still emit auto-RKNs later)
-      FULLY_RACKED         : all rackable qty (RN.received + SRN.fulfilled + ERN.accepted
-                             across descendants) is covered by RECORDED racking notes
-                             AND every descendant SRN/ERN is COMPLETE
-      PARTIALLY_RACKED     : some RECORDED racking exists but not yet fully covered
-                             OR a descendant SRN/ERN is still non-COMPLETE
+    Status precedence (highest to lowest), active 3-status set for finalized RNs:
+      PENDING     : finalized RN with at most DRAFT racking notes (or none yet —
+                    SRN/ERN tree may still emit auto-RKNs later). Nothing racked.
+      COMPLETE    : all rackable qty (RN.received + SRN.fulfilled + ERN.accepted
+                    across descendants) is covered by RECORDED racking notes
+                    AND every descendant SRN/ERN is COMPLETE
+      IN_PROCESS  : some RECORDED racking exists but not yet fully covered
+                    OR a descendant SRN/ERN is still non-COMPLETE
     """
     rn = await db.receipt_notes.find_one({"id": rn_id}, {"_id": 0})
     if not rn:
@@ -130,18 +131,18 @@ async def _recompute_rn_status(rn_id: str):
     source_pairs = [("RN", rn_id)] + [("SRN", sid) for sid in srn_ids] + [("ERN", eid) for eid in ern_ids]
     or_clauses = [{"source_type": st, "source_id": sid} for (st, sid) in source_pairs]
 
-    # First check: any RECORDED RKN exists? If yes -> PARTIALLY_RACKED / FULLY_RACKED.
-    # Once any qty is recorded, status NEVER goes back to RACKING_NOTE_DRAFT
+    # First check: any RECORDED RKN exists? If yes -> IN_PROCESS / COMPLETE.
+    # Once any qty is recorded, status NEVER goes back to PENDING
     # (even if a later draft RKN is added on top).
     has_recorded_rkn = await db.racking_notes.find_one(
         {"status": "RECORDED", "$or": or_clauses}, {"_id": 0, "id": 1}
     )
 
     if not has_recorded_rkn:
-        # No recorded RKNs yet — RN sits in RACKING_NOTE_DRAFT (covers both
+        # No recorded RKNs yet — RN sits in PENDING (covers both
         # "draft RKN exists" and "no RKN at all" cases — the SRN/ERN tree may
         # still produce RKNs later via the auto-creation workflow).
-        new_status = "RACKING_NOTE_DRAFT"
+        new_status = "PENDING"
         update: dict = {"status": new_status}
         if rn.get("racked_at"):
             await db.receipt_notes.update_one({"id": rn_id}, {"$unset": {"racked_at": ""}})
@@ -192,7 +193,7 @@ async def _recompute_rn_status(rn_id: str):
             k = _key(it.get("part_no"), it.get("make"))
             racked[k] = racked.get(k, 0) + (it.get("quantity") or 0)
 
-    # New spec rule: RN cannot be FULLY_RACKED while ANY descendant SRN/ERN is
+    # New spec rule: RN cannot be COMPLETE while ANY descendant SRN/ERN is
     # still in a non-terminal state (PENDING / PARTIALLY_*). Even if all current
     # rackable qty is racked, the user may still fulfill the shortfall later.
     has_open_descendant = False
@@ -212,19 +213,19 @@ async def _recompute_rn_status(rn_id: str):
                 break
 
     # We already confirmed at least one RECORDED RKN exists, so status is
-    # PARTIALLY_RACKED unless every rackable qty is fully covered AND no SRN/ERN
+    # IN_PROCESS unless every rackable qty is fully covered AND no SRN/ERN
     # descendant is still pending.
     if not rackable or sum(rackable.values()) == 0:
-        new_status = "PARTIALLY_RACKED"
+        new_status = "IN_PROCESS"
     else:
         all_full = all(racked.get(k, 0) + 1e-6 >= q for k, q in rackable.items() if q > 0)
         if all_full and not has_open_descendant:
-            new_status = "FULLY_RACKED"
+            new_status = "COMPLETE"
         else:
-            new_status = "PARTIALLY_RACKED"
+            new_status = "IN_PROCESS"
 
     update = {"status": new_status}
-    if new_status == "FULLY_RACKED":
+    if new_status == "COMPLETE":
         update["racked_at"] = rn.get("racked_at") or now_iso()
     else:
         if rn.get("racked_at"):
@@ -252,6 +253,12 @@ async def _recompute_ern_racking_status(ern_id: str):
 
 
 async def _recompute_in_status(in_id: str):
+    """Active 3-status set: PENDING (nothing picked/rejected yet) -> IN_PROCESS
+    (some picked+rejected, some still pending) -> COMPLETE (picked+rejected covers
+    every requested line — the request is fully resolved, whether by pick or reject).
+    Only COMPLETED Picking Notes count toward "processed"; DRAFT allocations (nothing
+    recorded yet) do not move the status off PENDING, so editing stays unlocked until
+    the first quantity is actually processed."""
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         return
@@ -259,33 +266,24 @@ async def _recompute_in_status(in_id: str):
     for it in inn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    recorded = {}
-    has_pending = False
-    has_draft = False
+    processed = {}
     async for pn in db.picking_notes.find({"issue_note_id": in_id}, {"_id": 0, "items": 1, "status": 1}):
         status = (pn.get("status") or "").upper()
-        if status == "PENDING":
-            has_pending = True
-        elif status == "DRAFT":
-            has_draft = True
-        elif status in ("RECORDED", "COMPLETED"):
+        if status in ("RECORDED", "COMPLETED"):
             for it in pn.get("items", []):
                 k = _key(it.get("part_no"), it.get("make"))
-                recorded[k] = recorded.get(k, 0) + (it.get("quantity") or 0)
+                processed[k] = processed.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
+    has_processed = any(v > 1e-6 for v in processed.values())
     if not requested:
-        new_status = "OPEN"
-    elif recorded and all(recorded.get(k, 0) + 1e-6 >= q for k, q in requested.items()):
-        new_status = "FULLY_PICKED"
-    elif recorded:
-        new_status = "PARTIALLY_PICKED"
-    elif has_draft:
-        new_status = "PICKING_IN_PROGRESS"
-    elif has_pending:
-        new_status = "PICKING_PENDING"
+        new_status = "PENDING"
+    elif has_processed and all(processed.get(k, 0) + 1e-6 >= q for k, q in requested.items() if q > 0):
+        new_status = "COMPLETE"
+    elif has_processed:
+        new_status = "IN_PROCESS"
     else:
-        new_status = "OPEN"
+        new_status = "PENDING"
     update = {"status": new_status}
-    if new_status == "FULLY_PICKED":
+    if new_status == "COMPLETE":
         update["picked_at"] = inn.get("picked_at") or now_iso()
     else:
         if inn.get("picked_at"):
@@ -294,6 +292,11 @@ async def _recompute_in_status(in_id: str):
 
 
 async def _recompute_str_status(str_id: str):
+    """Active 3-status set: PENDING (nothing transferred/rejected yet) -> IN_PROCESS
+    (some transferred+rejected, some still pending) -> COMPLETE (transferred+rejected
+    covers every requested line). Only COMPLETED Transfer Notes count toward
+    "processed"; DRAFT allocations do not move the status off PENDING, so editing
+    stays unlocked until the first quantity is actually transferred."""
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
         return
@@ -301,18 +304,18 @@ async def _recompute_str_status(str_id: str):
     for it in s.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    transferred = await _transfer_other_qty(str_id, completed_only=True)
-    active_note = await db.transfer_notes.find_one({"transfer_request_id": str_id, "status": {"$in": ["PENDING", "DRAFT", "PROCESSING"]}}, {"_id": 0, "id": 1})
+    processed = await _transfer_other_qty(str_id, completed_only=True)
+    has_processed = any(v > 1e-6 for v in processed.values())
     if not requested:
-        new_status = "NEW"
-    elif transferred and all(transferred.get(k, 0) + 1e-6 >= q for k, q in requested.items()):
-        new_status = "COMPLETED"
-    elif transferred or active_note:
-        new_status = "IN_PROGRESS"
+        new_status = "PENDING"
+    elif has_processed and all(processed.get(k, 0) + 1e-6 >= q for k, q in requested.items() if q > 0):
+        new_status = "COMPLETE"
+    elif has_processed:
+        new_status = "IN_PROCESS"
     else:
         new_status = "PENDING"
     update = {"status": new_status}
-    if new_status == "COMPLETED":
+    if new_status == "COMPLETE":
         update["transferred_at"] = s.get("transferred_at") or now_iso()
     else:
         if s.get("transferred_at"):
@@ -386,7 +389,8 @@ async def _aggregate_other_rkn_qty_by_source(source_type: str, source_id: str, e
 
 
 async def _pick_aggregate_other(in_id: str, exclude_pn_id: Optional[str] = None) -> dict:
-    """Sum picking-note qty per (part,make,box_id) across other PNs for an Issue Note (DRAFT + RECORDED)."""
+    """Sum picking-note (picked + rejected) qty per (part,make) across other PNs for
+    an Issue Note (DRAFT + RECORDED) — both consume the requested allocation."""
     q = {"issue_note_id": in_id}
     if exclude_pn_id:
         q["id"] = {"$ne": exclude_pn_id}
@@ -394,7 +398,7 @@ async def _pick_aggregate_other(in_id: str, exclude_pn_id: Optional[str] = None)
     async for pn in db.picking_notes.find(q, {"_id": 0, "items": 1}):
         for it in pn.get("items", []):
             k = _key(it.get("part_no"), it.get("make"))
-            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0)
+            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
     return sums
 
 
@@ -418,7 +422,8 @@ async def _pick_aggregate_other_by_loc(in_id: str, exclude_pn_id: Optional[str] 
 
 
 async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None, completed_only: bool = False) -> dict:
-    """Sum qty per (part,make) across other STNs (DRAFT + RECORDED) for a given STR."""
+    """Sum (transferred + rejected) qty per (part,make) across other STNs (DRAFT +
+    RECORDED, or COMPLETED-only) for a given STR — both consume the requested allocation."""
     q = {"transfer_request_id": str_id}
     if exclude_stn_id:
         q["id"] = {"$ne": exclude_stn_id}
@@ -428,7 +433,7 @@ async def _transfer_other_qty(str_id: str, exclude_stn_id: Optional[str] = None,
     async for stn in db.transfer_notes.find(q, {"_id": 0, "items": 1}):
         for it in stn.get("items", []):
             k = _key(it.get("part_no"), it.get("make"))
-            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0)
+            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
     return sums
 
 

@@ -36,7 +36,7 @@ from deps import (
 from models import *  # noqa: F401,F403
 
 # Helpers needed by startup migration
-from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status
+from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_in_status, _recompute_str_status
 from services.unit_of_work import ensure_collections, probe_transaction_support
 
 
@@ -171,12 +171,16 @@ async def startup():
     # of permanently blocking that part/location combination.
     await db.stock_out_locks.create_index("created_at", expireAfterSeconds=300)
    # ---- Receipt-note status migration ----
-    # Default missing status to RACKING_NOTE_DRAFT (the new equivalent of legacy FINAL/RACKING_PENDING).
-    await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "RACKING_NOTE_DRAFT"}})
-    # Legacy values -> new names
-    await db.receipt_notes.update_many({"status": "RACKED"}, {"$set": {"status": "FULLY_RACKED"}})
-    await db.receipt_notes.update_many({"status": "RACKING_PENDING"}, {"$set": {"status": "RACKING_NOTE_DRAFT"}})
-    await db.receipt_notes.update_many({"status": "FINAL"}, {"$set": {"status": "RACKING_NOTE_DRAFT"}})
+    # Default missing status to PENDING (the new equivalent of legacy FINAL/RACKING_PENDING).
+    await db.receipt_notes.update_many({"status": {"$exists": False}}, {"$set": {"status": "PENDING"}})
+    # Legacy values -> new names (oldest generation first, then the 4-status generation
+    # this replaces: RACKING_NOTE_DRAFT/PARTIALLY_RACKED/FULLY_RACKED -> PENDING/IN_PROCESS/COMPLETE).
+    await db.receipt_notes.update_many({"status": "RACKED"}, {"$set": {"status": "COMPLETE"}})
+    await db.receipt_notes.update_many({"status": "RACKING_PENDING"}, {"$set": {"status": "PENDING"}})
+    await db.receipt_notes.update_many({"status": "FINAL"}, {"$set": {"status": "PENDING"}})
+    await db.receipt_notes.update_many({"status": "RACKING_NOTE_DRAFT"}, {"$set": {"status": "PENDING"}})
+    await db.receipt_notes.update_many({"status": "PARTIALLY_RACKED"}, {"$set": {"status": "IN_PROCESS"}})
+    await db.receipt_notes.update_many({"status": "FULLY_RACKED"}, {"$set": {"status": "COMPLETE"}})
 
     # ---- Receipt-note item-shape migration (Phase 1) ----
     # Older items had a single `quantity`. New items split it into invoice_qty + received_qty.
@@ -209,6 +213,23 @@ async def startup():
     async for rn in db.receipt_notes.find({}, {"_id": 0, "id": 1}):
         try:
             await _recompute_rn_status(rn["id"])
+        except Exception:
+            pass
+
+    # ---- Issue Note / Transfer Request status migration (Pending/In Process/Complete) ----
+    # Legacy values: issue_notes had OPEN/PICKING_PENDING/PICKING_IN_PROGRESS/
+    # PARTIALLY_PICKED/FULLY_PICKED; transfer_requests had NEW/PENDING/IN_PROGRESS/
+    # COMPLETED/CLOSED/CANCELLED. Recomputing (rather than a literal string remap)
+    # re-derives the correct 3-value status from actual picked/rejected or
+    # transferred/rejected quantities, which also self-heals any pre-existing drift.
+    async for inn in db.issue_notes.find({}, {"_id": 0, "id": 1}):
+        try:
+            await _recompute_in_status(inn["id"])
+        except Exception:
+            pass
+    async for s in db.transfer_requests.find({}, {"_id": 0, "id": 1}):
+        try:
+            await _recompute_str_status(s["id"])
         except Exception:
             pass
 

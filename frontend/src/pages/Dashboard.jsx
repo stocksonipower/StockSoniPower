@@ -64,9 +64,9 @@ export default function Dashboard() {
         .then((r) => setStats(r.data))
         .catch((e) => { console.error("[dashboard] /dashboard/stats failed:", e); }),
 
-      // Receipt notes pending = anything not FULLY_RACKED
+      // Receipt notes pending = anything not Complete
       api.get("/receipt-notes", {
-        params: { not_status: "FULLY_RACKED", page_size: 1 }
+        params: { not_status: "COMPLETE", page_size: 1 }
       }).then((r) => {
         const total = r.headers["x-total-count"];
         setStockIn((prev) => ({ ...prev, receiptPending: total ? parseInt(total, 10) : 0 }));
@@ -80,9 +80,9 @@ export default function Dashboard() {
         setStockIn((prev) => ({ ...prev, rackingDraft: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /racking-notes failed:", e); }),
 
-      // Issue notes pending = anything not completed
+      // Issue notes pending = anything not Complete
       api.get("/issue-notes", {
-        params: { not_status: "FULLY_PICKED,COMPLETED", page_size: 1 }
+        params: { not_status: "COMPLETE", page_size: 1 }
       }).then((r) => {
         const total = r.headers["x-total-count"];
         setStockOut((prev) => ({ ...prev, issuePending: total ? parseInt(total, 10) : 0 }));
@@ -96,9 +96,9 @@ export default function Dashboard() {
         setStockOut((prev) => ({ ...prev, pickingDraft: total ? parseInt(total, 10) : 0 }));
       }).catch((e) => { console.error("[dashboard] /picking-notes failed:", e); }),
 
-      // Transfer requests pending = anything not FULLY_TRANSFERRED
+      // Transfer requests pending = anything not Complete
       api.get("/transfer-requests", {
-        params: { not_status: "FULLY_TRANSFERRED", page_size: 1 }
+        params: { not_status: "COMPLETE", page_size: 1 }
       }).then((r) => {
         const total = r.headers["x-total-count"];
         setStockTransfer((prev) => ({ ...prev, requestPending: total ? parseInt(total, 10) : 0 }));

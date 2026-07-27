@@ -21,16 +21,17 @@ const fmtDate = (s) => {
 const num = (v) => (v == null || v === "" ? "—" : (typeof v === "number" ? v : Number(v)));
 
 const STATUS_CLS = {
-  // Active 12-status set only
   DRAFT: "bg-slate-100 text-slate-700",
-  RACKING_NOTE_DRAFT: "bg-orange-50 text-orange-800 border border-orange-200",
+  PENDING: "bg-amber-50 text-amber-800",
+  IN_PROCESS: "bg-blue-50 text-blue-800",
+  COMPLETE: "bg-green-100 text-green-800",
+  RECORDED: "bg-green-100 text-green-800",
+  // Legacy RN values, kept defensively for any stale cached row predating migration.
+  RACKING_NOTE_DRAFT: "bg-amber-50 text-amber-800",
   PARTIALLY_RACKED: "bg-blue-50 text-blue-800",
   FULLY_RACKED: "bg-green-100 text-green-800",
-  RECORDED: "bg-green-100 text-green-800",
-  PENDING: "bg-amber-50 text-amber-800",
   PARTIALLY_RECEIVED: "bg-blue-50 text-blue-800",
   PARTIALLY_ACCEPTED: "bg-blue-50 text-blue-800",
-  COMPLETE: "bg-green-100 text-green-800",
 };
 function StatusPill({ s }) {
   if (!s) return null;

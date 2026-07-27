@@ -7,13 +7,13 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent,
 } from "../components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
-  Pencil, CheckCircle, ArrowsLeftRight, Package, MapPin,
+  Pencil, CheckCircle, ArrowsLeftRight, Package, MapPin, Printer,
   DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
@@ -22,8 +22,10 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
+import { buildStandardPrintHtml, openPrintWindow, htmlEscape } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
+const REJECTION_REASONS = ["Rack Empty", "Not Available", "Damaged", "Expired", "Wrong Specification", "Other"];
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -52,17 +54,152 @@ function transferMovedQty(stn) {
   return parseInt(stn.transferred_qty_total) || qtySum(stn.items || []);
 }
 
+function transferRejectedQty(stn) {
+  if (stn.rejected_qty_total !== undefined) return parseInt(stn.rejected_qty_total) || 0;
+  return (stn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
+}
+
 function transferNoteDone(stn) {
   return stn.status === "COMPLETED" || stn.status === "RECORDED";
 }
 
-function transferStatusLabel(status) {
-  if (status === "COMPLETED" || status === "FULLY_TRANSFERRED") return "Completed";
-  if (status === "IN_PROGRESS" || status === "PARTIALLY_TRANSFERRED") return "In Progress";
-  if (status === "DRAFT") return "Draft";
-  if (status === "PROCESSING") return "Processing";
-  if (status === "CANCELLED") return "Cancelled";
+// Transfer Request uses the standard 3-status set (Pending / In Process / Complete);
+// legacy values are recognized defensively in case a cached row predates migration.
+function transferRequestStatusLabel(status) {
+  if (status === "COMPLETE" || status === "COMPLETED" || status === "FULLY_TRANSFERRED") return "Complete";
+  if (status === "IN_PROCESS" || status === "IN_PROGRESS" || status === "PARTIALLY_TRANSFERRED") return "In Process";
   return "Pending";
+}
+
+function transferRequestStatusClass(status) {
+  const label = transferRequestStatusLabel(status);
+  if (label === "Complete") return "bg-green-100 text-green-800";
+  if (label === "In Process") return "bg-blue-50 text-blue-800";
+  return "bg-amber-50 text-amber-700";
+}
+
+// Locked (edit/delete) the moment transfer has actually started — mirrors the backend
+// rule exactly, since status only leaves Pending once a Transfer Note is COMPLETED.
+function transferRequestHasProcessed(status) {
+  return transferRequestStatusLabel(status) !== "Pending";
+}
+
+// Transfer Note is a secondary/operational document (like Picking Note) and keeps its
+// own working states rather than the 3-status set — PROCESSING is a transient lock
+// state, folded into "Draft" for display, mirroring how Picking Note treats RECORDING.
+function transferNoteStatusLabel(status) {
+  if (status === "COMPLETED" || status === "RECORDED") return "Completed";
+  if (status === "PENDING") return "Pending";
+  return "Draft";
+}
+
+function transferKey(it) {
+  return `${it.part_no || ""}||${it.make || ""}`;
+}
+
+// Transfer Request print columns: Sr, Part Number, Item, Make, Source Godown,
+// Destination Godown, Requested Qty, Transferred Qty, Rejected Qty, Status
+function printTransferRequest(s, noteHistory = []) {
+  const processedByKey = {};
+  noteHistory.forEach((stn) => {
+    if (!transferNoteDone(stn)) return;
+    (stn.items || []).forEach((it) => {
+      const k = transferKey(it);
+      const cur = processedByKey[k] || { transferred: 0, rejected: 0, srcNames: new Set() };
+      cur.transferred += parseFloat(it.quantity) || 0;
+      cur.rejected += parseFloat(it.rejected_qty) || 0;
+      if (it.src_godown_name) cur.srcNames.add(it.src_godown_name);
+      processedByKey[k] = cur;
+    });
+  });
+  const rows = (s.items || []).map((it, idx) => {
+    const p = processedByKey[transferKey(it)] || { transferred: 0, rejected: 0, srcNames: new Set() };
+    const requested = parseFloat(it.quantity) || 0;
+    const resolved = p.transferred + p.rejected;
+    const rowStatus = resolved <= 0 ? "Pending" : (resolved + 1e-6 >= requested ? "Complete" : "In Process");
+    return [
+      String(idx + 1),
+      htmlEscape(it.part_no),
+      htmlEscape(it.description_1 || ""),
+      htmlEscape(it.make || "—"),
+      htmlEscape([...p.srcNames].join(", ") || "—"),
+      htmlEscape(it.dest_godown_name || "—"),
+      `<span style="text-align:right;display:block">${htmlEscape(requested || "—")}</span>`,
+      `<span style="text-align:right;display:block">${htmlEscape(p.transferred || "—")}</span>`,
+      `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>`,
+      htmlEscape(rowStatus),
+    ];
+  });
+  const html = buildStandardPrintHtml({
+    docTitle: "Transfer Request",
+    docNo: s.str_no,
+    statusLabel: transferRequestStatusLabel(s.status),
+    fieldsLeft: [
+      ["Transfer Request No", s.str_no],
+      ["Request Date", fmtDate(s.str_date)],
+      ["Purpose", s.purpose || "—"],
+      ["Status", transferRequestStatusLabel(s.status)],
+    ],
+    fieldsRight: [
+      ["Assigned To", s.assigned_to_name || s.assigned_to_email || "—"],
+      ["Created By", s.created_by || "—"],
+      ["Created At", s.created_at ? new Date(s.created_at).toLocaleString() : "—"],
+    ],
+    columns: [
+      { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Make" },
+      { label: "Source Godown" }, { label: "Destination Godown" },
+      { label: "Requested Qty", align: "right" }, { label: "Transferred Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Status" },
+    ],
+    rows,
+    printedBy: s.created_by,
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
+}
+
+// Transfer Note print columns: Sr, Part Number, Item, Rack, Source, Destination,
+// Transferred Qty, Rejected Qty, Receiver, Remarks
+function printTransferNote(stn) {
+  const displayItems = (stn.items || []).length ? stn.items : (stn.assigned_items || []);
+  const rows = displayItems.map((it, idx) => [
+    String(idx + 1),
+    htmlEscape(it.part_no),
+    htmlEscape(it.description_1 || ""),
+    htmlEscape(it.src_rack_no || "—"),
+    htmlEscape([it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "—"),
+    htmlEscape([it.dest_godown_name, it.dest_rack_no, it.dest_box_no].filter(Boolean).join(" / ") || "—"),
+    `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
+    `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(it.rejected_qty || "—")}</span>`,
+    htmlEscape(stn.created_by || "—"),
+    htmlEscape(it.rejection_reason || "—"),
+  ]);
+  const html = buildStandardPrintHtml({
+    docTitle: "Transfer Note",
+    docNo: stn.stn_no,
+    statusLabel: transferNoteStatusLabel(stn.status),
+    fieldsLeft: [
+      ["Transfer Note No", stn.stn_no],
+      ["Transfer Note Date", fmtDate(stn.stn_date)],
+      ["Transfer Request No", stn.transfer_request_no || "—"],
+      ["Execution Attempt", stn.execution_attempt || 1],
+      ["Status", transferNoteStatusLabel(stn.status)],
+    ],
+    fieldsRight: [
+      ["Assigned To", stn.parent_assigned_to_name || stn.parent_assigned_to_email || "—"],
+      ["Receiver / Created By", stn.created_by || "—"],
+      ["Transferred Qty", transferMovedQty(stn)],
+      ["Rejected Qty", transferRejectedQty(stn)],
+    ],
+    columns: [
+      { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Rack" },
+      { label: "Source" }, { label: "Destination" },
+      { label: "Transferred Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Receiver" }, { label: "Remarks" },
+    ],
+    rows,
+    printedBy: stn.created_by,
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
 /* ==============================================================
@@ -139,7 +276,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
   };
 
-  const statusLabel = (r) => transferStatusLabel(r.status);
+  const statusLabel = (r) => transferRequestStatusLabel(r.status);
 
   const columns = useMemo(() => [
     { key: "str_date", label: "TRANSFER REQUEST DATE", value: (r) => fmtDate(r.str_date) },
@@ -148,6 +285,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
     { key: "qty_total", label: "REQUESTED", value: (r) => parseInt(r.requested_qty_total) || qtySum(r.items)},
     { key: "progress", label: "TRANSFERRED", value: (r) => `${parseInt(r.transferred_qty_total) || 0} / ${parseInt(r.requested_qty_total) || qtySum(r.items)}`},
+    { key: "rejected_qty", label: "REJECTED", value: (r) => parseInt(r.rejected_qty_total) || 0},
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -207,17 +345,17 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
             {filteredRows.map((r, idx) => {
               const totalQty = parseInt(r.requested_qty_total) || qtySum(r.items);
               const movedQty = parseInt(r.transferred_qty_total) || 0;
-              const isFully = r.status === "COMPLETED" || r.status === "FULLY_TRANSFERRED";
-              const isPartial = r.status === "IN_PROGRESS" || r.status === "PARTIALLY_TRANSFERRED";
-              const hasNotes = true;
+              // Editable only until the first quantity is transferred/rejected — matches
+              // the backend rule (a transfer note with processed qty flips status off Pending).
+              const hasNotes = transferRequestHasProcessed(r.status);
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lock = hasNotes || lockedToOther;
-              const editTitle = hasNotes ? "Cannot edit — transfer notes exist"
+              const editTitle = hasNotes ? "Cannot edit — transfer has already started"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
-              const deleteTitle = hasNotes ? "Cannot delete — transfer notes exist"
+              const deleteTitle = hasNotes ? "Cannot delete — transfer has already started"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
               const label = statusLabel(r);
-              const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
+              const cls = transferRequestStatusClass(r.status);
               return (
                 <tr key={r.id} data-testid={`str-row-${r.str_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -231,6 +369,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{movedQty} / {totalQty}</td>
+                  <td className="text-left font-mono font-bold text-red-700">{parseInt(r.rejected_qty_total) || "—"}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-status-${r.str_no}`}>{label}</span>
                   </td>
@@ -252,7 +391,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -296,51 +435,66 @@ function TransferRequestDetailDialog({ s, onClose }) {
 
   return (
     <Dialog open={!!s} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-4xl rounded-sm" data-testid="str-detail-dialog">
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="str-detail-dialog">
         {s && (
           <>
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-black font-mono">{s.str_no}</DialogTitle>
-            </DialogHeader>
-            <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Request Date" v={fmtDate(s.str_date)} />
-              <Detail k="Status" v={s.status} />
-              <Detail k="Purpose" v={s.purpose || "—"} />
-              <Detail k="Created By" v={s.created_by || "—"} />
-              <div className="col-span-2">
-                <div className="label-sm">Assigned To</div>
-                <div className="mt-1"><AssigneeBadge name={s.assigned_to_name} email={s.assigned_to_email} /></div>
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              TRANSFER REQUEST
+            </div>
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              <div className="space-y-2">
+                <Detail k="TRANSFER REQUEST DATE" v={fmtDate(s.str_date)} />
+                <Detail k="TRANSFER REQUEST NO" v={s.str_no} />
+                <Detail k="PURPOSE" v={s.purpose || "—"} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${transferRequestStatusClass(s.status)}`}>
+                    {transferRequestStatusLabel(s.status)}
+                  </span>
+                } />
+              </div>
+              <div className="space-y-2">
+                <Detail k="CREATED BY" v={s.created_by || "—"} />
+                <Detail k="CREATED AT" v={s.created_at ? new Date(s.created_at).toLocaleString() : "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO</div>
+                  <div className="mt-1"><AssigneeBadge name={s.assigned_to_name} email={s.assigned_to_email} /></div>
+                </div>
               </div>
             </div>
-            <table className="data-table w-full text-xs">
-              <thead>
-                <tr>
-                  <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
-                  <th className="text-center">QTY</th><th>PREFERRED DEST</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(s.items || []).map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                    <td className="text-center font-mono font-bold">{it.quantity}</td>
-                    <td className="font-mono text-slate-600">
-                      {it.dest_godown_name || it.dest_rack_no || it.dest_box_no
-                        ? `${it.dest_godown_name || "?"}/${it.dest_rack_no || "?"}${it.dest_box_no ? "/" + it.dest_box_no : ""}`
-                        : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="mt-6">
-              <div className="text-xs font-black uppercase tracking-wider text-slate-600 mb-2">Transfer Note History</div>
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({(s.items || []).length})</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full text-xs">
+                  <thead>
+                    <tr>
+                      <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+                      <th className="text-center">QTY</th><th>PREFERRED DEST</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(s.items || []).map((it, idx) => (
+                      <tr key={idx}>
+                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                        <td>{it.make}</td>
+                        <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
+                        <td className="text-center font-mono font-bold">{it.quantity}</td>
+                        <td className="font-mono text-slate-600">
+                          {it.dest_godown_name || it.dest_rack_no || it.dest_box_no
+                            ? `${it.dest_godown_name || "?"}/${it.dest_rack_no || "?"}${it.dest_box_no ? "/" + it.dest_box_no : ""}`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="mt-6 border-t border-slate-200 pt-4">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Transfer Note History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-center">ASSIGNED</th><th className="text-center">TRANSFERRED</th><th>STATUS</th></tr>
+                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-center">ASSIGNED</th><th className="text-center">TRANSFERRED</th><th className="text-center">REJECTED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.execution_attempt || 1) - (b.execution_attempt || 1)).map((stn) => {
@@ -353,17 +507,23 @@ function TransferRequestDetailDialog({ s, onClose }) {
                         <td className="font-mono">{parent?.stn_no || "—"}</td>
                         <td className="text-center font-mono font-bold">{transferAssignedQty(stn)}</td>
                         <td className="text-center font-mono font-bold">{transferMovedQty(stn)}</td>
+                        <td className="text-center font-mono font-bold text-red-700">{transferRejectedQty(stn) || "—"}</td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${done ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
-                            {transferStatusLabel(stn.status)}
+                            {transferNoteStatusLabel(stn.status)}
                           </span>
                         </td>
                       </tr>
                     );
                   })}
-                  {history.length === 0 && <tr><td colSpan={6} className="text-center py-6 text-slate-500">No transfer notes yet.</td></tr>}
+                  {history.length === 0 && <tr><td colSpan={7} className="text-center py-6 text-slate-500">No transfer notes yet.</td></tr>}
                 </tbody>
               </table>
+            </div>
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-6">
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={() => printTransferRequest(s, history)} data-testid="str-detail-print">
+                <Printer size={14} weight="bold" className="mr-1.5" /> Print
+              </Button>
             </div>
           </>
         )}
@@ -749,7 +909,8 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     { key: "items_count", label: "ITEMS", value: (r) => (r.assigned_items || r.items || []).length},
     { key: "assigned_qty", label: "ASSIGNED", value: transferAssignedQty},
     { key: "moved_qty", label: "TRANSFERRED", value: transferMovedQty},
-    { key: "status", label: "STATUS", value: (r) => transferStatusLabel(r.status) },
+    { key: "rejected_qty", label: "REJECTED", value: transferRejectedQty},
+    { key: "status", label: "STATUS", value: (r) => transferNoteStatusLabel(r.status) },
   ], []);
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
@@ -808,6 +969,7 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             {filteredRows.map((r, idx) => {
               const assignedQty = transferAssignedQty(r);
               const movedQty = transferMovedQty(r);
+              const rejectedQty = transferRejectedQty(r);
               const recorded = transferNoteDone(r);
               const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
@@ -831,9 +993,10 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td className="text-left font-mono text-slate-600">{(r.assigned_items || r.items || []).length}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{assignedQty}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{movedQty}</td>
+                  <td className="text-left font-mono font-bold text-red-700">{rejectedQty || "—"}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`stn-status-${r.stn_no}`}>
-                      {transferStatusLabel(r.status)}
+                      {transferNoteStatusLabel(r.status)}
                     </span>
                   </td>
                   <td className="text-left whitespace-nowrap">
@@ -859,7 +1022,7 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending transfer notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending transfer notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -891,50 +1054,74 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
 function TransferNoteDetailDialog({ stn, onClose }) {
   return (
     <Dialog open={!!stn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-7xl rounded-sm" data-testid="stn-detail-dialog">
+      <DialogContent className="max-w-7xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="stn-detail-dialog">
         {stn && (
           <>
-            <DialogHeader><DialogTitle className="text-2xl font-black font-mono">{stn.stn_no}</DialogTitle></DialogHeader>
-            <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="STN Date" v={fmtDate(stn.stn_date)} />
-              <Detail k="Execution Attempt" v={stn.execution_attempt || 1} />
-              <Detail k="Request No" v={stn.transfer_request_no || "—"} />
-              <Detail k="Status" v={stn.status} />
-              <Detail k="Assigned" v={transferAssignedQty(stn)} />
-              <Detail k="Transferred" v={transferMovedQty(stn)} />
-              <Detail k="Remaining" v={Math.max(0, transferAssignedQty(stn) - transferMovedQty(stn))} />
-              <Detail k="Created By" v={stn.created_by || "—"} />
-              <Detail k="Created At" v={new Date(stn.created_at).toLocaleString()} />
-              <div>
-                <div className="label-sm">Assigned To (from Request)</div>
-                <div className="mt-1"><AssigneeBadge name={stn.parent_assigned_to_name} email={stn.parent_assigned_to_email} /></div>
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              TRANSFER NOTE
+            </div>
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              <div className="space-y-2">
+                <Detail k="TRANSFER NOTE DATE" v={fmtDate(stn.stn_date)} />
+                <Detail k="TRANSFER NOTE NO" v={stn.stn_no} />
+                <Detail k="EXECUTION ATTEMPT" v={stn.execution_attempt || 1} />
+                <Detail k="TRANSFER REQUEST NO" v={stn.transfer_request_no || "—"} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${transferNoteDone(stn) ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
+                    {transferNoteStatusLabel(stn.status)}
+                  </span>
+                } />
+              </div>
+              <div className="space-y-2">
+                <Detail k="ASSIGNED" v={transferAssignedQty(stn)} />
+                <Detail k="TRANSFERRED" v={transferMovedQty(stn)} />
+                <Detail k="REJECTED" v={transferRejectedQty(stn)} />
+                <Detail k="REMAINING" v={Math.max(0, transferAssignedQty(stn) - transferMovedQty(stn) - transferRejectedQty(stn))} />
+                <Detail k="CREATED BY" v={stn.created_by || "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO (FROM REQUEST)</div>
+                  <div className="mt-1"><AssigneeBadge name={stn.parent_assigned_to_name} email={stn.parent_assigned_to_email} /></div>
+                </div>
               </div>
             </div>
-            <table className="data-table w-full text-xs">
-              <thead>
-                <tr>
-                  <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-center">QTY</th>
-                  <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
-                  <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th>
-                </tr>
-              </thead>
-              <tbody>
-                {((stn.items || []).length ? stn.items : (stn.assigned_items || [])).map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="text-center font-mono font-bold">{it.quantity}</td>
-                    <td className="font-mono">{it.src_godown_name || "—"}</td>
-                    <td className="font-mono">{it.src_rack_no || "—"}</td>
-                    <td className="font-mono">{it.src_box_no || "—"}</td>
-                    <td className="font-mono">{it.dest_godown_name || "—"}</td>
-                    <td className="font-mono">{it.dest_rack_no || "—"}</td>
-                    <td className="font-mono">{it.dest_box_no || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({((stn.items || []).length ? stn.items : (stn.assigned_items || [])).length})</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full text-xs">
+                  <thead>
+                    <tr>
+                      <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-center">TRANSFERRED QTY</th>
+                      <th className="text-center">REJECTED QTY</th><th>REASON</th>
+                      <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
+                      <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {((stn.items || []).length ? stn.items : (stn.assigned_items || [])).map((it, idx) => (
+                      <tr key={idx}>
+                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                        <td>{it.make}</td>
+                        <td className="text-center font-mono font-bold">{it.quantity}</td>
+                        <td className="text-center font-mono font-bold text-red-700">{it.rejected_qty || "—"}</td>
+                        <td className="font-mono text-slate-600">{it.rejection_reason || "—"}</td>
+                        <td className="font-mono">{it.src_godown_name || "—"}</td>
+                        <td className="font-mono">{it.src_rack_no || "—"}</td>
+                        <td className="font-mono">{it.src_box_no || "—"}</td>
+                        <td className="font-mono">{it.dest_godown_name || "—"}</td>
+                        <td className="font-mono">{it.dest_rack_no || "—"}</td>
+                        <td className="font-mono">{it.dest_box_no || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-6">
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={() => printTransferNote(stn)} data-testid="stn-detail-print">
+                <Printer size={14} weight="bold" className="mr-1.5" /> Print
+              </Button>
+            </div>
           </>
         )}
       </DialogContent>
@@ -976,7 +1163,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     } else {
       api.get("/transfer-notes/next-no").then((r) => { setStnNo(r.data.next_stn_no); setStnDate(r.data.stn_date); })
         .catch(() => toast.error("Could not preview transfer-note number"));
-      api.get("/transfer-requests", { params: { not_status: "COMPLETED,CLOSED,FULLY_TRANSFERRED", page_size: 100 } })
+      api.get("/transfer-requests", { params: { not_status: "COMPLETE", page_size: 100 } })
         .then((r) => setPendingStrs(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1063,16 +1250,22 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     if (items.length === 0) { toast.error("No items to transfer"); return; }
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it.src_godown_id || !it.src_rack_id) { toast.error(`Row ${i + 1}: pick Source Godown / Rack`); return; }
-      if (!it.dest_godown_id) { toast.error(`Row ${i + 1}: pick Destination Godown`); return; }
-      const srcHasBoxes = (boxesByRack[it.src_rack_id] || []).length > 0;
-      if (srcHasBoxes && !it.src_box_id) { toast.error(`Row ${i + 1}: pick Source Box`); return; }
-      const destHasBoxes = it.dest_rack_id ? (boxesByRack[it.dest_rack_id] || []).length > 0 : false;
-      if (destHasBoxes && !it.dest_box_id) { toast.error(`Row ${i + 1}: pick Destination Box`); return; }
-      const q = parseInt(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
-      if (it.src_godown_id === it.dest_godown_id) {
-        toast.error(`Row ${i + 1}: source and destination godown must differ`); return;
+      const q = parseInt(it.quantity) || 0;
+      const rejected = parseInt(it.rejected_qty) || 0;
+      if (q < 0 || rejected < 0) { toast.error(`Row ${i + 1}: quantities cannot be negative`); return; }
+      if (q <= 0 && rejected <= 0) { toast.error(`Row ${i + 1}: enter a Transferred Qty or a Rejected Qty`); return; }
+      if (rejected > 0 && !(it.rejection_reason || "").trim()) { toast.error(`Row ${i + 1}: select a Rejection Reason`); return; }
+      // Source/destination are only required for the portion that actually moves.
+      if (q > 0) {
+        if (!it.src_godown_id || !it.src_rack_id) { toast.error(`Row ${i + 1}: pick Source Godown / Rack`); return; }
+        if (!it.dest_godown_id) { toast.error(`Row ${i + 1}: pick Destination Godown`); return; }
+        const srcHasBoxes = (boxesByRack[it.src_rack_id] || []).length > 0;
+        if (srcHasBoxes && !it.src_box_id) { toast.error(`Row ${i + 1}: pick Source Box`); return; }
+        const destHasBoxes = it.dest_rack_id ? (boxesByRack[it.dest_rack_id] || []).length > 0 : false;
+        if (destHasBoxes && !it.dest_box_id) { toast.error(`Row ${i + 1}: pick Destination Box`); return; }
+        if (it.src_godown_id === it.dest_godown_id) {
+          toast.error(`Row ${i + 1}: source and destination godown must differ`); return;
+        }
       }
     }
     setSaving(true);
@@ -1080,17 +1273,19 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       const payload = {
         transfer_request_id: selectedStrId,
         items: items.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity) || 0,
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
           item_category: it.item_category || "",
-          src_godown_id: it.src_godown_id, src_godown_name: it.src_godown_name || "",
-          src_rack_id: it.src_rack_id, src_rack_no: it.src_rack_no || "",
+          src_godown_id: it.src_godown_id || "", src_godown_name: it.src_godown_name || "",
+          src_rack_id: it.src_rack_id || "", src_rack_no: it.src_rack_no || "",
           src_box_id: it.src_box_id || "", src_box_no: it.src_box_no || "", src_box_category: it.src_box_category || "",
-          dest_godown_id: it.dest_godown_id, dest_godown_name: it.dest_godown_name || "",
+          dest_godown_id: it.dest_godown_id || "", dest_godown_name: it.dest_godown_name || "",
           dest_rack_id: it.dest_rack_id || "", dest_rack_no: it.dest_rack_no || "",
           dest_box_id: it.dest_box_id || "", dest_box_no: it.dest_box_no || "", dest_box_category: it.dest_box_category || "",
+          rejected_qty: parseInt(it.rejected_qty) || 0,
+          rejection_reason: it.rejection_reason || "",
         })),
       };
       const { data } = isEdit
@@ -1154,6 +1349,8 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   <th className="w-10">SL</th>
                   <th>PART / MAKE</th>
                   <th className="text-center">REQ / PEND / NOW</th>
+                  <th className="text-center min-w-[90px]">REJECTED QTY</th>
+                  <th className="min-w-[140px]">REASON</th>
                   <th>SOURCE</th>
                   <th>DESTINATION</th>
                 </tr>
@@ -1175,11 +1372,29 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                       </td>
                       <td className="text-center pt-3">
                         <div className="font-mono text-[11px] text-slate-500">req {it.requested_qty} · pend <b className="text-slate-900">{it.pending_qty}</b></div>
-                        <Input type="number" min="1" step="1" value={it.quantity}
+                        <Input type="number" min="0" step="1" value={it.quantity}
                           onChange={(e) => updateItem(idx, { quantity: e.target.value })}
                           className={`rounded-sm font-mono h-8 text-center mt-1 w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
                           data-testid={`stn-qty-${idx}`} />
                         {overPending && <div className="text-[10px] text-red-600 font-bold mt-0.5">over {it.quantity}/{it.pending_qty}</div>}
+                      </td>
+                      <td className="text-center pt-3">
+                        <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
+                          onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
+                          placeholder="0"
+                          className="rounded-sm font-mono h-8 text-center w-20 mx-auto"
+                          data-testid={`stn-rejected-qty-${idx}`} />
+                      </td>
+                      <td className="pt-3">
+                        <Select value={it.rejection_reason || undefined} onValueChange={(v) => updateItem(idx, { rejection_reason: v })}
+                          disabled={!(parseInt(it.rejected_qty) > 0)}>
+                          <SelectTrigger className="rounded-sm h-8 text-xs" data-testid={`stn-reject-reason-${idx}`}>
+                            <SelectValue placeholder={parseInt(it.rejected_qty) > 0 ? "Select reason" : "—"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {REJECTION_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </td>
                       <td className="space-y-1 pt-2">
                         <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider"><MapPin size={10} weight="bold" className="inline mr-0.5" /> From</div>

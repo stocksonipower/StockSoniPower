@@ -7,6 +7,7 @@ import PartNoLink from "./PartNoLink";
 import { useAuth } from "../lib/auth";
 import { useStockInNav } from "../lib/stockInNav";
 import { toast } from "sonner";
+import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -18,87 +19,86 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* Current existing stock locations (godown/rack/box + qty) for every unique
+   (part_no, make) on a document — fetched live so the Racking Note preview/print
+   shows where material already sits, not the destination being assigned in the
+   racking note currently being viewed (that destination only becomes real
+   inventory once Record Stock In is clicked). */
+async function fetchExistingLocationsForItems(items) {
+  const uniqueItems = [...new Map((items || []).map((it) => [`${it.part_no}||${it.make}`, it])).values()];
+  const pairs = await Promise.all(uniqueItems.map(async (it) => {
+    try {
+      const { data } = await api.get(`/racking-notes/lookup/${encodeURIComponent(it.part_no)}/locations`, { params: { make: it.make } });
+      return [`${it.part_no}||${it.make}`, data.locations || []];
+    } catch {
+      return [`${it.part_no}||${it.make}`, []];
+    }
+  }));
+  return Object.fromEntries(pairs);
+}
+
 /* Standalone print window for a Racking Note preview — styled to match
-   the Receipt Note print typography. */
-function printRackingNote(d) {
+   the Receipt Note print typography (shared template). */
+async function printRackingNote(d) {
   if (!d) return;
-  const racks = [...new Set((d.items || []).map((it) => it.rack_no).filter(Boolean))];
-  const boxes = [...new Set((d.items || []).map((it) => it.box_no).filter(Boolean))];
+  const existingLocs = await fetchExistingLocationsForItems(d.items);
   const rackedQty = (d.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
   const statusLabel = d.status === "RECORDED" ? "Complete" : "In Process";
 
-  const pField = (label, value) =>
-    `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(String(value ?? "—"))}</div></div>`;
+  const rows = [];
+  let sl = 0;
+  (d.items || []).forEach((it) => {
+    const locs = existingLocs[`${it.part_no}||${it.make}`] || [];
+    if (locs.length === 0) {
+      sl += 1;
+      rows.push([
+        String(sl), `<strong>${escapeHtml(it.part_no || "")}</strong>`, escapeHtml(it.make || ""),
+        escapeHtml(it.description_1 || "—"),
+        `<span style="font-style:italic;color:#94a3b8">No existing stock at any location</span>`, "—", "—",
+        `<span style="text-align:right;display:block">—</span>`,
+        `<span style="text-align:right;display:block">${escapeHtml(it.quantity ?? "—")}</span>`,
+      ]);
+    } else {
+      locs.forEach((loc, li) => {
+        sl += 1;
+        rows.push([
+          String(sl),
+          li === 0 ? `<strong>${escapeHtml(it.part_no || "")}</strong>` : "",
+          li === 0 ? escapeHtml(it.make || "") : "",
+          li === 0 ? escapeHtml(it.description_1 || "—") : "",
+          escapeHtml(loc.godown_name || "—"), escapeHtml(loc.rack_no || "—"), escapeHtml(loc.box_no || "—"),
+          `<span style="text-align:right;display:block">${escapeHtml(loc.current_qty ?? "—")}</span>`,
+          `<span style="text-align:right;display:block">${li === 0 ? escapeHtml(it.quantity ?? "—") : ""}</span>`,
+        ]);
+      });
+    }
+  });
 
-  const items = (d.items || []).map((it, idx) => `<tr>
-    <td>${idx + 1}</td>
-    <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
-    <td>${escapeHtml(it.make || "")}</td>
-    <td>${escapeHtml(it.description_1 || "—")}</td>
-    <td>${escapeHtml(it.godown_name || "—")}</td>
-    <td>${escapeHtml(it.rack_no || "—")}</td>
-    <td>${escapeHtml(it.box_no || "—")}</td>
-    <td style="text-align:right">${it.quantity ?? "—"}</td>
-  </tr>`).join("");
-
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8" />
-<title>${escapeHtml(d.rkn_no)} — Racking Note</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #020617; }
-  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; color: #000000; }
-  .status-pill { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; background: #f1f5f9; color: #334155; }
-  .header-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  .field-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
-  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; color: #0f172a; }
-  .section-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
-  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
-  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: #0f172a; }
-  .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
-  @media print { body { padding: 12mm; } }
-</style></head>
-<body>
-  <h1>Racking Note</h1>
-  <div style="text-align:center;margin-bottom:12px;">
-    <span class="status-pill">${escapeHtml(statusLabel)}</span>
-  </div>
-  <div class="header-grid">
-    <div>
-      ${pField("Racking Note No", d.rkn_no)}
-      ${pField("Racking Note Date", fmtDate(d.rkn_date))}
-      ${pField("Related Receipt Note", `${d.receipt_note_no || "—"} (${fmtDate(d.receipt_note_date)})`)}
-      ${pField("Status", statusLabel)}
-    </div>
-    <div>
-      ${pField("Rack Details", racks.length ? racks.join(", ") : "—")}
-      ${pField("Box Details", boxes.length ? boxes.join(", ") : "—")}
-      ${pField("Racked Quantity", rackedQty || "—")}
-      ${pField("Created By", d.created_by || "—")}
-    </div>
-  </div>
-  <div class="section-title">Items (${(d.items || []).length})</div>
-  <table>
-    <thead><tr>
-      <th>Sl No</th><th>Part No</th><th>Make</th><th>Description</th>
-      <th>Godown</th><th>Rack</th><th>Box</th>
-      <th style="text-align:right">Qty</th>
-    </tr></thead>
-    <tbody>${items}</tbody>
-  </table>
-  <div class="footer">
-    Printed: ${escapeHtml(new Date().toLocaleString())}
-    &nbsp;·&nbsp; Printed by: ${escapeHtml(d.created_by || "—")}
-  </div>
-  <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
-</body></html>`;
-
-  const w = window.open("", "_blank", "width=1000,height=750");
-  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
+  const html = buildStandardPrintHtml({
+    docTitle: "Racking Note",
+    docNo: d.rkn_no,
+    statusLabel,
+    fieldsLeft: [
+      ["Racking Note No", d.rkn_no],
+      ["Racking Note Date", fmtDate(d.rkn_date)],
+      ["Related Receipt Note", `${d.receipt_note_no || "—"} (${fmtDate(d.receipt_note_date)})`],
+      ["Status", statusLabel],
+    ],
+    fieldsRight: [
+      ["Total Qty Being Racked (This Note)", rackedQty || "—"],
+      ["Created By", d.created_by || "—"],
+      ["Created At", d.created_at ? new Date(d.created_at).toLocaleString() : "—"],
+    ],
+    columns: [
+      { label: "Sr" }, { label: "Part No" }, { label: "Make" }, { label: "Description" },
+      { label: "Existing Godown" }, { label: "Existing Rack" }, { label: "Existing Box" },
+      { label: "Existing Qty", align: "right" }, { label: "Qty This Note", align: "right" },
+    ],
+    rows,
+    printedBy: d.created_by,
+    sectionTitle: "Current Existing Stock Locations",
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
 /**
@@ -167,8 +167,9 @@ export default function DocumentDetailDialog({ kind, id, no, onClose, related, o
 export function isRnEditable(rn, me, isAdmin) {
   if (!rn) return false;
   const isDraft = rn.status === "DRAFT";
-  const hasRacking = rn.has_racking_note === true
-    || (rn.has_racking_note === undefined && (rn.status === "FULLY_RACKED" || rn.status === "PARTIALLY_RACKED"));
+  // Locked only once stock has genuinely moved — has_racking_note reflects a
+  // RECORDED racking note, not merely a DRAFT allocation (see assert_rn_mutable).
+  const hasRacking = rn.has_racking_note === true;
   const isAssignedToOther = !isDraft && !!rn.assigned_to_user_id && rn.assigned_to_user_id !== me?.id && !isAdmin;
   return !(hasRacking || isAssignedToOther);
 }
@@ -269,19 +270,28 @@ function LocCell({ g, r, b }) {
 }
 
 function RackingBody({ d }) {
-  const racks = [...new Set((d.items || []).map((it) => it.rack_no).filter(Boolean))];
-  const boxes = [...new Set((d.items || []).map((it) => it.box_no).filter(Boolean))];
   const rackedQty = (d.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0);
   const complete = d.status === "RECORDED";
+  const [existingLocs, setExistingLocs] = useState({});
+  const [loadingLocs, setLoadingLocs] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingLocs(true);
+    fetchExistingLocationsForItems(d.items).then((map) => {
+      if (!cancelled) setExistingLocs(map);
+    }).finally(() => { if (!cancelled) setLoadingLocs(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d.id]);
+
   return (
     <>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
         <Detail k="Racking Note No" v={d.rkn_no || "—"} />
         <Detail k="Racking Note Date" v={fmtDate(d.rkn_date)} />
         <Detail k="Related Receipt Note" v={`${d.receipt_note_no || "—"} (${fmtDate(d.receipt_note_date)})`} />
-        <Detail k="Rack Details" v={racks.length ? racks.join(", ") : "—"} />
-        <Detail k="Box Details" v={boxes.length ? boxes.join(", ") : "—"} />
-        <Detail k="Racked Quantity" v={rackedQty || "—"} />
+        <Detail k="Total Qty Being Racked (This Note)" v={rackedQty || "—"} />
         <Detail k="Status" v={
           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${complete ? "bg-green-100 text-green-800" : "bg-blue-50 text-blue-800"}`}>
             {complete ? "Complete" : "In Process"}
@@ -290,20 +300,54 @@ function RackingBody({ d }) {
         <Detail k="Created By" v={d.created_by || "—"} />
         <Detail k="Created At" v={d.created_at ? new Date(d.created_at).toLocaleString() : "—"} />
       </div>
+      <div className="label-sm mb-2">
+        Current Existing Stock Locations
+        {loadingLocs && <span className="ml-2 text-slate-400 font-normal normal-case">Loading…</span>}
+      </div>
+      <div className="text-xs text-slate-500 mb-2">
+        Where this material currently exists in the warehouse — not the destination being assigned in this
+        racking note. Inventory only reflects the new destination once Record Stock In is completed.
+      </div>
       <div className="overflow-x-auto">
         <table className="data-table w-full text-xs">
-          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-center">QTY</th></tr></thead>
+          <thead>
+            <tr>
+              <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+              <th>EXISTING GODOWN</th><th>EXISTING RACK</th><th>EXISTING BOX</th>
+              <th className="text-center">EXISTING QTY</th>
+              <th className="text-center">QTY THIS NOTE</th>
+            </tr>
+          </thead>
           <tbody>
-            {(d.items || []).map((it, idx) => (
-              <tr key={idx}>
-                <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                <td>{it.make}</td>
-                <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
-                <td className="text-center font-mono font-bold">{it.quantity}</td>
-              </tr>
-            ))}
+            {(d.items || []).flatMap((it, idx) => {
+              const locs = existingLocs[`${it.part_no}||${it.make}`] || [];
+              if (locs.length === 0) {
+                return [(
+                  <tr key={`${idx}-none`}>
+                    <td className="font-mono text-slate-500">{idx + 1}</td>
+                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td>{it.make}</td>
+                    <td className="text-slate-700 max-w-[220px] truncate">{it.description_1 || "—"}</td>
+                    <td colSpan={3} className="text-slate-400 italic">No existing stock at any location</td>
+                    <td className="text-center font-mono">—</td>
+                    <td className="text-center font-mono font-bold">{it.quantity}</td>
+                  </tr>
+                )];
+              }
+              return locs.map((loc, li) => (
+                <tr key={`${idx}-${li}`}>
+                  <td className="font-mono text-slate-500">{idx + 1}{locs.length > 1 ? `.${li + 1}` : ""}</td>
+                  <td>{li === 0 ? <PartNoLink partNo={it.part_no} make={it.make} /> : ""}</td>
+                  <td>{li === 0 ? it.make : ""}</td>
+                  <td className="text-slate-700 max-w-[220px] truncate">{li === 0 ? (it.description_1 || "—") : ""}</td>
+                  <td className="font-mono">{loc.godown_name || "—"}</td>
+                  <td className="font-mono">{loc.rack_no || "—"}</td>
+                  <td className="font-mono">{loc.box_no || "—"}</td>
+                  <td className="text-center font-mono font-bold">{loc.current_qty}</td>
+                  <td className="text-center font-mono font-bold">{li === 0 ? it.quantity : ""}</td>
+                </tr>
+              ));
+            })}
           </tbody>
         </table>
       </div>

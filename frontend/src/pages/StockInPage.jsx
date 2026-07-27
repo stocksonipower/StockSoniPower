@@ -96,27 +96,32 @@ export function stockInTypeLabel(type) { return stockInTypeMeta(type).label; }
 //   Complete    — the entire receipt workflow for this document has finished.
 // This is purely a display mapping — the underlying raw status values (and the
 // business logic that computes them) are unchanged.
-//   Receipt Note:  DRAFT, RACKING_NOTE_DRAFT, PARTIALLY_RACKED, FULLY_RACKED
+//   Receipt Note:  DRAFT (pre-finalize only), PENDING, IN_PROCESS, COMPLETE
 //   SRN:           PENDING, PARTIALLY_RECEIVED, COMPLETE
 //   ERN:           PENDING, PARTIALLY_ACCEPTED, COMPLETE
 //   Racking Note:  DRAFT, RECORDED
+// RACKING_NOTE_DRAFT/PARTIALLY_RACKED/FULLY_RACKED are legacy RN values (pre
+// status-collapse); kept here defensively in case a stale client cache still
+// holds one before a refresh picks up the server-side migration.
 function statusMeta(status) {
   switch (status) {
     case "DRAFT":
       return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
+    case "PENDING":
+      return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
     case "RACKING_NOTE_DRAFT":
+      return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
+    case "IN_PROCESS":
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_RACKED":
-      return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
-    case "FULLY_RACKED":
-      return { label: "Complete", cls: "bg-green-100 text-green-800" };
-    case "PENDING":
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_RECEIVED":
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_ACCEPTED":
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "COMPLETE":
+      return { label: "Complete", cls: "bg-green-100 text-green-800" };
+    case "FULLY_RACKED":
       return { label: "Complete", cls: "bg-green-100 text-green-800" };
     case "RECORDED":
       return { label: "Complete", cls: "bg-green-100 text-green-800" };
@@ -368,10 +373,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
             {filteredRows.map((r, idx) => {
               const totalQty = totalQtyOf(r);
               const isDraft = r.status === "DRAFT";
-              // New policy: lock edit/delete ONLY when a Racking Note exists against this RN.
-              // Falls back to the status-based heuristic for older API responses that lack the flag.
-              const hasRacking = r.has_racking_note === true
-                || (r.has_racking_note === undefined && (r.status === "FULLY_RACKED" || r.status === "PARTIALLY_RACKED"));
+              // Locked only once stock has genuinely moved — has_racking_note reflects a
+              // RECORDED racking note, not merely a DRAFT allocation (see assert_rn_mutable).
+              const hasRacking = r.has_racking_note === true;
               // DRAFT bypasses assignee restriction (anyone with stock_in access can edit drafts).
               const isAssignedToOther = !isDraft && !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lockEdit = hasRacking || isAssignedToOther;

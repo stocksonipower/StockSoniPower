@@ -8,7 +8,7 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 from deps import db, get_current_user, now_iso, _notify, logger, _resolve_assignee, _enforce_assignee
 from deps import _module_dep
 from models import *
-from helpers.stock_helpers import _enrich_items, _enrich_note_items, _enrich_with_parent_assignee
+from helpers.stock_helpers import _enrich_items, _enrich_note_items, _enrich_with_parent_assignee, _stock_locations_for
 from helpers.note_helpers import current_fy_label, _alloc_serial, _no_future_date, _key, _next_letter_suffix, _qty_diff, _rn_items_have_all_received
 from helpers.auto_create import _auto_create_srn_for_rn, _auto_create_ern_for_rn, _auto_create_rkn_for_source
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_srn_racking_status, _recompute_ern_racking_status, _is_source_fully_racked, _aggregate_other_rkn_qty_by_source, _recompute_source_status_after_rkn
@@ -379,10 +379,15 @@ async def list_receipt_notes(
     skip = (page - 1) * page_size
     rows = await db.receipt_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
-    # Annotate `has_racking_note`: any RKN (DRAFT or RECORDED) referencing the RN blocks edit/delete.
+    # Annotate `has_racking_note`: mirrors assert_rn_mutable's actual gate — only a
+    # RECORDED racking note (stock genuinely moved) blocks edit/delete. A DRAFT
+    # racking note holds no stock, so its presence must not lock the parent RN.
     if rows:
-        ids_with_rkn = await db.racking_notes.distinct("receipt_note_id", {"receipt_note_id": {"$in": [r["id"] for r in rows]}})
-        id_set = set(ids_with_rkn or [])
+        ids_with_recorded_rkn = await db.racking_notes.distinct(
+            "receipt_note_id",
+            {"receipt_note_id": {"$in": [r["id"] for r in rows]}, "status": "RECORDED"},
+        )
+        id_set = set(ids_with_recorded_rkn or [])
         for r in rows:
             r["has_racking_note"] = r["id"] in id_set
     response.headers["X-Total-Count"] = str(total)
@@ -398,7 +403,7 @@ async def get_receipt_note(rn_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Receipt note not found")
     await _enrich_note_items([doc])
-    doc["has_racking_note"] = bool(await db.racking_notes.find_one({"receipt_note_id": rn_id}, {"_id": 1}))
+    doc["has_racking_note"] = bool(await db.racking_notes.find_one({"receipt_note_id": rn_id, "status": "RECORDED"}, {"_id": 1}))
     return doc
 
 
@@ -481,7 +486,7 @@ async def update_receipt_note(rn_id: str, payload: ReceiptNoteCreate, user=Depen
 
 @router.post("/receipt-notes/{rn_id}/finalize", response_model=ReceiptNote)
 async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(_module_dep("stock_in"))):
-    """Promote a DRAFT receipt note to RACKING_NOTE_DRAFT.
+    """Promote a DRAFT receipt note to PENDING (racking-eligible, nothing racked yet).
 
     Requires: received_qty is a non-negative number for every row (0 is allowed
     and means "nothing received against this row yet"). invoice_date and
@@ -540,7 +545,7 @@ async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(_mo
     now = now_iso()
     await db.receipt_notes.update_one(
         {"id": rn_id},
-        {"$set": {"items": items_out, "status": "RACKING_NOTE_DRAFT", "finalized_at": now}},
+        {"$set": {"items": items_out, "status": "PENDING", "finalized_at": now}},
     )
 
     await _recompute_rn_status(rn_id)
@@ -559,7 +564,7 @@ async def finalize_receipt_note(rn_id: str, response: Response, user=Depends(_mo
             action="receipt_note.finalized", actor=user,
             ref_collection="receipt_notes", ref_id=rn_id,
             old={"status": "DRAFT", "items": rn.get("items")},
-            new={"status": "RACKING_NOTE_DRAFT", "items": items_out},
+            new={"status": "PENDING", "items": items_out},
             reason="Receipt note finalized; shortfall/overage and racking derived",
             links={"rn_no": rn.get("rn_no"), "srn_no": srn_no, "ern_no": ern_no},
         )
@@ -611,6 +616,15 @@ async def delete_receipt_note(rn_id: str, user=Depends(_module_dep("stock_in")))
 
 
 # -------------------- RACKING NOTES --------------------
+@router.get("/racking-notes/lookup/{part_no}/locations")
+async def racking_note_existing_locations(part_no: str, make: str, user=Depends(get_current_user)):
+    """Current existing stock locations (godown/rack/box + qty) for a part/make,
+    computed live from the transaction ledger. Used by the Racking Note preview/print
+    to show where material already sits — distinct from the destination the operator
+    is assigning in the racking note currently being edited/viewed."""
+    return {"locations": await _stock_locations_for(part_no, make)}
+
+
 @router.get("/racking-notes/next-no")
 async def next_racking_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
@@ -655,7 +669,7 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
     src_type, src_id, parent_doc, ultimate_rn = await _resolve_racking_source(payload.model_dump())
     _enforce_assignee(parent_doc, user, "create a racking note for this source")
     # Disallow if source is fully racked
-    if src_type == "RN" and parent_doc.get("status") == "FULLY_RACKED":
+    if src_type == "RN" and parent_doc.get("status") == "COMPLETE":
         raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
     if src_type == "SRN" and await _is_source_fully_racked("SRN", parent_doc):
         raise HTTPException(status_code=409, detail="This Short Received Note is already fully racked")
@@ -773,9 +787,9 @@ async def list_racking_notes(
 async def list_racking_sources(user=Depends(_module_dep("stock_in"))):
     """Return all rackable sources (RN + SRN-with-fulfilled + ERN-with-accepted),
     grouped by their ultimate parent RN."""
-    # 1. RNs eligible: any non-DRAFT, non-FULLY_RACKED status.
+    # 1. RNs eligible: any non-DRAFT, non-COMPLETE status.
     rn_rows = await db.receipt_notes.find(
-        {"status": {"$in": ["RACKING_NOTE_DRAFT", "PARTIALLY_RACKED"]}},
+        {"status": {"$in": ["PENDING", "IN_PROCESS"]}},
         {"_id": 0, "id": 1, "rn_no": 1, "rn_date": 1, "stock_in_type": 1,
          "invoice_no": 1, "invoice_date": 1, "status": 1,
          "assigned_to_user_id": 1, "assigned_to_name": 1, "assigned_to_email": 1},
@@ -898,7 +912,7 @@ async def prepare_racking_for_source(
         rn = await db.receipt_notes.find_one({"id": source_id}, {"_id": 0})
         if not rn:
             raise HTTPException(status_code=404, detail="Receipt note not found")
-        if rn.get("status") == "FULLY_RACKED" and not exclude_rkn_id:
+        if rn.get("status") == "COMPLETE" and not exclude_rkn_id:
             raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
         # The qty available per (part,make) is invoice_qty (capped at invoice to exclude
         # extra qty, which goes to ERN and must be racked separately after ERN acceptance).

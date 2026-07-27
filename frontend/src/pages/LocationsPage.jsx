@@ -69,6 +69,12 @@ export default function LocationsPage() {
   const loadGodowns = async () => setGodowns((await api.get("/godowns")).data);
   const loadRacks = async (gid) => setRacks((await api.get("/racks", { params: gid ? { godown_id: gid } : {} })).data);
   const loadBoxes = async (rid) => setBoxes((await api.get("/boxes", { params: rid ? { rack_id: rid } : {} })).data);
+  // Any box create/delete changes a rack's live box_count, so the rack list (which
+  // displays that count) must refresh alongside the box list — never just the boxes.
+  const refreshBoxesAndCounts = async (rid) => {
+    await loadBoxes(rid);
+    if (selectedGodown) await loadRacks(selectedGodown);
+  };
 
   useEffect(() => { loadGodowns(); }, []);
   useEffect(() => {
@@ -100,14 +106,14 @@ export default function LocationsPage() {
     if (!selectedRack || !newBox.box_no.trim()) { toast.error("Select a rack and enter box no."); return; }
     try {
       await api.post("/boxes", { rack_id: selectedRack, box_no: newBox.box_no, box_category: newBox.box_category });
-      setNewBox({ box_no: "", box_category: "" }); toast.success("Box added"); loadBoxes(selectedRack);
+      setNewBox({ box_no: "", box_category: "" }); toast.success("Box added"); refreshBoxesAndCounts(selectedRack);
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   };
 
   // ---- Delete ----
   const delGodown = async (id) => { if (window.confirm("Delete godown?")) { await api.delete(`/godowns/${id}`); loadGodowns(); if (selectedGodown === id) setSelectedGodown(null); } };
   const delRack = async (id) => { if (window.confirm("Delete rack?")) { await api.delete(`/racks/${id}`); loadRacks(selectedGodown); if (selectedRack === id) setSelectedRack(null); } };
-  const delBox = async (id) => { if (window.confirm("Delete box?")) { await api.delete(`/boxes/${id}`); loadBoxes(selectedRack); } };
+  const delBox = async (id) => { if (window.confirm("Delete box?")) { await api.delete(`/boxes/${id}`); refreshBoxesAndCounts(selectedRack); } };
 
   // ---- Bulk select helpers ----
   const toggleSet = (set, id) => {
@@ -351,7 +357,7 @@ export default function LocationsPage() {
                     <>
                       <div className="flex-1 cursor-pointer" onClick={() => setSelectedRack(r.id)}>
                         <span className="font-mono font-semibold">Rack {r.rack_no}</span>
-                        <span className={`ml-2 text-xs ${selectedRack === r.id ? "text-slate-300" : "text-slate-500"}`}>{r.total_boxes} boxes</span>
+                        <span className={`ml-2 text-xs ${selectedRack === r.id ? "text-slate-300" : "text-slate-500"}`}>{r.box_count ?? 0} boxes</span>
                       </div>
                       <div className="opacity-0 group-hover:opacity-100 flex gap-1">
                         <IconBtn onClick={() => setBoxRangeFor(r)} dark={selectedRack === r.id} icon={ListNumbers} testid={`range-boxes-${r.id}`} title="Add Box Range" />
@@ -400,7 +406,7 @@ export default function LocationsPage() {
                   count={selectedBoxIds.size}
                   totalSelectable={boxes.filter((x) => !x.in_use).length}
                   onToggleAll={() => setSelectedBoxIds((s) => toggleAll(s, boxes))}
-                  onBulkDelete={() => bulkDelete("boxes", selectedBoxIds, () => loadBoxes(selectedRack), setSelectedBoxIds)}
+                  onBulkDelete={() => bulkDelete("boxes", selectedBoxIds, () => refreshBoxesAndCounts(selectedRack), setSelectedBoxIds)}
                   testidPrefix="box"
                 />
               )}
@@ -479,6 +485,8 @@ export default function LocationsPage() {
           onClose={() => setBoxRangeFor(null)}
           onSuccess={() => {
             setBoxRangeFor(null);
+            // A range-create adds boxes, which changes the rack's live box_count.
+            if (selectedGodown) loadRacks(selectedGodown);
             if (selectedRack === boxRangeFor.id) loadBoxes(selectedRack);
             else { setSelectedRack(boxRangeFor.id); }
           }}

@@ -48,6 +48,38 @@ async def _stock_locations_for(part_no: str, make: str) -> list:
     return [{**r["_id"], "current_qty": r["quantity"]} for r in rows]
 
 
+async def _allocate_locations_for(part_no: str, make: str, qty: float, selected_godown_id: Optional[str] = None) -> list:
+    """Greedily allocate `qty` across existing stock locations for a part/make, in the
+    same natural order `_stock_locations_for` returns (godown_name, rack_no, box_no).
+
+    Used to pre-determine the *authorized* picking locations for an Issue Note line at
+    creation/edit time — once set, picking is restricted to exactly these locations
+    (an Issue Note no longer just requests a quantity; it also dictates where it must
+    be drawn from). Deterministic and reproducible: given the same live stock state,
+    the same allocation always results, so re-running it after an edit is safe.
+    """
+    locs = await _stock_locations_for(part_no, make)
+    if selected_godown_id:
+        locs = [L for L in locs if L.get("godown_id") == selected_godown_id]
+    remaining = float(qty or 0)
+    allocation = []
+    for L in locs:
+        if remaining <= 1e-9:
+            break
+        take = min(remaining, L.get("current_qty") or 0)
+        if take <= 1e-9:
+            continue
+        allocation.append({
+            "godown_id": L.get("godown_id", ""), "godown_name": L.get("godown_name", ""),
+            "rack_id": L.get("rack_id", ""), "rack_no": L.get("rack_no", ""),
+            "box_id": L.get("box_id", ""), "box_no": L.get("box_no", ""),
+            "box_category": L.get("box_category", ""),
+            "quantity": take,
+        })
+        remaining -= take
+    return allocation
+
+
 async def _enrich_items(items: list):
     """In-place: overwrite snapshotted master & location fields on each dict
     with the LATEST values from stock_master / godowns / racks / boxes.

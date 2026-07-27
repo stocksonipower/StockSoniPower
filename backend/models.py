@@ -174,8 +174,11 @@ class ReceiptNote(BaseModel):
     invoice_date: str = ""
     goods_received_date: str = ""
     items: List[ReceiptNoteItem] = []
-    # Active 4-status flow: DRAFT -> RACKING_NOTE_DRAFT -> PARTIALLY_RACKED -> FULLY_RACKED
-    # Legacy FINAL / RACKING_PENDING / RACKED are migrated on startup.
+    # DRAFT is an internal pre-finalize marker only (gates /finalize; always shown as
+    # "Pending" in the UI). Once finalized, the racking-progress status follows the
+    # standard 3-status set: PENDING -> IN_PROCESS -> COMPLETE (see _recompute_rn_status).
+    # Legacy RACKING_NOTE_DRAFT/PARTIALLY_RACKED/FULLY_RACKED/FINAL/RACKING_PENDING/RACKED
+    # are migrated on startup.
     status: str = "DRAFT"
     finalized_at: Optional[str] = None
     racked_at: Optional[str] = None
@@ -184,8 +187,9 @@ class ReceiptNote(BaseModel):
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
-    # Derived on read: True iff at least one Racking Note (DRAFT or RECORDED) references this RN.
-    # Frontend uses this to lock edit/delete, overriding the status-based heuristic.
+    # Derived on read: True iff at least one RECORDED Racking Note references this RN
+    # (i.e. stock has genuinely moved). Frontend uses this to lock edit/delete — a DRAFT
+    # racking note holds no stock and must not lock the parent.
     has_racking_note: Optional[bool] = False
     narration: Optional[str] = ""
 
@@ -375,13 +379,19 @@ class IssueNoteItem(BaseModel):
     part_no: str
     make: str
     quantity: float
-    # Optional office-selected godown preference. Rack/box allocation belongs to Picking.
+    # Optional office-selected godown preference — narrows which locations
+    # allocated_locations may be drawn from.
     selected_godown_id: Optional[str] = None
     selected_godown_name: Optional[str] = None
     # Denormalized stock master fields (for display only)
     model: Optional[str] = ""
     description_1: Optional[str] = ""
     item_category: Optional[str] = ""
+    # Authorized picking locations — computed server-side (greedy-fill across existing
+    # stock locations) at create/edit time. Picking is restricted to exactly these
+    # (godown_id, rack_id, box_id) combinations; not user-editable. Each entry:
+    # {godown_id, godown_name, rack_id, rack_no, box_id, box_no, box_category, quantity}.
+    allocated_locations: Optional[List[dict]] = Field(default_factory=list)
 
 
 class IssueNoteCreate(BaseModel):
@@ -396,7 +406,11 @@ class IssueNote(BaseModel):
     fy: str
     serial: int
     items: List[IssueNoteItem] = []
-    status: str = "PICKING_PENDING"  # PICKING_PENDING | PARTIALLY_PICKED | FULLY_PICKED
+    # Active 3-status set: PENDING (nothing picked/rejected yet) -> IN_PROCESS
+    # (some picked/rejected, some pending) -> COMPLETE (picked+rejected == requested
+    # for every line). Legacy PICKING_PENDING/PICKING_IN_PROGRESS/PARTIALLY_PICKED/
+    # FULLY_PICKED/OPEN are migrated on startup.
+    status: str = "PENDING"
     picked_at: Optional[str] = None
     created_at: str
     created_by: str = ""
@@ -408,7 +422,7 @@ class IssueNote(BaseModel):
 class PickingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: float  # picked qty (physically issued)
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -424,6 +438,10 @@ class PickingNoteItem(BaseModel):
     box_id: Optional[str] = ""
     box_no: Optional[str] = ""
     box_category: Optional[str] = ""
+    # Partial-picking-with-rejection (does not move stock; resolves the request
+    # without a follow-up pick). quantity + rejected_qty <= requested qty.
+    rejected_qty: Optional[float] = 0
+    rejection_reason: Optional[str] = ""
 
 
 class PickingNoteCreate(BaseModel):
@@ -478,7 +496,11 @@ class TransferRequest(BaseModel):
     serial: int
     purpose: str = ""
     items: List[TransferRequestItem] = []
-    status: str = "PENDING"  # NEW | PENDING | IN_PROGRESS | COMPLETED | CLOSED | CANCELLED
+    # Active 3-status set: PENDING (nothing transferred/rejected yet) -> IN_PROCESS
+    # (some transferred/rejected, some pending) -> COMPLETE (transferred+rejected ==
+    # requested for every line). Legacy NEW/IN_PROGRESS/COMPLETED/CLOSED/CANCELLED
+    # are migrated on startup.
+    status: str = "PENDING"
     transferred_at: Optional[str] = None
     created_at: str
     created_by: str = ""
@@ -490,7 +512,11 @@ class TransferRequest(BaseModel):
 class TransferNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    quantity: float  # transferred qty (physically moved)
+    # Partial-transfer-with-rejection (does not move stock; resolves the request
+    # without a follow-up transfer). quantity + rejected_qty <= requested qty.
+    rejected_qty: Optional[float] = 0
+    rejection_reason: Optional[str] = ""
     # Master snapshot
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""

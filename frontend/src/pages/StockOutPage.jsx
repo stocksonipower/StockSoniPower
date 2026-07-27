@@ -7,13 +7,13 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent,
 } from "../components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
-  Pencil, CheckCircle, MapPin, Package, ArrowsSplit,
+  Pencil, CheckCircle, Package, Printer,
   DownloadSimple, ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
@@ -22,9 +22,11 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
+import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 const NO_GODOWN = "__NO_GODOWN__";
+const REJECTION_REASONS = ["Not Available", "Damaged", "Expired", "Wrong Specification", "Other"];
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -44,8 +46,41 @@ function pickingKey(it) {
   return `${it.part_no || ""}||${it.make || ""}`;
 }
 
-function isDisplayOnlyRemainingRow(it) {
-  return !!it.is_remaining_row && !it.godown_id && !it.rack_id && !it.box_id;
+// Issue Note uses the standard 3-status set (Pending / In Process / Complete);
+// legacy values are recognized defensively in case a cached row predates migration.
+function issueStatusLabel(status) {
+  if (status === "COMPLETE" || status === "COMPLETED" || status === "FULLY_PICKED") return "Complete";
+  if (status === "IN_PROCESS" || status === "PICKING_IN_PROGRESS" || status === "PARTIALLY_PICKED" || status === "PICKED") return "In Process";
+  return "Pending";
+}
+
+function issueStatusClass(status) {
+  const label = issueStatusLabel(status);
+  if (label === "Complete") return "bg-green-100 text-green-800";
+  if (label === "In Process") return "bg-blue-50 text-blue-800";
+  return "bg-amber-50 text-amber-700";
+}
+
+// Locked (edit/delete) the moment picking has actually started — mirrors the backend
+// rule exactly, since status only leaves Pending once a Picking Note is COMPLETED.
+function issueHasProcessed(status) {
+  return issueStatusLabel(status) !== "Pending";
+}
+
+// Picking Note is a secondary/operational document and keeps its own working states
+// rather than the 3-status set — RECORDING is a transient lock state, folded into
+// "Draft" for display.
+function pickingNoteStatusLabel(status) {
+  if (status === "COMPLETED" || status === "RECORDED") return "Completed";
+  if (status === "PENDING") return "Pending";
+  return "Draft";
+}
+
+// Location-aware key (part+make+godown+rack+box) — a part/make can legitimately have
+// multiple picking rows now (one per authorized location), so matching saved rows back
+// to freshly-prepared ones needs the full location, not just part/make.
+function pickingLocKey(it) {
+  return `${it.part_no || ""}||${it.make || ""}||${it.godown_id || ""}||${it.rack_id || ""}||${it.box_id || ""}`;
 }
 
 function pickingAssignedItems(pn) {
@@ -58,6 +93,10 @@ function pickingAssignedQty(pn) {
 
 function pickingPickedQty(pn) {
   return (pn.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
+}
+
+function pickingRejectedQty(pn) {
+  return (pn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
 }
 
 function pickingDisplayItems(pn) {
@@ -75,75 +114,125 @@ function pickingDisplayCount(pn) {
   return pickingDisplayItems(pn).length || pn.requested_items_count || (pn.requested_items || []).length || 0;
 }
 
+// Picking Note print columns: Sr, Part No, Item, Rack, Picked Qty, Rejected Qty, Picker, Remarks
 function printPickingNote(pn) {
-  const rows = pickingDisplayItems(pn).map((it, idx) => `
-    <tr>
-      <td>${idx + 1}</td>
-      <td>${htmlEscape(it.part_no)}</td>
-      <td>${htmlEscape(it.make)}</td>
-      <td>${htmlEscape(it.description_1 || "")}</td>
-      <td>${htmlEscape(it.row_status || "")}</td>
-      <td class="num">${htmlEscape(it.quantity)}</td>
-      <td>${htmlEscape(it.godown_name || "")}</td>
-      <td>${htmlEscape(it.rack_no || "")}</td>
-      <td>${htmlEscape(it.box_no || "")}</td>
-    </tr>
-  `).join("");
-  const html = `<!doctype html>
-<html>
-<head>
-  <title>${htmlEscape(pn.pn_no || "Picking Note")}</title>
-  <style>
-    body { font-family: Arial, sans-serif; color: #111827; padding: 24px; }
-    h1 { font-size: 22px; margin: 0 0 16px; }
-    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 18px; margin-bottom: 18px; font-size: 12px; }
-    .label { color: #64748b; text-transform: uppercase; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
-    .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 3px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border: 1px solid #cbd5e1; padding: 7px; text-align: left; vertical-align: top; }
-    th { background: #f1f5f9; font-size: 10px; text-transform: uppercase; }
-    .num { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    @media print { body { padding: 12mm; } }
-  </style>
-</head>
-<body>
-  <h1>Picking Note ${htmlEscape(pn.pn_no || "")}</h1>
-  <div class="meta">
-    <div><div class="label">Issue Number</div><div class="value">${htmlEscape(pn.issue_note_no || "")}</div></div>
-    <div><div class="label">Picking Number</div><div class="value">${htmlEscape(pn.pn_no || "")}</div></div>
-    <div><div class="label">Date</div><div class="value">${htmlEscape(fmtDate(pn.pn_date))}</div></div>
-    <div><div class="label">Assigned To</div><div class="value">${htmlEscape(pn.parent_assigned_to_name || "")}</div></div>
-    <div><div class="label">Picker</div><div class="value">${htmlEscape(pn.created_by || "")}</div></div>
-    <div><div class="label">Status</div><div class="value">${htmlEscape(pn.status || "")}</div></div>
-  </div>
-  <table>
-    <thead><tr><th>SL</th><th>Part</th><th>Brand</th><th>Description</th><th>Status</th><th>Qty</th><th>Godown</th><th>Rack</th><th>Box</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="9">No picked locations saved.</td></tr>`}</tbody>
-  </table>
-  <script>window.onload = () => setTimeout(() => window.print(), 100);</script>
-</body>
-</html>`;
-  const w = window.open("", "_blank");
-  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
+  const rows = pickingDisplayItems(pn).map((it, idx) => [
+    String(idx + 1),
+    htmlEscape(it.part_no),
+    htmlEscape(it.description_1 || it.make || ""),
+    htmlEscape(it.godown_name || "—"),
+    htmlEscape(it.rack_no || "—"),
+    htmlEscape(it.box_no || "—"),
+    `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
+    `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(it.rejected_qty || "—")}</span>`,
+    htmlEscape(pn.created_by || "—"),
+    htmlEscape(it.rejection_reason || "—"),
+  ]);
+  const html = buildStandardPrintHtml({
+    docTitle: "Picking Note",
+    docNo: pn.pn_no,
+    statusLabel: pickingNoteStatusLabel(pn.status),
+    fieldsLeft: [
+      ["Picking No", pn.pn_no],
+      ["Picking Date", fmtDate(pn.pn_date)],
+      ["Issue Note No", pn.issue_note_no || "—"],
+      ["Issue Note Date", fmtDate(pn.issue_note_date)],
+      ["Status", pickingNoteStatusLabel(pn.status)],
+    ],
+    fieldsRight: [
+      ["Assigned To", pn.parent_assigned_to_name || pn.parent_assigned_to_email || "—"],
+      ["Picker", pn.created_by || "—"],
+      ["Picked Qty", pickingPickedQty(pn)],
+      ["Rejected Qty", pickingRejectedQty(pn)],
+    ],
+    columns: [
+      { label: "Sr" }, { label: "Part No" }, { label: "Item" },
+      { label: "Godown" }, { label: "Rack" }, { label: "Box" },
+      { label: "Picked Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Picker" }, { label: "Remarks" },
+    ],
+    rows,
+    printedBy: pn.created_by,
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
+}
+
+// Issue Note print columns: Sr, Part Number, Item Name, Make, Requested Qty, Picked Qty, Rejected Qty, Unit, Remarks
+function printIssueNote(inn, pickingHistory = []) {
+  const processedByKey = {};
+  pickingHistory.forEach((pn) => {
+    if (!(pn.status === "COMPLETED" || pn.status === "RECORDED")) return;
+    (pn.items || []).forEach((it) => {
+      const k = pickingKey(it);
+      const cur = processedByKey[k] || { picked: 0, rejected: 0, reasons: new Set() };
+      cur.picked += parseFloat(it.quantity) || 0;
+      cur.rejected += parseFloat(it.rejected_qty) || 0;
+      if (it.rejection_reason) cur.reasons.add(it.rejection_reason);
+      processedByKey[k] = cur;
+    });
+  });
+  const rows = [];
+  (inn.items || []).forEach((it, idx) => {
+    const p = processedByKey[pickingKey(it)] || { picked: 0, rejected: 0, reasons: new Set() };
+    const locs = it.allocated_locations || [];
+    const base = (showItem, godownCell, rackCell, boxCell) => [
+      String(idx + 1),
+      showItem ? htmlEscape(it.part_no) : "",
+      showItem ? htmlEscape(it.description_1 || "") : "",
+      showItem ? htmlEscape(it.make || "—") : "",
+      godownCell, rackCell, boxCell,
+      showItem ? `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>` : "",
+      showItem ? `<span style="text-align:right;display:block">${htmlEscape(p.picked || "—")}</span>` : "",
+      showItem ? `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>` : "",
+      showItem ? htmlEscape([...p.reasons].join(", ") || "—") : "",
+    ];
+    if (locs.length === 0) {
+      rows.push(base(true, "—", "—", "—"));
+    } else {
+      locs.forEach((loc, li) => {
+        rows.push(base(li === 0, htmlEscape(loc.godown_name || "—"), htmlEscape(loc.rack_no || "—"), htmlEscape(loc.box_no || "—")));
+      });
+    }
+  });
+  const html = buildStandardPrintHtml({
+    docTitle: "Issue Note",
+    docNo: inn.in_no,
+    statusLabel: issueStatusLabel(inn.status),
+    fieldsLeft: [
+      ["Issue No", inn.in_no],
+      ["Issue Date", fmtDate(inn.in_date)],
+      ["Status", issueStatusLabel(inn.status)],
+    ],
+    fieldsRight: [
+      ["Assigned To", inn.assigned_to_name || inn.assigned_to_email || "—"],
+      ["Created By", inn.created_by || "—"],
+      ["Created At", inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"],
+    ],
+    columns: [
+      { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
+      { label: "Godown" }, { label: "Rack" }, { label: "Box" },
+      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Remarks" },
+    ],
+    rows,
+    printedBy: inn.created_by,
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
 function buildPickingEditItems(editing, preparedItems) {
   const preparedByKey = {};
-  (preparedItems || []).forEach((p) => { preparedByKey[pickingKey(p)] = p; });
+  (preparedItems || []).forEach((p) => { preparedByKey[pickingLocKey(p)] = p; });
   const existing = editing?.items || [];
   if (existing.length) {
     return existing.map((it) => {
-      const p = preparedByKey[pickingKey(it)] || {};
+      const p = preparedByKey[pickingLocKey(it)] || {};
       return {
       ...it,
       row_status: editing?.status === "RECORDED" ? "Picked" : "Draft Pick",
-      available_locations: p.available_locations || [],
       pending_qty: p.pending_qty ?? it.pending_qty ?? 0,
       requested_qty: p.requested_qty ?? it.requested_qty ?? 0,
-      already_picked_qty: p.already_picked_qty ?? it.already_picked_qty ?? 0,
+      allocated_qty: p.allocated_qty ?? it.allocated_qty ?? it.quantity ?? 0,
       };
     });
   }
@@ -233,13 +322,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
   };
 
-  const statusLabel = (r) => {
-    if (r.status === "COMPLETED" || r.status === "FULLY_PICKED") return "Completed";
-    if (r.status === "PICKED" || r.status === "PARTIALLY_PICKED") return "Partially Picked";
-    if (r.status === "PICKING_IN_PROGRESS") return "Picking In Progress";
-    if (r.status === "OPEN") return "Open";
-    return "Picking Pending";
-  };
+  const statusLabel = (r) => issueStatusLabel(r.status);
 
   const columns = useMemo(() => [
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.in_date) },
@@ -305,17 +388,17 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           <tbody>
             {filteredRows.map((r, idx) => {
               const totalQty = (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
-              const isFully = r.status === "COMPLETED" || r.status === "FULLY_PICKED";
-              const isPartial = r.status === "PICKING_IN_PROGRESS" || r.status === "PICKED" || r.status === "PARTIALLY_PICKED";
-              const hasPicking = isFully || isPartial;
+              // Editable only until the first quantity is picked/rejected — matches the
+              // backend rule (a picking note with processed qty flips status off Pending).
+              const hasPicking = issueHasProcessed(r.status);
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lock = hasPicking || lockedToOther;
-              const editTitle = hasPicking ? "Cannot edit — picking notes exist"
+              const editTitle = hasPicking ? "Cannot edit — picking has already started"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
-              const deleteTitle = hasPicking ? "Cannot delete — picking notes exist"
+              const deleteTitle = hasPicking ? "Cannot delete — picking has already started"
                 : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
               const label = statusLabel(r);
-              const cls = isFully ? "bg-green-100 text-green-800" : (isPartial ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700");
+              const cls = issueStatusClass(r.status);
               return (
                 <tr key={r.id} data-testid={`in-row-${r.in_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -393,47 +476,83 @@ function IssueNoteDetailDialog({ inn, onClose }) {
 
   return (
     <Dialog open={!!inn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-5xl rounded-sm" data-testid="in-detail-dialog">
+      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="in-detail-dialog">
         {inn && (
           <>
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-black font-mono">{inn.in_no}</DialogTitle>
-            </DialogHeader>
-            <div className="grid grid-cols-2 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Issue Note Date" v={fmtDate(inn.in_date)} />
-              <Detail k="Status" v={inn.status} />
-              <Detail k="Created At" v={new Date(inn.created_at).toLocaleString()} />
-              <div className="col-span-2">
-                <div className="label-sm">Assigned To</div>
-                <div className="mt-1"><AssigneeBadge name={inn.assigned_to_name} email={inn.assigned_to_email} /></div>
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              ISSUE NOTE
+            </div>
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              <div className="space-y-2">
+                <Detail k="ISSUE NOTE DATE" v={fmtDate(inn.in_date)} />
+                <Detail k="ISSUE NOTE NO" v={inn.in_no} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${issueStatusClass(inn.status)}`}>
+                    {issueStatusLabel(inn.status)}
+                  </span>
+                } />
+              </div>
+              <div className="space-y-2">
+                <Detail k="CREATED BY" v={inn.created_by || "—"} />
+                <Detail k="CREATED AT" v={inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO</div>
+                  <div className="mt-1"><AssigneeBadge name={inn.assigned_to_name} email={inn.assigned_to_email} /></div>
+                </div>
               </div>
             </div>
-            <table className="data-table w-full">
-              <thead>
-                <tr><th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>GODOWN</th><th className="text-center">QTY</th></tr>
-              </thead>
-              <tbody>
-                {(inn.items || []).map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="text-slate-700">{it.description_1 || "—"}</td>
-                    <td className="font-mono">{it.selected_godown_name || "—"}</td>
-                    <td className="text-center font-mono font-bold">{it.quantity}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="mt-6">
-              <div className="text-xs font-black uppercase tracking-wider text-slate-600 mb-2">Picking History</div>
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({(inn.items || []).length})</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full">
+                  <thead>
+                    <tr>
+                      <th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+                      <th>GODOWN</th><th>RACK</th><th>BOX</th>
+                      <th className="text-center">QTY</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(inn.items || []).flatMap((it, idx) => {
+                      const locs = it.allocated_locations || [];
+                      if (locs.length === 0) {
+                        return [(
+                          <tr key={`${idx}-none`}>
+                            <td className="font-mono text-slate-500">{idx + 1}</td>
+                            <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                            <td>{it.make}</td>
+                            <td className="text-slate-700">{it.description_1 || "—"}</td>
+                            <td colSpan={3} className="text-slate-400 italic">No stock currently available</td>
+                            <td className="text-center font-mono font-bold">{it.quantity}</td>
+                          </tr>
+                        )];
+                      }
+                      return locs.map((loc, li) => (
+                        <tr key={`${idx}-${li}`}>
+                          <td className="font-mono text-slate-500">{idx + 1}{locs.length > 1 ? `.${li + 1}` : ""}</td>
+                          <td>{li === 0 ? <PartNoLink partNo={it.part_no} make={it.make} /> : ""}</td>
+                          <td>{li === 0 ? it.make : ""}</td>
+                          <td className="text-slate-700">{li === 0 ? (it.description_1 || "—") : ""}</td>
+                          <td className="font-mono">{loc.godown_name || "—"}</td>
+                          <td className="font-mono">{loc.rack_no || "—"}</td>
+                          <td className="font-mono">{loc.box_no || "—"}</td>
+                          <td className="text-center font-mono font-bold">{li === 0 ? it.quantity : loc.quantity}</td>
+                        </tr>
+                      ));
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="mt-6 border-t border-slate-200 pt-4">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Picking History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">ASSIGNED</th><th className="text-center">PICKED</th><th>STATUS</th></tr>
+                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">ASSIGNED</th><th className="text-center">PICKED</th><th className="text-center">REJECTED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.serial || 0) - (b.serial || 0)).map((pn) => {
-                    const completed = pn.status === "COMPLETED" || pn.status === "RECORDED";
+                    const label = pickingNoteStatusLabel(pn.status);
                     const parent = history.find((h) => h.id === pn.parent_picking_note_id);
                     return (
                       <tr key={pn.id}>
@@ -441,19 +560,25 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                         <td className="font-mono">{parent?.pn_no || "—"}</td>
                         <td className="text-center font-mono font-bold">{pickingAssignedQty(pn)}</td>
                         <td className="text-center font-mono font-bold">{pickingPickedQty(pn)}</td>
+                        <td className="text-center font-mono font-bold text-red-700">{pickingRejectedQty(pn) || "—"}</td>
                         <td>
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${completed ? "bg-green-100 text-green-800" : (pn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
-                            {completed ? "Completed" : (pn.status === "PENDING" ? "Pending" : "Draft")}
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${label === "Completed" ? "bg-green-100 text-green-800" : (label === "Pending" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
+                            {label}
                           </span>
                         </td>
                       </tr>
                     );
                   })}
                   {history.length === 0 && (
-                    <tr><td colSpan={5} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
+                    <tr><td colSpan={6} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
                   )}
                 </tbody>
               </table>
+            </div>
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-6">
+              <Button variant="outline" size="sm" className="rounded-sm" onClick={() => printIssueNote(inn, history)} data-testid="in-detail-print">
+                <Printer size={14} weight="bold" className="mr-1.5" /> Print
+              </Button>
             </div>
           </>
         )}
@@ -841,12 +966,6 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   }, [page]);
   useEffect(() => { load(); }, [load, reloadKey]);
 
-  const handleDelete = async (pn) => {
-    if (!window.confirm(`Delete ${pn.pn_no}?`)) return;
-    try { await api.delete(`/picking-notes/${pn.id}`); toast.success(`${pn.pn_no} deleted`); load(); }
-    catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
-  };
-
   const handleRecord = async (pn) => {
     if (!window.confirm(`Record ${pn.pn_no} as Stock Out?\n\n${pn.items.length} OUT transaction(s) will be created.`)) return;
     setRecordingId(pn.id);
@@ -870,7 +989,8 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r),},
     { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r)},
     { key: "picked_qty", label: "PICKED", value: (r) => pickingPickedQty(r)},
-    { key: "status", label: "STATUS", value: (r) => (r.status === "RECORDED" || r.status === "COMPLETED") ? "Completed" : (r.status === "PENDING" ? "Pending" : "Draft") },
+    { key: "rejected_qty", label: "REJECTED", value: (r) => pickingRejectedQty(r)},
+    { key: "status", label: "STATUS", value: (r) => pickingNoteStatusLabel(r.status) },
   ], []);
   const {
     filteredRows, uniqueValues, colFilters, setColFilter, sort, setColumnSort,
@@ -929,6 +1049,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             {filteredRows.map((r, idx) => {
               const totalQty = pickingAssignedQty(r);
               const pickedQty = pickingPickedQty(r);
+              const rejectedQty = pickingRejectedQty(r);
               const recorded = r.status === "RECORDED" || r.status === "COMPLETED";
               const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
@@ -938,8 +1059,6 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               const lock = recorded || lockedToOther;
               const editTitle = recorded ? "Cannot edit — already recorded"
                 : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Picking" : "Edit"));
-              const deleteTitle = recorded ? "Cannot delete — already recorded"
-                : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Delete");
               const recordTitle = recorded ? "Already recorded"
                 : (pending ? "Open Picking and save a draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out"));
               const recordDisabled = lock || pending || recordingId === r.id;
@@ -956,6 +1075,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td className="font-mono text-slate-600">{pickingDisplayCount(r)}</td>
                   <td className="font-mono font-bold text-slate-900">{totalQty}</td>
                   <td className="font-mono font-bold text-slate-900">{pickedQty}</td>
+                  <td className="font-mono font-bold text-red-700">{rejectedQty || "—"}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`pn-status-${r.pn_no}`}>
                       {recorded ? "Completed" : (pending ? "Pending" : "Draft")}
@@ -964,15 +1084,9 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td className="text-left whitespace-nowrap">
                     <button onClick={() => onEdit(r)} disabled={lock}
                       title={editTitle}
-                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
                       data-testid={`pn-edit-${r.pn_no}`}>
                       <Pencil size={14} />
-                    </button>
-                    <button onClick={() => handleDelete(r)} disabled={lock}
-                      title={deleteTitle}
-                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                      data-testid={`pn-delete-${r.pn_no}`}>
-                      <Trash size={14} />
                     </button>
                     <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
                       title={recordTitle}
@@ -986,7 +1100,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending picking notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={12} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending picking notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -1018,46 +1132,62 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
 function PickingNoteDetailDialog({ pn, onClose }) {
   return (
     <Dialog open={!!pn} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-6xl rounded-sm" data-testid="pn-detail-dialog">
+      <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="pn-detail-dialog">
         {pn && (
           <>
-            <DialogHeader>
-              <div className="flex items-center justify-between gap-3">
-                <DialogTitle className="text-2xl font-black font-mono">{pn.pn_no}</DialogTitle>
-                <Button onClick={() => printPickingNote(pn)} variant="outline" size="sm" className="rounded-sm" data-testid="pn-print-button">
-                  <FileText size={14} weight="bold" className="mr-2" /> Print
-                </Button>
+            <div className="text-center text-xl font-black tracking-widest uppercase pt-1 pb-2 border-b border-slate-200">
+              PICKING NOTE
+            </div>
+            <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
+              <div className="space-y-2">
+                <Detail k="PICKING NOTE DATE" v={fmtDate(pn.pn_date)} />
+                <Detail k="PICKING NOTE NO" v={pn.pn_no} />
+                <Detail k="ISSUE NOTE NO" v={pn.issue_note_no || "—"} />
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${pickingNoteStatusLabel(pn.status) === "Completed" ? "bg-green-100 text-green-800" : (pickingNoteStatusLabel(pn.status) === "Pending" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
+                    {pickingNoteStatusLabel(pn.status)}
+                  </span>
+                } />
               </div>
-            </DialogHeader>
-            <div className="grid grid-cols-3 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
-              <Detail k="Picking Note Date" v={fmtDate(pn.pn_date)} />
-              <Detail k="Issue Note No" v={pn.issue_note_no || "—"} />
-              <Detail k="Status" v={pn.status} />
-              <Detail k="Created By" v={pn.created_by || "—"} />
-              <Detail k="Created At" v={new Date(pn.created_at).toLocaleString()} />
-              <div>
-                <div className="label-sm">Assigned To (from Issue Note)</div>
-                <div className="mt-1"><AssigneeBadge name={pn.parent_assigned_to_name} email={pn.parent_assigned_to_email} /></div>
+              <div className="space-y-2">
+                <Detail k="CREATED BY (PICKER)" v={pn.created_by || "—"} />
+                <Detail k="CREATED AT" v={new Date(pn.created_at).toLocaleString()} />
+                <div>
+                  <div className="label-sm">ASSIGNED TO (FROM ISSUE NOTE)</div>
+                  <div className="mt-1"><AssigneeBadge name={pn.parent_assigned_to_name} email={pn.parent_assigned_to_email} /></div>
+                </div>
               </div>
             </div>
-            <table className="data-table w-full text-xs">
-              <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
-              <tbody>
-                {pickingDisplayItems(pn).map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                    <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
-                    <td className="text-center font-mono font-bold">{it.quantity}</td>
-                    <td className="font-mono">{it.godown_name || "—"}</td>
-                    <td className="font-mono">{it.rack_no || "—"}</td>
-                    <td className="font-mono">{it.box_no || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="mt-2">
+              <div className="label-sm mb-2">Items ({pickingDisplayItems(pn).length})</div>
+              <div className="overflow-x-auto">
+                <table className="data-table w-full text-xs">
+                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">PICKED QTY</th><th className="text-center">REJECTED QTY</th><th>REASON</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
+                  <tbody>
+                    {pickingDisplayItems(pn).map((it, idx) => (
+                      <tr key={idx}>
+                        <td className="font-mono text-slate-500">{idx + 1}</td>
+                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                        <td>{it.make}</td>
+                        <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
+                        <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
+                        <td className="text-center font-mono font-bold">{it.quantity}</td>
+                        <td className="text-center font-mono font-bold text-red-700">{it.rejected_qty || "—"}</td>
+                        <td className="font-mono text-slate-600">{it.rejection_reason || "—"}</td>
+                        <td className="font-mono">{it.godown_name || "—"}</td>
+                        <td className="font-mono">{it.rack_no || "—"}</td>
+                        <td className="font-mono">{it.box_no || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 pt-4 border-t border-slate-200 mt-6">
+              <Button onClick={() => printPickingNote(pn)} variant="outline" size="sm" className="rounded-sm" data-testid="pn-print-button">
+                <Printer size={14} weight="bold" className="mr-1.5" /> Print
+              </Button>
+            </div>
           </>
         )}
       </DialogContent>
@@ -1075,12 +1205,6 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
 
-  const [godowns, setGodowns] = useState([]);
-  const [racksByGodown, setRacksByGodown] = useState({});
-  const [boxesByRack, setBoxesByRack] = useState({});
-
-  useEffect(() => { api.get("/godowns").then((r) => setGodowns(r.data)); }, []);
-
   useEffect(() => {
     if (isEdit) {
       setPnNo(editing.pn_no);
@@ -1091,31 +1215,15 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       api.get(`/picking-notes/prepare/${editing.issue_note_id}`, { params: { exclude_pn_id: editing.id } })
         .then((r) => {
           setItems(buildPickingEditItems(editing, r.data.items || []));
-        }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, available_locations: [], pending_qty: 0, requested_qty: 0 }))));
+        }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0 }))));
     } else {
       api.get("/picking-notes/next-no").then((r) => { setPnNo(r.data.next_pn_no); setPnDate(r.data.pn_date); })
         .catch(() => toast.error("Could not preview picking-note number"));
-      api.get("/issue-notes", { params: { not_status: "FULLY_PICKED,COMPLETED", page_size: 100 } })
+      api.get("/issue-notes", { params: { not_status: "COMPLETE", page_size: 100 } })
         .then((r) => setPendingIns(r.data || []));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEdit, editing]);
-
-  const ensureRacks = useCallback(async (gid) => {
-    if (!gid || racksByGodown[gid]) return;
-    const { data } = await api.get("/racks", { params: { godown_id: gid } });
-    setRacksByGodown((p) => ({ ...p, [gid]: data }));
-  }, [racksByGodown]);
-  const ensureBoxes = useCallback(async (rid) => {
-    if (!rid || boxesByRack[rid]) return;
-    const { data } = await api.get("/boxes", { params: { rack_id: rid } });
-    setBoxesByRack((p) => ({ ...p, [rid]: data }));
-  }, [boxesByRack]);
-
-  useEffect(() => {
-    items.forEach((it) => { if (it.godown_id) ensureRacks(it.godown_id); if (it.rack_id) ensureBoxes(it.rack_id); });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items.length]);
 
   const handleInChange = async (id) => {
     setSelectedInId(id);
@@ -1124,91 +1232,31 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     setAssignedToName(inn?.assigned_to_name || "");
     try {
       const { data } = await api.get(`/picking-notes/prepare/${id}`);
-      setItems(data.items || []);
-      (data.items || []).forEach((it) => { if (it.godown_id) ensureRacks(it.godown_id); if (it.rack_id) ensureBoxes(it.rack_id); });
+      setItems((data.items || []).map((it) => ({ ...it, row_status: "Assigned" })));
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not prepare items"); }
   };
 
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
-  const onGodownChange = async (i, gid) => {
-    const g = godowns.find((x) => x.id === gid);
-    updateItem(i, { godown_id: gid, godown_name: g?.godown_name || "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "" });
-    await ensureRacks(gid);
-  };
-  const onRackChange = async (i, rid) => {
-    const racks = racksByGodown[items[i].godown_id] || [];
-    const rk = racks.find((x) => x.id === rid);
-    updateItem(i, { rack_id: rid, rack_no: rk?.rack_no || "", box_id: "", box_no: "", box_category: "" });
-    await ensureBoxes(rid);
-  };
-  const onBoxChange = (i, bid) => {
-    const boxes = boxesByRack[items[i].rack_id] || [];
-    const bx = boxes.find((x) => x.id === bid);
-    updateItem(i, { box_id: bid, box_no: bx?.box_no || "", box_category: bx?.box_category || "" });
-  };
-
-  const applyExistingLocation = async (i, loc) => {
-    await ensureRacks(loc.godown_id);
-    await ensureBoxes(loc.rack_id);
-    updateItem(i, {
-      godown_id: loc.godown_id, godown_name: loc.godown_name,
-      rack_id: loc.rack_id, rack_no: loc.rack_no,
-      box_id: loc.box_id, box_no: loc.box_no, box_category: loc.box_category || "",
-    });
-  };
-
-  const splitRow = (i) => {
-    setItems((prev) => {
-      const src = prev[i];
-      const copy = { ...src, quantity: 0, godown_id: "", godown_name: "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "" };
-      const out = [...prev];
-      out.splice(i + 1, 0, copy);
-      return out;
-    });
-  };
-  const removeRow = (i) => setItems((p) => p.filter((_, idx) => idx !== i));
-
-  const allocatedByKey = useMemo(() => {
-    const m = {};
-    items.forEach((r) => {
-      if (isDisplayOnlyRemainingRow(r)) return;
-      const k = `${r.part_no}||${r.make}`;
-      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
-    });
-    return m;
-  }, [items]);
-
+  // Picking locations are pre-authorized by the Issue Note (see requirement: "Picking
+  // Locations Must Match the Issued Locations") — the operator confirms/adjusts
+  // quantities only, never chooses a different godown/rack/box.
   const save = async () => {
     if (!selectedInId) { toast.error("Select an Issue Note"); return; }
-    const pickRows = items.filter((it) => !isDisplayOnlyRemainingRow(it));
-    if (pickRows.length === 0) { toast.error("No picked allocations to save"); return; }
+    if (items.length === 0) { toast.error("No items to pick"); return; }
+    const pickRows = items.filter((it) => (parseInt(it.quantity) || 0) > 0 || (parseInt(it.rejected_qty) || 0) > 0);
+    if (pickRows.length === 0) { toast.error("Confirm at least one Picked Qty or Rejected Qty"); return; }
     for (let i = 0; i < pickRows.length; i++) {
       const rowNo = items.indexOf(pickRows[i]) + 1;
       const it = pickRows[i];
-      if (!it.godown_id || !it.rack_id) { toast.error(`Row ${rowNo}: pick Godown / Rack`); return; }
-      const hasBoxes = (boxesByRack[it.rack_id] || []).length > 0;
-      if (hasBoxes && !it.box_id) { toast.error(`Row ${rowNo}: pick Box`); return; }
-      const q = parseInt(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${rowNo}: quantity must be > 0`); return; }
-      // Per-location available check (client-side)
-      const loc = (it.available_locations || []).find((L) => (L.box_id || "") === (it.box_id || ""));
-      if (loc && q > (loc.available_qty ?? loc.current_qty) + 1e-6) {
-        toast.error(`Row ${rowNo}: only ${loc.available_qty ?? loc.current_qty} available at ${loc.godown_name}/${loc.rack_no}/${loc.box_no || "—"}`);
-        return;
-      }
-    }
-    // Cumulative-vs-pending check
-    const pendingMap = {};
-    pickRows.forEach((r) => {
-      const k = `${r.part_no}||${r.make}`;
-      if (pendingMap[k] === undefined && r.pending_qty !== undefined) pendingMap[k] = r.pending_qty;
-    });
-    for (const [k, allocated] of Object.entries(allocatedByKey)) {
-      const pending = pendingMap[k];
-      if (pending !== undefined && allocated > pending + 1e-6) {
-        const [p, m] = k.split("||");
-        toast.error(`${p} / ${m}: allocated ${allocated} exceeds pending ${pending}`);
+      const q = parseInt(it.quantity) || 0;
+      const rejected = parseInt(it.rejected_qty) || 0;
+      const allocated = it.allocated_qty ?? it.quantity ?? 0;
+      if (q < 0 || rejected < 0) { toast.error(`Row ${rowNo}: quantities cannot be negative`); return; }
+      if (rejected > 0 && !(it.rejection_reason || "").trim()) { toast.error(`Row ${rowNo}: select a Rejection Reason`); return; }
+      if (q > 0 && !it.godown_id) { toast.error(`Row ${rowNo}: no stock location available here — use Rejected Qty instead`); return; }
+      if (q + rejected > allocated + 1e-6) {
+        toast.error(`Row ${rowNo}: Picked (${q}) + Rejected (${rejected}) exceeds the ${allocated} authorized at this location`);
         return;
       }
     }
@@ -1218,14 +1266,16 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       const payload = {
         issue_note_id: selectedInId,
           items: pickRows.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity),
+          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity) || 0,
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
           item_category: it.item_category || "",
-          godown_id: it.godown_id, godown_name: it.godown_name,
-          rack_id: it.rack_id, rack_no: it.rack_no,
-          box_id: it.box_id, box_no: it.box_no, box_category: it.box_category || "",
+          godown_id: it.godown_id || "", godown_name: it.godown_name || "",
+          rack_id: it.rack_id || "", rack_no: it.rack_no || "",
+          box_id: it.box_id || "", box_no: it.box_no || "", box_category: it.box_category || "",
+          rejected_qty: parseInt(it.rejected_qty) || 0,
+          rejection_reason: it.rejection_reason || "",
         })),
       };
       const { data } = isEdit
@@ -1280,6 +1330,10 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
 
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+          <div className="px-4 pt-3 text-xs text-slate-500">
+            Locations are pre-authorized by the Issue Note — confirm or adjust the Picked / Rejected quantity for
+            each. Picking from a different location isn't available here.
+          </div>
           <table className="data-table w-full text-xs">
             <thead>
               <tr>
@@ -1289,105 +1343,71 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 <th>MODEL</th>
                 <th>DESCRIPTION</th>
                 <th>CATEGORY</th>
-                <th>STATUS</th>
-                <th className="text-center">QTY</th>
-                <th className="min-w-[140px]">GODOWN *</th>
-                <th className="min-w-[120px]">RACK *</th>
-                <th className="min-w-[120px]">BOX *</th>
-                <th>AVAILABLE LOCATIONS</th>
-                <th className="w-20"></th>
+                <th>AUTHORIZED GODOWN</th>
+                <th>AUTHORIZED RACK</th>
+                <th>AUTHORIZED BOX</th>
+                <th className="text-center">ALLOCATED QTY</th>
+                <th className="text-center">PICKED QTY</th>
+                <th className="text-center min-w-[90px]">REJECTED QTY</th>
+                <th className="min-w-[140px]">REASON</th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const racks = racksByGodown[it.godown_id] || [];
-                const boxes = boxesByRack[it.rack_id] || [];
-                const key = `${it.part_no}||${it.make}`;
-                const allocated = allocatedByKey[key] || 0;
-                const pending = it.pending_qty;
-                const requested = it.requested_qty;
-                const overAllocated = pending !== undefined && allocated > pending + 1e-6;
-                const currentLoc = (it.available_locations || []).find((L) => (L.box_id || "") === (it.box_id || ""));
-                const availAtCurrent = currentLoc ? (currentLoc.available_qty ?? currentLoc.current_qty) : null;
-                const overAtLoc = availAtCurrent !== null && (parseInt(it.quantity) || 0) > availAtCurrent + 1e-6;
+                const allocated = it.allocated_qty ?? it.quantity ?? 0;
+                const q = parseInt(it.quantity) || 0;
+                const rejected = parseInt(it.rejected_qty) || 0;
+                const overAllocated = q + rejected > allocated + 1e-6;
+                const noLocation = !it.godown_id;
                 return (
-                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={(overAllocated || overAtLoc) ? "bg-red-50" : ""}>
+                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : (noLocation ? "bg-amber-50" : "")}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
-                    <td className="font-mono text-[11px] text-slate-600">{it.row_status || "Draft Pick"}</td>
+                    {noLocation ? (
+                      <td colSpan={3} className="text-[11px] text-amber-700 italic">
+                        No stock currently available{it.unallocated_shortfall ? ` (short ${it.unallocated_shortfall})` : ""} — reject this line
+                      </td>
+                    ) : (
+                      <>
+                        <td className="font-mono">{it.godown_name}</td>
+                        <td className="font-mono">{it.rack_no}</td>
+                        <td className="font-mono">{it.box_no || "—"}</td>
+                      </>
+                    )}
+                    <td className="text-center font-mono font-bold text-slate-700">{allocated}</td>
                     <td className="text-center">
-                      <Input type="number" min="1" step="1" value={it.quantity}
+                      <Input type="number" min="0" step="1" value={it.quantity}
+                        disabled={noLocation}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated || overAtLoc ? "border-red-400" : ""}`}
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`}
                         data-testid={`pn-qty-${idx}`} />
-                      {pending !== undefined && (
-                        <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`}
-                          data-testid={`pn-pending-hint-${idx}`}>
-                          {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${requested}`}
-                        </div>
-                      )}
-                      {availAtCurrent !== null && (
-                        <div className={`text-[10px] ${overAtLoc ? "text-red-600 font-bold" : "text-slate-400"}`}>
-                          Avail {availAtCurrent} at loc
+                      {overAllocated && (
+                        <div className="text-[10px] mt-0.5 text-red-600 font-bold" data-testid={`pn-pending-hint-${idx}`}>
+                          Over {q + rejected}/{allocated}
                         </div>
                       )}
                     </td>
-                    <td>
-                      <Select value={it.godown_id || undefined} onValueChange={(v) => onGodownChange(idx, v)}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`pn-godown-${idx}`}><SelectValue placeholder="Godown" /></SelectTrigger>
-                        <SelectContent>{godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}</SelectContent>
-                      </Select>
+                    <td className="text-center">
+                      <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
+                        onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
+                        placeholder="0"
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`}
+                        data-testid={`pn-rejected-qty-${idx}`} />
                     </td>
                     <td>
-                      <Select value={it.rack_id || undefined} onValueChange={(v) => onRackChange(idx, v)} disabled={!it.godown_id}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`pn-rack-${idx}`}><SelectValue placeholder="Rack" /></SelectTrigger>
-                        <SelectContent>{racks.map((r) => <SelectItem key={r.id} value={r.id}>{r.rack_no}</SelectItem>)}</SelectContent>
-                      </Select>
-                    </td>
-                    <td>
-                      <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id || boxes.length === 0}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`pn-box-${idx}`}>
-                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes — skip" : "Box")} />
+                      <Select value={it.rejection_reason || undefined} onValueChange={(v) => updateItem(idx, { rejection_reason: v })}
+                        disabled={!(parseInt(it.rejected_qty) > 0)}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`pn-reject-reason-${idx}`}>
+                          <SelectValue placeholder={parseInt(it.rejected_qty) > 0 ? "Select reason" : "—"} />
                         </SelectTrigger>
-                        <SelectContent>{boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}</SelectContent>
+                        <SelectContent>
+                          {REJECTION_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                        </SelectContent>
                       </Select>
-                    </td>
-                    <td>
-                      {(it.available_locations || []).length === 0 ? (
-                        <span className="text-[11px] text-red-600 italic">No stock available</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1 max-w-[260px]">
-                          {(it.available_locations || []).map((loc, k) => {
-                            const isCurrent = (loc.box_id || "") === (it.box_id || "") && loc.rack_id === it.rack_id;
-                            const avail = loc.available_qty ?? loc.current_qty;
-                            return (
-                              <button key={k} onClick={() => applyExistingLocation(idx, loc)}
-                                disabled={avail <= 0}
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded-sm border ${isCurrent ? "bg-blue-50 border-blue-300 text-blue-800" : (avail <= 0 ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed" : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100")}`}
-                                title={`${loc.godown_name}/${loc.rack_no}/${loc.box_no || '—'} — ${avail} available`}
-                                data-testid={`pn-existing-loc-${idx}-${k}`}>
-                                <MapPin size={10} weight="bold" className="inline mr-0.5" />
-                                {loc.godown_name}/{loc.rack_no}/{loc.box_no || "—"} ({avail})
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap">
-                      <button onClick={() => splitRow(idx)} className="p-1 hover:bg-blue-50 text-blue-700 rounded-sm mr-1"
-                        title="Split into another row" data-testid={`pn-split-${idx}`}>
-                        <ArrowsSplit size={14} weight="bold" />
-                      </button>
-                      <button onClick={() => removeRow(idx)} disabled={items.length === 1}
-                        className={`p-1 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                        data-testid={`pn-remove-${idx}`}>
-                        <Trash size={14} />
-                      </button>
                     </td>
                   </tr>
                 );

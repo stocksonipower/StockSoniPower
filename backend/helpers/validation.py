@@ -189,9 +189,19 @@ def _validate_picking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
-        if not (it.godown_id or "").strip() or not (it.rack_id or "").strip():
+        qty = it.quantity or 0
+        rejected = getattr(it, "rejected_qty", 0) or 0
+        if qty < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Picked Qty cannot be negative")
+        if rejected < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejected Qty cannot be negative")
+        if qty <= 0 and rejected <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Picked Qty or Rejected Qty must be > 0")
+        if rejected > 0 and not (getattr(it, "rejection_reason", "") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejection reason is required when Rejected Qty > 0")
+        # A location is only required for the physically-picked portion — a
+        # fully-rejected row (qty=0, e.g. "Not Available") may have no location.
+        if qty > 0 and (not (it.godown_id or "").strip() or not (it.rack_id or "").strip()):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
 
 
@@ -202,36 +212,54 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
     allowed_godowns = {}
-    base_items = assigned_items if assigned_items is not None else inn.get("items", [])
-    for it in base_items:
+    authorized_locs = {}  # (part,make) -> set of (godown_id, rack_id, box_id) it may be picked from
+    for it in (assigned_items if assigned_items is not None else inn.get("items", [])):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
         gid = it.get("selected_godown_id") or ""
         if gid:
             allowed_godowns.setdefault(k, set()).add(gid)
+        for loc in it.get("allocated_locations") or []:
+            authorized_locs.setdefault(k, set()).add(
+                (loc.get("godown_id") or "", loc.get("rack_id") or "", loc.get("box_id") or "")
+            )
     other_sums = {} if assigned_items is not None else await _pick_aggregate_other(in_id, exclude_pn_id)
 
     new_sums = {}
     new_loc_sums = {}
     for it in items:
         k = _key(it.part_no, it.make)
-        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
-        loc_key = f"{it.part_no}||{it.make}||{it.godown_id or ''}||{it.rack_id or ''}||{it.box_id or ''}"
-        new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
+        rejected = getattr(it, "rejected_qty", 0) or 0
+        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0) + rejected
+        if (it.quantity or 0) > 0:
+            loc_key = f"{it.part_no}||{it.make}||{it.godown_id or ''}||{it.rack_id or ''}||{it.box_id or ''}"
+            new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
         allowed = allowed_godowns.get(k)
-        if allowed and it.godown_id not in allowed:
+        if allowed and (it.quantity or 0) > 0 and it.godown_id not in allowed:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make}: selected godown does not match the issue note")
-    # 1. cumulative qty
+        # Picking is restricted to the locations the Issue Note pre-allocated (see
+        # _allocate_locations_for). Only enforced when this line actually carries
+        # allocation data — legacy Issue Notes created before this feature exists don't,
+        # and must not be retroactively blocked.
+        auth = authorized_locs.get(k)
+        if auth and (it.godown_id or "").strip():
+            loc_tuple = (it.godown_id or "", it.rack_id or "", it.box_id or "")
+            if loc_tuple not in auth:
+                raise HTTPException(status_code=400, detail=(
+                    f"{it.part_no} / {it.make}: picking from {it.godown_name or '—'}/{it.rack_no or '—'}/{it.box_no or '—'} "
+                    f"is not authorized — the issue note allocates this item to a different location"
+                ))
+    # 1. cumulative qty — picked + rejected together cannot exceed what was requested
     for k, new_q in new_sums.items():
         recv = requested.get(k, 0)
         used = other_sums.get(k, 0)
         if used + new_q > recv + 1e-6:
             part, make = k.split("||", 1)
             raise HTTPException(status_code=400, detail=(
-                f"Quantity exceeds issue note for {part} / {make}: "
-                f"requested {recv}, already picked elsewhere {used}, this note {new_q} "
+                f"Picked + Rejected exceeds issue note for {part} / {make}: "
+                f"requested {recv}, already accounted for elsewhere {used}, this note {new_q} "
                 f"(total {used + new_q} > {recv})"
             ))
     # 2. per-location stock availability. Draft picking does not reserve stock.
@@ -367,30 +395,45 @@ async def _validate_transfer_note_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
-        if not (it.src_godown_id or "").strip() or not (it.src_rack_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
-        if not (it.dest_godown_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is required")
-        if it.src_godown_id == it.dest_godown_id:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination godown must differ")
+        qty = it.quantity or 0
+        rejected = getattr(it, "rejected_qty", 0) or 0
+        if qty < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Transferred Qty cannot be negative")
+        if rejected < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejected Qty cannot be negative")
+        if qty <= 0 and rejected <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Transferred Qty or Rejected Qty must be > 0")
+        if rejected > 0 and not (getattr(it, "rejection_reason", "") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejection reason is required when Rejected Qty > 0")
+        # Source/destination locations are only required for the portion that
+        # actually moves — a fully-rejected row (qty=0, e.g. "Rack Empty") may
+        # carry just the source rack that was checked, or no location at all.
+        if qty > 0:
+            if not (it.src_godown_id or "").strip() or not (it.src_rack_id or "").strip():
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
+            if not (it.dest_godown_id or "").strip():
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is required")
+            if it.src_godown_id == it.dest_godown_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination godown must differ")
         # Existence + referential-integrity checks (rack must belong to its stated
         # godown, box must belong to its stated rack) — rejects stale/fabricated
         # location ids, e.g. a godown/rack/box deleted after the form was loaded.
-        if it.src_godown_id not in valid_godowns:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown is invalid or no longer exists")
-        if it.src_rack_id not in racks_by_id:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack is invalid or no longer exists")
-        if racks_by_id[it.src_rack_id] != it.src_godown_id:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack does not belong to the selected Source Godown")
+        if (it.src_godown_id or "").strip():
+            if it.src_godown_id not in valid_godowns:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown is invalid or no longer exists")
+        if (it.src_rack_id or "").strip():
+            if it.src_rack_id not in racks_by_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack is invalid or no longer exists")
+            if (it.src_godown_id or "").strip() and racks_by_id[it.src_rack_id] != it.src_godown_id:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Rack does not belong to the selected Source Godown")
         if (it.src_box_id or "").strip():
             if it.src_box_id not in boxes_by_id:
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is invalid or no longer exists")
             if boxes_by_id[it.src_box_id] != it.src_rack_id:
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box does not belong to the selected Source Rack")
-        if it.dest_godown_id not in valid_godowns:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is invalid or no longer exists")
+        if (it.dest_godown_id or "").strip():
+            if it.dest_godown_id not in valid_godowns:
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is invalid or no longer exists")
         if (it.dest_rack_id or "").strip():
             if it.dest_rack_id not in racks_by_id:
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Rack is invalid or no longer exists")
@@ -420,21 +463,23 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     new_loc_sums = {}
     for it in items:
         k = _key(it.part_no, it.make)
-        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0)
-        loc_key = f"{it.part_no}||{it.make}||{it.src_godown_id or ''}||{it.src_rack_id or ''}||{it.src_box_id or ''}"
-        new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
+        rejected = getattr(it, "rejected_qty", 0) or 0
+        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0) + rejected
+        if (it.quantity or 0) > 0:
+            loc_key = f"{it.part_no}||{it.make}||{it.src_godown_id or ''}||{it.src_rack_id or ''}||{it.src_box_id or ''}"
+            new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
 
-    # Cumulative qty cap vs request
+    # Cumulative qty cap vs request — transferred + rejected together cannot exceed requested
     for k, new_q in new_sums.items():
         recv = requested.get(k, 0)
         used = other_sums.get(k, 0)
         if used + new_q > recv + 1e-6:
             part, make = k.split("||", 1)
             raise HTTPException(status_code=400, detail=(
-                f"Quantity exceeds transfer request for {part} / {make}: "
-                f"requested {recv}, already transferred elsewhere {used}, this note {new_q} "
+                f"Transferred + Rejected exceeds transfer request for {part} / {make}: "
+                f"requested {recv}, already accounted for elsewhere {used}, this note {new_q} "
                 f"(total {used + new_q} > {recv})"
             ))
 

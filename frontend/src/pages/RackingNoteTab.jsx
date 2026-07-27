@@ -63,9 +63,10 @@ function escapeHtml(s) {
 
 /* --------------------------------------------------------------
    Export / Print — a physical pick-slip: shows the part's existing
-   rack/box elsewhere in the warehouse (for context) plus BLANK "New
-   Rack" / "New Box" fields the warehouse worker fills in by hand
-   while walking the note to the shelf.
+   rack/box elsewhere in the warehouse (current inventory, for context —
+   every location on its own row, never merged) alongside whatever
+   destination has already been assigned in this racking note (or a
+   blank hand-fill line if the note hasn't been allocated yet).
    -------------------------------------------------------------- */
 async function exportRackingNote(rkn) {
   if (!rkn) return;
@@ -81,24 +82,41 @@ async function exportRackingNote(rkn) {
     // Non-fatal — print still works with whatever's on the note itself.
   }
 
-  const rows = (rkn.items || []).map((it, idx) => {
+  const rows = [];
+  (rkn.items || []).forEach((it, idx) => {
     const key = `${it.part_no}||${it.make}`;
     const locs = existingByKey[key] || [];
-    const existing = locs.length === 0
-      ? "–"
-      : locs.map((l) => `${escapeHtml(l.godown_name || "—")}/${escapeHtml(l.rack_no || "—")}/${escapeHtml(l.box_no || "—")} (${l.current_qty})`).join("<br/>");
-    return `<tr>
-      <td>${idx + 1}</td>
+    const hasDestination = !!(it.godown_name || it.rack_no || it.box_no);
+    const destCell = hasDestination
+      ? `<td>${escapeHtml(it.godown_name || "—")}</td><td>${escapeHtml(it.rack_no || "—")}</td><td>${escapeHtml(it.box_no || "—")}</td>`
+      : `<td class="blank-cell"></td><td class="blank-cell"></td><td class="blank-cell"></td>`;
+    const baseCells = (showItem) => `
       <td>${escapeHtml(it.model || "—")}</td>
-      <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
-      <td>${escapeHtml(it.description_1 || "—")}</td>
-      <td>${escapeHtml(it.make || "")}</td>
-      <td style="text-align:right">${it.quantity ?? "—"}</td>
-      <td>${existing}</td>
-      <td class="blank-cell"></td>
-      <td class="blank-cell"></td>
-    </tr>`;
-  }).join("");
+      <td>${showItem ? `<strong>${escapeHtml(it.part_no || "")}</strong>` : ""}</td>
+      <td>${showItem ? escapeHtml(it.description_1 || "—") : ""}</td>
+      <td>${showItem ? escapeHtml(it.make || "") : ""}</td>
+      <td style="text-align:right">${showItem ? (it.quantity ?? "—") : ""}</td>`;
+    if (locs.length === 0) {
+      rows.push(`<tr>
+        <td>${idx + 1}</td>
+        ${baseCells(true)}
+        <td colspan="3" style="font-style:italic;color:#94a3b8">No existing stock at any location</td>
+        ${destCell}
+      </tr>`);
+    } else {
+      locs.forEach((l, li) => {
+        rows.push(`<tr>
+          <td>${idx + 1}${locs.length > 1 ? `.${li + 1}` : ""}</td>
+          ${baseCells(li === 0)}
+          <td>${escapeHtml(l.godown_name || "—")}</td>
+          <td>${escapeHtml(l.rack_no || "—")}</td>
+          <td>${escapeHtml(l.box_no || "—")}</td>
+          <td style="text-align:right">${l.current_qty}</td>
+          ${li === 0 ? destCell : `<td class="blank-cell"></td><td class="blank-cell"></td><td class="blank-cell"></td>`}
+        </tr>`);
+      });
+    }
+  });
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
@@ -113,7 +131,7 @@ async function exportRackingNote(rkn) {
   table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
   th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
   td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; vertical-align: top; color: #0f172a; }
-  .blank-cell { min-width: 90px; border-left: 1px dashed #94a3b8; background: repeating-linear-gradient(0deg, transparent, transparent 17px, #e2e8f0 18px); }
+  .blank-cell { min-width: 70px; border-left: 1px dashed #94a3b8; background: repeating-linear-gradient(0deg, transparent, transparent 17px, #e2e8f0 18px); }
   .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
   @media print { body { padding: 12mm; } }
 </style></head>
@@ -131,11 +149,11 @@ async function exportRackingNote(rkn) {
     <thead><tr>
       <th>Sl</th><th>Model</th><th>Part No</th><th>Description</th><th>Make</th>
       <th style="text-align:right">Qty</th>
-      <th>Existing Rack / Box</th>
-      <th>New Rack</th>
-      <th>New Box</th>
+      <th>Existing Godown</th><th>Existing Rack</th><th>Existing Box</th>
+      <th style="text-align:right">Existing Qty</th>
+      <th>New Godown</th><th>New Rack</th><th>New Box</th>
     </tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows.join("")}</tbody>
   </table>
   <div class="footer">
     Printed: ${escapeHtml(new Date().toLocaleString())} &nbsp;·&nbsp; Printed by: ${escapeHtml(rkn.created_by || "—")}
@@ -633,7 +651,6 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
   const [items, setItems] = useState([]);
   const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
-  const [savingStep, setSavingStep] = useState(""); // "" | "saving" | "recording" — drives the loader label
 
   // Cascading dropdown caches
   const [godowns, setGodowns] = useState([]);
@@ -808,13 +825,11 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     return map;
   }, [items]);
 
-  // Save and Record Stock In are the same user action: filling in the rack/box and
-  // clicking the button both finalizes the note AND moves stock in one step — there
-  // is no separate "Draft, then go back and record later" flow for a note the user is
-  // actively filling in here. (Racking Notes the system auto-creates elsewhere in the
-  // workflow still land as DRAFT until an operator opens/completes them the same way,
-  // or uses the list view's "Record Stock In" action as a fallback if this step fails
-  // partway — e.g. a concurrent recording conflict.)
+  // The edit page only saves rack allocations. Recording Stock In is a separate,
+  // deliberate action available exclusively from the main Racking list — this keeps
+  // "editing" and "final inventory posting" as two distinct steps rather than one
+  // combined action, so a user reviewing racking before posting can't accidentally
+  // move stock while just adjusting a rack/box.
   const save = async () => {
     if (!selectedSourceKey) { toast.error("Select a racking source (RN / SRN / ERN)"); return; }
     const [sourceType, sourceId] = selectedSourceKey.split(":");
@@ -848,7 +863,6 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       }
     }
     setSaving(true);
-    setSavingStep("saving");
     try {
       const payload = {
         source_type: sourceType,
@@ -875,30 +889,13 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       if (data.status === "RECORDED") {
         // Already recorded (e.g. idempotent replay of an earlier successful submit).
         toast.success(`Racking Note ${data.rkn_no} — Stock In already recorded`);
-        onSaved();
-        return;
-      }
-
-      setSavingStep("recording");
-      try {
-        const rec = await api.post(`/racking-notes/${data.id}/record`);
-        const autoRkn = rec.headers?.["x-auto-rkn-no"] || rec.data?.auto_rkn_no;
-        toast.success(
-          `Racking Note ${data.rkn_no} saved — Stock In recorded (${rec.data?.transactions_created ?? items.length} item(s))`
-          + (autoRkn ? ` · ${autoRkn} auto-created for remaining qty` : "")
-        );
-      } catch (recErr) {
-        // The note itself is safely saved even if the record step failed (e.g. a
-        // concurrent recording conflict) — tell the user exactly how to finish.
-        toast.error(
-          (formatApiError(recErr.response?.data?.detail) || "Could not record Stock In")
-          + ` — ${data.rkn_no} is saved; use "Record Stock In" from the list to finish.`
-        );
+      } else {
+        toast.success(`Racking Note ${data.rkn_no} saved. Use "Record Stock In" from the list to post it to inventory.`);
       }
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
-    } finally { setSaving(false); setSavingStep(""); }
+    } finally { setSaving(false); }
   };
 
   return (
@@ -1114,7 +1111,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 {saving
                   ? <CircleNotch size={14} weight="bold" className="mr-2 animate-spin" />
                   : <FloppyDisk size={14} weight="bold" className="mr-2" />}
-                {savingStep === "recording" ? "Recording Stock In…" : (saving ? "Saving…" : "Save & Record Stock In")}
+                {saving ? "Saving…" : "Save"}
               </Button>
             </div>
           </div>

@@ -296,8 +296,20 @@ async def list_racks(godown_id: Optional[str] = None, user=Depends(get_current_u
     query = {"godown_id": godown_id} if godown_id else {}
     racks = await db.racks.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
     used = set(await db.transactions.distinct("rack_id"))
+    # box_count is the live, authoritative count of actual Box documents for this rack —
+    # `total_boxes` is a stored value set at rack creation/edit time and does not update
+    # when boxes are individually created/deleted, so it drifts from reality.
+    box_counts = {}
+    if racks:
+        rack_ids = [r["id"] for r in racks]
+        async for row in db.boxes.aggregate([
+            {"$match": {"rack_id": {"$in": rack_ids}}},
+            {"$group": {"_id": "$rack_id", "count": {"$sum": 1}}},
+        ]):
+            box_counts[row["_id"]] = row["count"]
     for r in racks:
         r["in_use"] = r["id"] in used
+        r["box_count"] = box_counts.get(r["id"], 0)
     return racks
 
 

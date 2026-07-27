@@ -13,22 +13,14 @@ from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _
 from helpers.validation import _validate_transfer_request_items, _validate_transfer_request_qty, _validate_transfer_note_items, _validate_transfer_note_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
 from services.locking import location_locks
+from helpers.audit import _write_audit_log
 
 router = APIRouter()
 
 
 async def _audit_transfer(action: str, user: dict, ref_collection: str, ref_id: str, old=None, new=None):
-    await db.inventory_audit_logs.insert_one({
-        "id": str(uuid.uuid4()),
-        "module": "stock_transfer",
-        "action": action,
-        "ref_collection": ref_collection,
-        "ref_id": ref_id,
-        "old_value": old,
-        "new_value": new,
-        "created_at": now_iso(),
-        "created_by": user.get("email", ""),
-    })
+    await _write_audit_log(module="stock_transfer", action=action, actor=user,
+                            ref_collection=ref_collection, ref_id=ref_id, old=old, new=new)
 
 
 def _transfer_src_lock_key(it: dict) -> str:
@@ -50,7 +42,8 @@ def _sum_transfer_like_items(items: list[dict]) -> dict:
     sums = {}
     for it in items or []:
         k = _key(it.get("part_no"), it.get("make"))
-        sums[k] = sums.get(k, 0) + float(it.get("quantity") or 0)
+        # transferred + rejected both resolve the requested qty — neither needs re-transfer.
+        sums[k] = sums.get(k, 0) + float(it.get("quantity") or 0) + float(it.get("rejected_qty") or 0)
     return sums
 
 
@@ -228,10 +221,13 @@ async def list_transfer_requests(
     for row in rows:
         requested = sum(float(it.get("quantity") or 0) for it in row.get("items", []))
         moved = 0
+        rejected = 0
         async for stn in db.transfer_notes.find({"transfer_request_id": row["id"], "status": {"$in": ["COMPLETED", "RECORDED"]}}, {"_id": 0, "items": 1}):
             moved += sum(float(it.get("quantity") or 0) for it in stn.get("items", []))
+            rejected += sum(float(it.get("rejected_qty") or 0) for it in stn.get("items", []))
         row["requested_qty_total"] = requested
         row["transferred_qty_total"] = moved
+        row["rejected_qty_total"] = rejected
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -247,10 +243,13 @@ async def get_transfer_request(str_id: str, user=Depends(get_current_user)):
     await _enrich_note_items([doc])
     requested = sum(float(it.get("quantity") or 0) for it in doc.get("items", []))
     moved = 0
+    rejected = 0
     async for stn in db.transfer_notes.find({"transfer_request_id": doc["id"], "status": {"$in": ["COMPLETED", "RECORDED"]}}, {"_id": 0, "items": 1}):
         moved += sum(float(it.get("quantity") or 0) for it in stn.get("items", []))
+        rejected += sum(float(it.get("rejected_qty") or 0) for it in stn.get("items", []))
     doc["requested_qty_total"] = requested
     doc["transferred_qty_total"] = moved
+    doc["rejected_qty_total"] = rejected
     return doc
 
 
@@ -260,18 +259,35 @@ async def update_transfer_request(str_id: str, payload: TransferRequestCreate, u
     if not existing:
         raise HTTPException(status_code=404, detail="Transfer request not found")
     _enforce_assignee(existing, user, "edit this transfer request")
-    if await db.transfer_notes.find_one({"transfer_request_id": str_id}):
-        raise HTTPException(status_code=409, detail="Cannot edit — transfer notes have been created. Delete those first.")
+    # Editable until the first quantity is actually transferred — a Transfer Note is
+    # always auto-created immediately (PENDING/DRAFT), so its mere existence must not
+    # block editing; only a COMPLETED (processed) note does.
+    if await db.transfer_notes.find_one({"transfer_request_id": str_id, "status": {"$in": ["RECORDED", "COMPLETED"]}}, {"_id": 0, "id": 1}):
+        raise HTTPException(status_code=409, detail="Cannot edit — transfer has already started on this request")
     _validate_transfer_request_items(payload.items)
     await _validate_transfer_request_qty(payload.items, exclude_str_id=str_id)
+    new_items = [it.model_dump() for it in payload.items]
+    # Only cascade-reset in-progress Transfer Note drafts if the requested qty actually
+    # changed — a no-op re-save (e.g. only reassigning) must not discard an operator's
+    # already-entered (but not yet recorded) allocation.
+    items_changed = _sum_transfer_like_items(existing.get("items", [])) != _sum_transfer_like_items(new_items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_transfer")
     update = {
         "purpose": (payload.purpose or "").strip(),
-        "items": [it.model_dump() for it in payload.items],
+        "items": new_items,
         "updated_at": now_iso(),
         **assignee,
     }
     await db.transfer_requests.update_one({"id": str_id}, {"$set": update})
+    if items_changed:
+        # Propagate the edited request into every not-yet-processed Transfer Note so
+        # allocation/availability/preview never show a stale requested quantity.
+        await db.transfer_notes.update_many(
+            {"transfer_request_id": str_id, "status": {"$nin": ["RECORDED", "COMPLETED"]}},
+            {"$set": {"items": [], "assigned_items": update["items"], "updated_at": now_iso()}},
+        )
+    await _audit_transfer("request.edited", user, "transfer_requests", str_id,
+                           {"items": existing.get("items", [])}, {"items": update["items"]})
     new_aid = assignee.get("assigned_to_user_id")
     if new_aid and new_aid != existing.get("assigned_to_user_id"):
         await _notify(
@@ -281,6 +297,7 @@ async def update_transfer_request(str_id: str, payload: TransferRequestCreate, u
             audience="user", target_user_id=new_aid,
             ref_collection="transfer_requests", ref_id=str_id,
         )
+    await _recompute_str_status(str_id)
     doc = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     return doc
 
@@ -291,8 +308,9 @@ async def delete_transfer_request(str_id: str, user=Depends(get_current_user)):
     if not existing:
         raise HTTPException(status_code=404, detail="Transfer request not found")
     _enforce_assignee(existing, user, "delete this transfer request")
-    if await db.transfer_notes.find_one({"transfer_request_id": str_id}):
-        raise HTTPException(status_code=409, detail="Cannot delete — transfer notes exist. Delete them first.")
+    if await db.transfer_notes.find_one({"transfer_request_id": str_id, "status": {"$in": ["RECORDED", "COMPLETED"]}}, {"_id": 0, "id": 1}):
+        raise HTTPException(status_code=409, detail="Cannot delete — transfer has already started on this request")
+    await db.transfer_notes.delete_many({"transfer_request_id": str_id})
     await db.transfer_requests.delete_one({"id": str_id})
     return {"ok": True}
 
@@ -317,7 +335,7 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Transfer request not found")
-    if s.get("status") in ("FULLY_TRANSFERRED", "COMPLETED", "CLOSED") and not exclude_stn_id:
+    if s.get("status") == "COMPLETE" and not exclude_stn_id:
         raise HTTPException(status_code=409, detail="This transfer request is already fully transferred")
 
     stn_scope = None
@@ -394,7 +412,7 @@ async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_cur
     if not s:
         raise HTTPException(status_code=400, detail="Transfer request not found")
     _enforce_assignee(s, user, "create a transfer note for this request")
-    if s.get("status") in ("FULLY_TRANSFERRED", "COMPLETED", "CLOSED"):
+    if s.get("status") == "COMPLETE":
         raise HTTPException(status_code=409, detail="This transfer request is already fully transferred")
 
     # Atomic guard: without this, two concurrent create-requests for the same
@@ -560,6 +578,7 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="No items to record")
     assigned_items = stn.get("assigned_items") or parent.get("items", [])
     item_models = [TransferNoteItem(**it) for it in items]
+    await _validate_transfer_note_items(item_models)  # final re-check on top of the draft-time check
     await _validate_transfer_note_constraints(stn.get("transfer_request_id"), item_models, exclude_stn_id=stn_id, assigned_items=assigned_items)
     remaining_items = _remaining_assigned_items(assigned_items, items)
     now = now_iso()
@@ -596,8 +615,12 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
             conflict_message="Stock at one selected source location is being recorded by another user",
         ):
             async with unit_of_work() as uow:
-                # Final source-balance check (real balance, not DRAFT-aware)
+                # Final source-balance check (real balance, not DRAFT-aware). Fully-
+                # rejected rows (quantity == 0, resolved entirely via rejected_qty)
+                # move no stock and need no balance check.
                 for idx, it in enumerate(items, start=1):
+                    if (it.get("quantity") or 0) <= 0:
+                        continue
                     bal = await uow.transactions.aggregate([
                         {"$match": {
                             "part_no": it["part_no"], "make": it["make"],
@@ -614,6 +637,8 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
                             f"{it.get('src_godown_name')}/{it.get('src_rack_no')}/{it.get('src_box_no') or '—'}: have {avail}, need {it['quantity']}"
                         ))
                 for it in items:
+                    if (it.get("quantity") or 0) <= 0:
+                        continue  # fully-rejected row — nothing physically transferred
                     master = await uow.db.stock_master.find_one(
                         {"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}, session=uow.session
                     ) or {}
@@ -667,5 +692,7 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
     if stn.get("transfer_request_id"):
         await _recompute_str_status(stn["transfer_request_id"])
     total_qty = sum(int(it.get("quantity") or 0) for it in items)
-    await _notify(actor=user, type="stock_transfer.recorded", module="stock_transfer", title=f"Stock Transfer completed ({stn['stn_no']})", message=f"{user.get('email')} transferred {len(items)} item(s), total qty {total_qty}, from {stn.get('transfer_request_no') or 'STR'}.", audience="module", ref_collection="transfer_notes", ref_id=stn_id)
+    total_rejected = sum(int(it.get("rejected_qty") or 0) for it in items)
+    rejected_note = f", rejected {total_rejected}" if total_rejected else ""
+    await _notify(actor=user, type="stock_transfer.recorded", module="stock_transfer", title=f"Stock Transfer completed ({stn['stn_no']})", message=f"{user.get('email')} transferred {len(tx_docs) // 2} item(s), total qty {total_qty}{rejected_note}, from {stn.get('transfer_request_no') or 'STR'}.", audience="module", ref_collection="transfer_notes", ref_id=stn_id)
     return {"ok": True, "transactions_created": len(tx_docs), "remaining_transfer_note": child_stn}
