@@ -22,10 +22,11 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
-import { buildStandardPrintHtml, openPrintWindow, htmlEscape } from "../lib/printDocument";
+import { buildStandardPrintHtml, openPrintWindow, htmlEscape, formatLocationText } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 const REJECTION_REASONS = ["Rack Empty", "Not Available", "Damaged", "Expired", "Wrong Specification", "Other"];
+const NO_LOCATION = "__NO_LOCATION__";
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -97,6 +98,63 @@ function transferKey(it) {
   return `${it.part_no || ""}||${it.make || ""}`;
 }
 
+// Resolves what to actually show as a request line's source/destination: prefer what a
+// completed Transfer Note recorded (the real outcome); otherwise fall back to the
+// currently active (not-yet-recorded) note's row, since a Transfer Note is auto-created
+// the instant a request exists and mirrors whatever was last saved as the execution
+// plan — so an edit made in the Transfer Note shows up here as soon as it's saved, even
+// before recording. Finally falls back to whatever the request itself specified, or "-".
+function transferEffectiveLocations(it, noteHistory = []) {
+  const key = transferKey(it);
+  const completed = [];
+  const active = [];
+  noteHistory.forEach((stn) => {
+    (stn.items || []).forEach((row) => {
+      if (transferKey(row) !== key) return;
+      if ((parseFloat(row.quantity) || 0) <= 0) return;
+      (transferNoteDone(stn) ? completed : active).push(row);
+    });
+  });
+  const rows = completed.length ? completed : active;
+  const dedupe = (locs) => {
+    const seen = new Set();
+    const out = [];
+    locs.forEach((loc) => {
+      if (!loc.godown_name && !loc.rack_no && !loc.box_no) return;
+      const k = `${loc.godown_name || ""}||${loc.rack_no || ""}||${loc.box_no || ""}`;
+      if (seen.has(k)) return;
+      seen.add(k);
+      out.push(loc);
+    });
+    return out;
+  };
+  let srcLocs = dedupe(rows.map((row) => ({ godown_name: row.src_godown_name, rack_no: row.src_rack_no, box_no: row.src_box_no })));
+  let destLocs = dedupe(rows.map((row) => ({ godown_name: row.dest_godown_name, rack_no: row.dest_rack_no, box_no: row.dest_box_no })));
+  if (!srcLocs.length) {
+    srcLocs = dedupe([{ godown_name: it.src_godown_name, rack_no: it.src_rack_no, box_no: it.src_box_no }]);
+  }
+  if (!destLocs.length) {
+    destLocs = dedupe([{ godown_name: it.dest_godown_name, rack_no: it.dest_rack_no, box_no: it.dest_box_no }]);
+  }
+  return { srcLocs, destLocs };
+}
+
+// Plain-text join for on-screen display (e.g. the detail dialog).
+function locationCellText(locs) {
+  if (!locs.length) return "-";
+  return locs.map((loc) => formatLocationText(loc, "-")).join("; ");
+}
+
+// Print-only rendering: Godown, then Rack, then Box stacked on their own line inside
+// the cell — deliberately without the words "Godown"/"Rack"/"Box" as labels.
+function locationCellHtml(locs) {
+  if (!locs.length) return "-";
+  return locs.map((loc) => {
+    const lines = [loc.godown_name, loc.rack_no, loc.box_no].map((p) => (p || "").trim()).filter(Boolean);
+    return lines.map((p) => htmlEscape(p)).join("<br/>");
+  }).join("<br/><br/>");
+}
+
 // Transfer Request print columns: Sr, Part Number, Item, Make, Source Godown,
 // Destination Godown, Requested Qty, Transferred Qty, Rejected Qty, Status
 function printTransferRequest(s, noteHistory = []) {
@@ -105,25 +163,25 @@ function printTransferRequest(s, noteHistory = []) {
     if (!transferNoteDone(stn)) return;
     (stn.items || []).forEach((it) => {
       const k = transferKey(it);
-      const cur = processedByKey[k] || { transferred: 0, rejected: 0, srcNames: new Set() };
+      const cur = processedByKey[k] || { transferred: 0, rejected: 0 };
       cur.transferred += parseFloat(it.quantity) || 0;
       cur.rejected += parseFloat(it.rejected_qty) || 0;
-      if (it.src_godown_name) cur.srcNames.add(it.src_godown_name);
       processedByKey[k] = cur;
     });
   });
   const rows = (s.items || []).map((it, idx) => {
-    const p = processedByKey[transferKey(it)] || { transferred: 0, rejected: 0, srcNames: new Set() };
+    const p = processedByKey[transferKey(it)] || { transferred: 0, rejected: 0 };
     const requested = parseFloat(it.quantity) || 0;
     const resolved = p.transferred + p.rejected;
     const rowStatus = resolved <= 0 ? "Pending" : (resolved + 1e-6 >= requested ? "Complete" : "In Process");
+    const eff = transferEffectiveLocations(it, noteHistory);
     return [
       String(idx + 1),
       htmlEscape(it.part_no),
       htmlEscape(it.description_1 || ""),
       htmlEscape(it.make || "—"),
-      htmlEscape([...p.srcNames].join(", ") || "—"),
-      htmlEscape(it.dest_godown_name || "—"),
+      locationCellHtml(eff.srcLocs),
+      locationCellHtml(eff.destLocs),
       `<span style="text-align:right;display:block">${htmlEscape(requested || "—")}</span>`,
       `<span style="text-align:right;display:block">${htmlEscape(p.transferred || "—")}</span>`,
       `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>`,
@@ -147,7 +205,7 @@ function printTransferRequest(s, noteHistory = []) {
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Make" },
-      { label: "Source Godown" }, { label: "Destination Godown" },
+      { label: "Source Location" }, { label: "Destination Location" },
       { label: "Requested Qty", align: "right" }, { label: "Transferred Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
       { label: "Status" },
     ],
@@ -468,24 +526,24 @@ function TransferRequestDetailDialog({ s, onClose }) {
                   <thead>
                     <tr>
                       <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
-                      <th className="text-center">QTY</th><th>PREFERRED DEST</th>
+                      <th className="text-center">QTY</th><th>SOURCE LOCATION</th><th>DESTINATION LOCATION</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(s.items || []).map((it, idx) => (
-                      <tr key={idx}>
-                        <td className="font-mono text-slate-500">{idx + 1}</td>
-                        <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                        <td>{it.make}</td>
-                        <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                        <td className="text-center font-mono font-bold">{it.quantity}</td>
-                        <td className="font-mono text-slate-600">
-                          {it.dest_godown_name || it.dest_rack_no || it.dest_box_no
-                            ? `${it.dest_godown_name || "?"}/${it.dest_rack_no || "?"}${it.dest_box_no ? "/" + it.dest_box_no : ""}`
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
+                    {(s.items || []).map((it, idx) => {
+                      const eff = transferEffectiveLocations(it, history);
+                      return (
+                        <tr key={idx}>
+                          <td className="font-mono text-slate-500">{idx + 1}</td>
+                          <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                          <td>{it.make}</td>
+                          <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
+                          <td className="text-center font-mono font-bold">{it.quantity}</td>
+                          <td className="text-slate-600">{locationCellText(eff.srcLocs)}</td>
+                          <td className="text-slate-600">{locationCellText(eff.destLocs)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -534,6 +592,11 @@ function TransferRequestDetailDialog({ s, onClose }) {
 
 const emptyTransferReqItem = () => ({
   part_no: "", make: "", quantity: "", makes: [], partLooked: false, available_qty: 0,
+  // All optional — leave blank to let the Transfer Note auto-resolve against current
+  // inventory when it's prepared. As much or as little as is known can be specified.
+  src_godown_id: "", src_godown_name: "",
+  src_rack_id: "", src_rack_no: "",
+  src_box_id: "", src_box_no: "", src_box_category: "",
   dest_godown_id: "", dest_godown_name: "",
   dest_rack_id: "", dest_rack_no: "",
   dest_box_id: "", dest_box_no: "", dest_box_category: "",
@@ -589,6 +652,8 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
             setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: makesArr, available_qty: found?.available_qty || 0 } : r));
           })
           .catch(() => {});
+        if (row.src_godown_id) ensureRacks(row.src_godown_id);
+        if (row.src_rack_id) ensureBoxes(row.src_rack_id);
         if (row.dest_godown_id) ensureRacks(row.dest_godown_id);
         if (row.dest_rack_id) ensureBoxes(row.dest_rack_id);
       });
@@ -626,6 +691,38 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
     const row = items[i];
     const found = (row.makes || []).find((m) => m.make === makeVal);
     updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0 });
+  };
+
+  const onSrcGodownChange = async (i, gid) => {
+    if (gid === NO_LOCATION) {
+      updateItem(i, { src_godown_id: "", src_godown_name: "", src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" });
+      return;
+    }
+    const g = godowns.find((x) => x.id === gid);
+    updateItem(i, {
+      src_godown_id: gid, src_godown_name: g?.godown_name || "",
+      src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "",
+    });
+    await ensureRacks(gid);
+  };
+  const onSrcRackChange = async (i, rid) => {
+    if (rid === NO_LOCATION) {
+      updateItem(i, { src_rack_id: "", src_rack_no: "", src_box_id: "", src_box_no: "", src_box_category: "" });
+      return;
+    }
+    const racks = racksByGodown[items[i].src_godown_id] || [];
+    const rk = racks.find((x) => x.id === rid);
+    updateItem(i, {
+      src_rack_id: rid, src_rack_no: rk?.rack_no || "",
+      src_box_id: "", src_box_no: "", src_box_category: "",
+    });
+    await ensureBoxes(rid);
+  };
+  const onSrcBoxChange = (i, bid) => {
+    if (bid === NO_LOCATION) { updateItem(i, { src_box_id: "", src_box_no: "", src_box_category: "" }); return; }
+    const boxes = boxesByRack[items[i].src_rack_id] || [];
+    const bx = boxes.find((x) => x.id === bid);
+    updateItem(i, { src_box_id: bid, src_box_no: bx?.box_no || "", src_box_category: bx?.box_category || "" });
   };
 
   const onDestGodownChange = async (i, gid) => {
@@ -690,6 +787,9 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
         assigned_to_user_id: assignedToUserId || null,
         items: items.map((it) => ({
           part_no: it.part_no.trim(), make: it.make.trim(), quantity: parseInt(it.quantity),
+          src_godown_id: it.src_godown_id || "", src_godown_name: it.src_godown_name || "",
+          src_rack_id: it.src_rack_id || "", src_rack_no: it.src_rack_no || "",
+          src_box_id: it.src_box_id || "", src_box_no: it.src_box_no || "", src_box_category: it.src_box_category || "",
           dest_godown_id: it.dest_godown_id || "", dest_godown_name: it.dest_godown_name || "",
           dest_rack_id: it.dest_rack_id || "", dest_rack_no: it.dest_rack_no || "",
           dest_box_id: it.dest_box_id || "", dest_box_no: it.dest_box_no || "", dest_box_category: it.dest_box_category || "",
@@ -739,7 +839,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
         <div className="flex items-center justify-between p-4 border-b border-slate-200">
           <div>
             <div className="label-sm">Items to Transfer</div>
-            <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""} · destination is optional (Transfer Note can finalise)</div>
+            <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""} · source and destination are both optional — specify as much as you know (godown only, godown+rack, or leave blank), the Transfer Note resolves the rest against current stock</div>
           </div>
           <div className="flex items-center gap-2">
             <Input type="number" min="1" max="500" value={addCount} onChange={(e) => setAddCount(e.target.value)}
@@ -756,12 +856,15 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
             <thead>
               <tr>
                 <th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>QTY</th>
-                <th>PREFERRED DEST GODOWN</th><th>RACK</th><th>BOX</th><th className="w-14"></th>
+                <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
+                <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th><th className="w-14"></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
                 const overStock = it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+                const srcRacks = racksByGodown[it.src_godown_id] || [];
+                const srcBoxes = boxesByRack[it.src_rack_id] || [];
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
                 const destBoxes = boxesByRack[it.dest_rack_id] || [];
                 return (
@@ -799,6 +902,39 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                           {overStock ? `Over ${it.quantity}/${it.available_qty}` : `Avail ${it.available_qty}`}
                         </div>
                       )}
+                    </td>
+                    <td className="w-44">
+                      <Select value={it.src_godown_id || undefined} onValueChange={(v) => onSrcGodownChange(idx, v)}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`str-src-godown-${idx}`}>
+                          <SelectValue placeholder="Optional" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_LOCATION}>No preference</SelectItem>
+                          {godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="w-32">
+                      <Select disabled={!it.src_godown_id} value={it.src_rack_id || undefined} onValueChange={(v) => onSrcRackChange(idx, v)}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`str-src-rack-${idx}`}>
+                          <SelectValue placeholder="—" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_LOCATION}>No preference</SelectItem>
+                          {srcRacks.map((r) => <SelectItem key={r.id} value={r.id} className="font-mono">{r.rack_no}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="w-32">
+                      <Select disabled={!it.src_rack_id || srcBoxes.length === 0} value={it.src_box_id || undefined} onValueChange={(v) => onSrcBoxChange(idx, v)}>
+                        <SelectTrigger className="rounded-sm h-8" data-testid={`str-src-box-${idx}`}>
+                          <SelectValue placeholder={srcBoxes.length === 0 ? "—" : "Optional"} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_LOCATION}>No preference</SelectItem>
+                          {srcBoxes.map((b) => <SelectItem key={b.id} value={b.id} className="font-mono">{b.box_no}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
                     </td>
                     <td className="w-44">
                       <Select value={it.dest_godown_id || undefined} onValueChange={(v) => onDestGodownChange(idx, v)}>
@@ -1206,6 +1342,10 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   };
 
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+  // Lets the operator discard a row they don't intend to use — e.g. one of several
+  // auto-split source-location rows for the same part when only one is actually chosen.
+  // Without this, an unwanted row could only be gotten rid of by faking a rejection.
+  const removeItem = (i) => setItems((p) => p.filter((_, idx) => idx !== i));
 
   const onLocChange = async (i, side, kind, value) => {
     // side: "src" | "dest"; kind: "godown" | "rack" | "box"
@@ -1353,6 +1493,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   <th className="min-w-[140px]">REASON</th>
                   <th>SOURCE</th>
                   <th>DESTINATION</th>
+                  <th className="w-10"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1361,7 +1502,14 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   const srcBoxes = boxesByRack[it.src_rack_id] || [];
                   const destRacks = racksByGodown[it.dest_godown_id] || [];
                   const destBoxes = boxesByRack[it.dest_rack_id] || [];
-                  const overPending = (parseInt(it.quantity) || 0) > (it.pending_qty || 0) + 1e-6;
+                  // Live-derived from current field state on every render — never the
+                  // static pending_qty fetched once when the form loaded, so Requested /
+                  // Transferred / Rejected / Pending always match what's on screen right now.
+                  const requested = it.requested_qty || 0;
+                  const transferredNow = parseInt(it.quantity) || 0;
+                  const rejectedNow = parseInt(it.rejected_qty) || 0;
+                  const livePending = Math.max(0, requested - transferredNow - rejectedNow);
+                  const overPending = transferredNow + rejectedNow > requested + 1e-6;
                   return (
                     <tr key={idx} data-testid={`stn-item-row-${idx}`} className={overPending ? "bg-red-50 align-top" : "align-top"}>
                       <td className="font-mono text-slate-500 pt-3">{idx + 1}</td>
@@ -1371,12 +1519,14 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                         <div className="text-[10px] text-slate-500 mt-0.5">{it.description_1 || ""}</div>
                       </td>
                       <td className="text-center pt-3">
-                        <div className="font-mono text-[11px] text-slate-500">req {it.requested_qty} · pend <b className="text-slate-900">{it.pending_qty}</b></div>
                         <Input type="number" min="0" step="1" value={it.quantity}
                           onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                          className={`rounded-sm font-mono h-8 text-center mt-1 w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
+                          className={`rounded-sm font-mono h-8 text-center w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
                           data-testid={`stn-qty-${idx}`} />
-                        {overPending && <div className="text-[10px] text-red-600 font-bold mt-0.5">over {it.quantity}/{it.pending_qty}</div>}
+                        <div className="font-mono text-[11px] text-slate-500 whitespace-nowrap mt-1" data-testid={`stn-live-summary-${idx}`}>
+                          Req {requested} · Rej {rejectedNow} · Pend <b className={overPending ? "text-red-600" : "text-slate-900"}>{overPending ? "—" : livePending}</b>
+                        </div>
+                        {overPending && <div className="text-[10px] text-red-600 font-bold mt-0.5">Transferred + Rejected ({transferredNow + rejectedNow}) exceeds Requested ({requested})</div>}
                       </td>
                       <td className="text-center pt-3">
                         <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
@@ -1416,7 +1566,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                               <button key={li} type="button" onClick={() => applySrcChip(idx, L)}
                                 className="text-[10px] px-1.5 py-0.5 rounded-sm bg-slate-100 hover:bg-blue-100 text-slate-700 font-mono"
                                 title={`avail ${L.available_qty}`}>
-                                {L.godown_name}/{L.rack_no}{L.box_no ? "/" + L.box_no : ""} ({L.available_qty})
+                                {formatLocationText(L)} ({L.available_qty})
                               </button>
                             ))}
                           </div>
@@ -1436,6 +1586,12 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                           <SelectTrigger className="rounded-sm h-7 text-xs" data-testid={`stn-dest-box-${idx}`}><SelectValue placeholder={destBoxes.length === 0 ? "—" : "Box"} /></SelectTrigger>
                           <SelectContent>{destBoxes.map((b) => <SelectItem key={b.id} value={b.id} className="font-mono">{b.box_no}</SelectItem>)}</SelectContent>
                         </Select>
+                      </td>
+                      <td className="pt-3">
+                        <button onClick={() => removeItem(idx)}
+                          className="p-1.5 rounded-sm hover:bg-red-50 text-red-700"
+                          title="Remove this row"
+                          data-testid={`stn-remove-row-${idx}`}><Trash size={14} /></button>
                       </td>
                     </tr>
                   );

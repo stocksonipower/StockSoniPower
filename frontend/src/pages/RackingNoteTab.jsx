@@ -22,6 +22,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import { ReceiptNoteDetailDialog, stockInTypeMeta, stockInTypeLabel } from "./StockInPage";
 import { useStockInNav } from "../lib/stockInNav";
 import { exportToExcel } from "../lib/exportExcel";
+import { formatLocationText } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 
@@ -1052,10 +1053,10 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                             return (
                               <button key={k} onClick={() => applyExistingLocation(idx, loc)}
                                 className={`text-[10px] font-mono px-2 py-0.5 rounded-sm border ${isCurrent ? "bg-blue-50 border-blue-300 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"}`}
-                                title={`${loc.godown_name}/${loc.rack_no}/${loc.box_no} — ${loc.current_qty} in stock`}
+                                title={`${formatLocationText(loc)} — ${loc.current_qty} in stock`}
                                 data-testid={`rkn-existing-loc-${idx}-${k}`}>
                                 <MapPin size={10} weight="bold" className="inline mr-0.5" />
-                                {loc.godown_name}/{loc.rack_no}/{loc.box_no} ({loc.current_qty})
+                                {formatLocationText(loc)} ({loc.current_qty})
                               </button>
                             );
                           })}

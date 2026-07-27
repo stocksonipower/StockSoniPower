@@ -332,6 +332,22 @@ async def next_transfer_note_no(user=Depends(get_current_user)):
 
 @router.get("/transfer-notes/prepare/{str_id}")
 async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = None, user=Depends(get_current_user)):
+    """Prepare Transfer Note rows for a Transfer Request.
+
+    Source resolution (never left blank when inventory location is known):
+      - If the request fully specified a source (down to box), use exactly that
+        location — the request's decision is authoritative.
+      - If the request specified only part of the source (godown, or godown+rack) or
+        nothing at all, auto-resolve the rest against current inventory, narrowed by
+        whatever *was* specified. When more than one location still qualifies, the
+        pending quantity is greedily split across all of them (one row per location —
+        "Multiple Source Locations" — never merged), same order/logic as
+        `_allocate_locations_for`.
+
+    Both source AND destination remain freely editable in the Transfer Note form —
+    this only decides what's pre-filled, never locks the operator's choice (unlike
+    Picking's authorized-location restriction).
+    """
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Transfer request not found")
@@ -343,6 +359,12 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
         stn_scope = await db.transfer_notes.find_one({"id": exclude_stn_id}, {"_id": 0})
     other_sums = {} if stn_scope else await _transfer_other_qty(str_id, exclude_stn_id)
     other_loc_sums = await _transfer_other_src_loc_qty(exclude_stn_id)
+
+    def _avail(part_no, make, L):
+        reserved = other_loc_sums.get(
+            f"{part_no}||{make}||{L.get('godown_id', '') or ''}||{L.get('rack_id', '') or ''}||{L.get('box_id', '') or ''}", 0,
+        )
+        return max(0, L["current_qty"] - reserved)
 
     items_out = []
     for it in ((stn_scope or {}).get("assigned_items") or s.get("items", [])):
@@ -356,20 +378,13 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         locs = await _stock_locations_for(part_no, make)
         for L in locs:
-            reserved = other_loc_sums.get(
-                f"{part_no}||{make}||{L.get('godown_id', '') or ''}||{L.get('rack_id', '') or ''}||{L.get('box_id', '') or ''}",
-                0,
-            )
-            L["available_qty"] = max(0, L["current_qty"] - reserved)
-        pickable = [L for L in locs if L["available_qty"] > 0]
-        prefill = pickable[0] if len(pickable) == 1 and pickable[0]["available_qty"] >= pending else None
+            L["available_qty"] = _avail(part_no, make, L)
 
-        items_out.append({
+        common = {
             "part_no": part_no, "make": make,
             "requested_qty": requested_qty,
             "already_transferred_qty": already,
             "pending_qty": pending,
-            "quantity": min(pending, prefill["available_qty"]) if prefill else (min(pending, pickable[0]["available_qty"]) if pickable else 0),
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -378,15 +393,7 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
             "remarks_oem": master.get("remarks_oem", ""),
             "remarks_others": master.get("remarks_others", ""),
             "item_category": master.get("item_category", ""),
-            # Source prefill
-            "src_godown_id": prefill["godown_id"] if prefill else "",
-            "src_godown_name": prefill["godown_name"] if prefill else "",
-            "src_rack_id": prefill["rack_id"] if prefill else "",
-            "src_rack_no": prefill["rack_no"] if prefill else "",
-            "src_box_id": prefill["box_id"] if prefill else "",
-            "src_box_no": prefill["box_no"] if prefill else "",
-            "src_box_category": prefill.get("box_category", "") if prefill else "",
-            # Destination from request
+            # Destination from request — pre-filled but freely editable in the form.
             "dest_godown_id": it.get("dest_godown_id", "") or "",
             "dest_godown_name": it.get("dest_godown_name", "") or "",
             "dest_rack_id": it.get("dest_rack_id", "") or "",
@@ -395,7 +402,60 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
             "dest_box_no": it.get("dest_box_no", "") or "",
             "dest_box_category": it.get("dest_box_category", "") or "",
             "available_locations": locs,
-        })
+        }
+
+        req_src_godown = (it.get("src_godown_id") or "").strip()
+        req_src_rack = (it.get("src_rack_id") or "").strip()
+        req_src_box = (it.get("src_box_id") or "").strip()
+
+        if req_src_box:
+            # Case 1: request fully specified the source — authoritative, use as-is.
+            match = next((L for L in locs if L.get("box_id") == req_src_box), None)
+            avail = match["available_qty"] if match else 0
+            items_out.append({
+                **common, "quantity": min(pending, avail),
+                "src_godown_id": it.get("src_godown_id", ""), "src_godown_name": it.get("src_godown_name", ""),
+                "src_rack_id": it.get("src_rack_id", ""), "src_rack_no": it.get("src_rack_no", ""),
+                "src_box_id": it.get("src_box_id", ""), "src_box_no": it.get("src_box_no", ""),
+                "src_box_category": it.get("src_box_category", ""),
+            })
+            continue
+
+        # Case 2: source blank or only partially specified — auto-resolve against
+        # current inventory, narrowed by whatever was given, split across every
+        # qualifying location until the pending qty is covered.
+        candidates = locs
+        if req_src_godown:
+            candidates = [L for L in candidates if L.get("godown_id") == req_src_godown]
+        if req_src_rack:
+            candidates = [L for L in candidates if L.get("rack_id") == req_src_rack]
+        remaining = pending
+        allocated_any = False
+        for L in candidates:
+            if remaining <= 1e-9:
+                break
+            take = min(remaining, L["available_qty"])
+            if take <= 1e-9:
+                continue
+            allocated_any = True
+            items_out.append({
+                **common, "quantity": take,
+                "src_godown_id": L.get("godown_id", ""), "src_godown_name": L.get("godown_name", ""),
+                "src_rack_id": L.get("rack_id", ""), "src_rack_no": L.get("rack_no", ""),
+                "src_box_id": L.get("box_id", ""), "src_box_no": L.get("box_no", ""),
+                "src_box_category": L.get("box_category", ""),
+            })
+            remaining -= take
+        if not allocated_any:
+            # Nothing currently available that qualifies — still surface one row (with
+            # whatever source specificity the request gave) so the line isn't silently
+            # dropped; the operator resolves it manually.
+            items_out.append({
+                **common, "quantity": 0,
+                "src_godown_id": it.get("src_godown_id", ""), "src_godown_name": it.get("src_godown_name", ""),
+                "src_rack_id": it.get("src_rack_id", ""), "src_rack_no": it.get("src_rack_no", ""),
+                "src_box_id": "", "src_box_no": "", "src_box_category": "",
+            })
 
     return {
         "transfer_request": {
@@ -669,13 +729,44 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
                 )
                 if not finalized:
                     raise HTTPException(status_code=409, detail="Transfer Note recording state changed; transfer was not finalized")
+
+                # Planned-vs-actual audit: the Transfer Request's original source/destination
+                # preference (if any) compared against what was actually recorded for each
+                # line. "What was planned" must never be lost once the actual location
+                # supersedes it everywhere else in the app (previews, reports, inventory).
+                planned_by_key = {}
+                for pit in (parent.get("items") or []):
+                    planned_by_key[_key(pit.get("part_no"), pit.get("make"))] = pit
+
+                def _loc(d, prefix):
+                    return {
+                        "godown_id": d.get(f"{prefix}_godown_id", "") or "", "godown_name": d.get(f"{prefix}_godown_name", "") or "",
+                        "rack_id": d.get(f"{prefix}_rack_id", "") or "", "rack_no": d.get(f"{prefix}_rack_no", "") or "",
+                        "box_id": d.get(f"{prefix}_box_id", "") or "", "box_no": d.get(f"{prefix}_box_no", "") or "",
+                    }
+
+                location_changes = []
+                for it in items:
+                    if (it.get("quantity") or 0) <= 0:
+                        continue
+                    planned = planned_by_key.get(_key(it.get("part_no"), it.get("make"))) or {}
+                    planned_src, actual_src = _loc(planned, "src"), _loc(it, "src")
+                    planned_dest, actual_dest = _loc(planned, "dest"), _loc(it, "dest")
+                    if planned_src != actual_src or planned_dest != actual_dest:
+                        location_changes.append({
+                            "part_no": it.get("part_no"), "make": it.get("make"),
+                            "planned_source": planned_src, "actual_source": actual_src,
+                            "planned_destination": planned_dest, "actual_destination": actual_dest,
+                        })
+
                 await uow.audit.record(
                     action="transfer_note.completed", actor=user,
                     ref_collection="transfer_notes", ref_id=stn_id,
                     old={"status": "DRAFT"},
                     new={"status": "COMPLETED", "items": items},
+                    reason="Actual source/destination differs from the transfer request's plan" if location_changes else "",
                     module="stock_transfer",
-                    links={"transfer_request_id": stn.get("transfer_request_id", "")},
+                    links={"transfer_request_id": stn.get("transfer_request_id", ""), "location_changes": location_changes},
                 )
             # transaction committed here, still holding the location locks
         # location locks released here

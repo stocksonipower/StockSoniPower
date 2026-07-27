@@ -472,6 +472,17 @@ class TransferRequestItem(BaseModel):
     part_no: str
     make: str
     quantity: float
+    # Optional source preference — as specific as the requester knows (godown only,
+    # godown+rack, or full godown+rack+box). Whatever is left blank is auto-resolved
+    # against current inventory when the Transfer Note is prepared (see
+    # prepare_transfer_note / _allocate_locations_for).
+    src_godown_id: Optional[str] = ""
+    src_godown_name: Optional[str] = ""
+    src_rack_id: Optional[str] = ""
+    src_rack_no: Optional[str] = ""
+    src_box_id: Optional[str] = ""
+    src_box_no: Optional[str] = ""
+    src_box_category: Optional[str] = ""
     # Optional destination preference (the Transfer Note can override)
     dest_godown_id: Optional[str] = ""
     dest_godown_name: Optional[str] = ""

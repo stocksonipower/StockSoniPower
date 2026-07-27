@@ -7,7 +7,7 @@ import PartNoLink from "./PartNoLink";
 import { useAuth } from "../lib/auth";
 import { useStockInNav } from "../lib/stockInNav";
 import { toast } from "sonner";
-import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
+import { buildStandardPrintHtml, openPrintWindow, formatLocationText } from "../lib/printDocument";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -262,11 +262,7 @@ function Detail({ k, v }) {
 }
 
 function LocCell({ g, r, b }) {
-  return (
-    <span className="font-mono">
-      {g || "—"}{r ? <> / <b>{r}</b></> : null}{b ? <> / {b}</> : null}
-    </span>
-  );
+  return <span>{formatLocationText({ godown_name: g, rack_no: r, box_no: b })}</span>;
 }
 
 function RackingBody({ d }) {

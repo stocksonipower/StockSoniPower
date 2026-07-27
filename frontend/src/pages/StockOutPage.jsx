@@ -536,7 +536,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                           <td className="font-mono">{loc.godown_name || "—"}</td>
                           <td className="font-mono">{loc.rack_no || "—"}</td>
                           <td className="font-mono">{loc.box_no || "—"}</td>
-                          <td className="text-center font-mono font-bold">{li === 0 ? it.quantity : loc.quantity}</td>
+                          <td className="text-center font-mono font-bold">{loc.quantity}</td>
                         </tr>
                       ));
                     })}

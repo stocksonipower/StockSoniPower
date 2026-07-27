@@ -8,6 +8,38 @@ export function htmlEscape(value) {
 }
 
 /**
+ * Human-readable location formatting — shared across every preview/print/list that
+ * shows a godown/rack/box, so nothing ever falls back to raw ids or a bare "G1/1/1"
+ * slash-join. Expects display NAMES already resolved (godown_name/rack_no/box_no),
+ * not ids — resolving ids to names is the caller's job (usually already done via
+ * the backend's live-join enrichment).
+ *
+ * @param {{godown_name?: string, rack_no?: string, box_no?: string}} loc
+ * @returns {string[]} labeled parts, e.g. ["Main Warehouse", "Rack A-01", "Box BX-03"] —
+ *   only for whichever fields are actually present; empty array if nothing is set.
+ */
+export function formatLocationParts(loc) {
+  if (!loc) return [];
+  const parts = [];
+  if ((loc.godown_name || "").trim()) parts.push(loc.godown_name.trim());
+  if ((loc.rack_no || "").trim()) parts.push(`Rack ${loc.rack_no.trim()}`);
+  if ((loc.box_no || "").trim()) parts.push(`Box ${loc.box_no.trim()}`);
+  return parts;
+}
+
+/** Single-line "Main Warehouse • Rack A-01 • Box BX-03" — for table cells (React or print). */
+export function formatLocationText(loc, fallback = "—") {
+  const parts = formatLocationParts(loc);
+  return parts.length ? parts.join(" • ") : fallback;
+}
+
+/** Same as formatLocationText but HTML-escaped, for use inside print-window HTML strings. */
+export function formatLocationHtml(loc, fallback = "—") {
+  const parts = formatLocationParts(loc).map((p) => htmlEscape(p));
+  return parts.length ? parts.join(" • ") : fallback;
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.docTitle - e.g. "Issue Note"
  * @param {string} opts.docNo - e.g. "IN/26-27/003" (used only for the browser tab title)
