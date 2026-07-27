@@ -7,7 +7,7 @@ from pymongo.errors import DuplicateKeyError
 from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enforce_assignee
 from deps import _module_dep
 from models import *
-from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for
+from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for, _stock_locations_for
 from helpers.note_helpers import current_fy_label, _alloc_serial, _key
 from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
@@ -20,10 +20,12 @@ router = APIRouter()
 
 async def _issue_items_for_storage(items):
     """Normalize Issue Note items for persistence: resolve the optional godown
-    preference, and compute the authorized picking-location allocation for each
-    line (see `_allocate_locations_for`) — the set of (godown, rack, box) picking
-    will be restricted to. Recomputed on every create/edit so it always reflects
-    the current requested quantity and live stock disposition.
+    preference, and compute a suggested picking-location allocation for each line
+    (see `_allocate_locations_for`) — pre-filled onto the Picking Note, not a lock;
+    the store user may pick from any other valid location instead (see
+    `prepare_picking_note` / `_validate_picking_constraints`). Recomputed on every
+    create/edit so it always reflects the current requested quantity and live stock
+    disposition.
     """
     out = []
     for idx, it in enumerate(items, start=1):
@@ -237,7 +239,9 @@ async def stock_out(payload: StockOutCreate, user=Depends(get_current_user)):
 
 @router.get("/issue-notes/lookup/{part_no}")
 async def issue_lookup_makes(part_no: str, user=Depends(get_current_user)):
-    """For Issue Note flow: list makes that have positive stock for this part_no, with available qty."""
+    """For Issue Note flow: list makes that have positive stock for this part_no, with
+    available qty and description_1 (Description auto-populates once a make resolves;
+    stock_master description is keyed by part_no+make, so it's returned per-make here)."""
     # Pull every (part_no, make) combination that has transactions, then filter to those with positive total
     pairs = await db.transactions.aggregate([
         {"$match": {"part_no": part_no}},
@@ -245,7 +249,15 @@ async def issue_lookup_makes(part_no: str, user=Depends(get_current_user)):
         {"$match": {"q": {"$gt": 0}}},
         {"$sort": {"_id.make": 1}},
     ]).to_list(1000)
-    return {"makes": [{"make": p["_id"]["make"], "available_qty": p["q"]} for p in pairs]}
+    makes = [p["_id"]["make"] for p in pairs]
+    desc_by_make = {}
+    if makes:
+        async for sm in db.stock_master.find({"part_no": part_no, "make": {"$in": makes}}, {"_id": 0, "make": 1, "description_1": 1}):
+            desc_by_make[sm.get("make")] = sm.get("description_1", "") or ""
+    return {"makes": [
+        {"make": p["_id"]["make"], "available_qty": p["q"], "description_1": desc_by_make.get(p["_id"]["make"], "")}
+        for p in pairs
+    ]}
 
 
 @router.get("/issue-notes/lookup/{part_no}/godowns")
@@ -291,10 +303,15 @@ async def next_issue_note_no(user=Depends(get_current_user)):
 
 @router.post("/issue-notes", response_model=IssueNote)
 async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_user)):
+    """Create an Issue Note. Defaults to the existing behavior (status PENDING, Picking
+    Note auto-created immediately) so existing callers are unaffected. Pass
+    `save_as_draft: true` to land as DRAFT instead — no Picking Note yet; call
+    POST /issue-notes/{id}/finalize when ready to release it for picking."""
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items)
     stored_items = await _issue_items_for_storage(payload.items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
+    is_draft = bool(payload.save_as_draft)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     last_err = None
@@ -308,7 +325,8 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             "fy": fy,
             "serial": serial,
             "items": stored_items,
-            "status": "PENDING",
+            "status": "DRAFT" if is_draft else "PENDING",
+            "narration": (payload.narration or "").strip(),
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
             **assignee,
@@ -316,6 +334,14 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
         try:
             await db.issue_notes.insert_one(doc)
             doc.pop("_id", None)
+            if is_draft:
+                await _notify(
+                    actor=user, type="issue_note.created", module="stock_out",
+                    title=f"Issue Note {in_no} (Draft)",
+                    message=f"{user.get('email')} created draft {in_no} with {len(doc['items'])} item(s).",
+                    audience="module", ref_collection="issue_notes", ref_id=doc["id"],
+                )
+                return doc
             try:
                 await _auto_create_picking_note_for_issue(doc, user)
             except Exception:
@@ -342,6 +368,49 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
     raise HTTPException(status_code=500, detail=f"Could not allocate issue-note number: {last_err}")
 
 
+@router.post("/issue-notes/{in_id}/finalize", response_model=IssueNote)
+async def finalize_issue_note(in_id: str, user=Depends(get_current_user)):
+    """Promote a DRAFT issue note to PENDING and auto-create its Picking Note —
+    mirrors Receipt Note's DRAFT -> /finalize pattern."""
+    inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
+    if not inn:
+        raise HTTPException(status_code=404, detail="Issue note not found")
+    if inn.get("status") != "DRAFT":
+        raise HTTPException(status_code=409, detail=f"Only DRAFT issue notes can be finalized (current status: {inn.get('status')})")
+    _enforce_assignee(inn, user, "finalize this issue note")
+    if not inn.get("items"):
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    await db.issue_notes.update_one({"id": in_id}, {"$set": {"status": "PENDING"}})
+    inn["status"] = "PENDING"
+    try:
+        await _auto_create_picking_note_for_issue(inn, user)
+    except Exception:
+        await db.issue_notes.update_one({"id": in_id}, {"$set": {"status": "DRAFT"}})
+        raise
+    await _write_audit_log(
+        module="stock_out", action="issue_note.finalized", actor=user,
+        ref_collection="issue_notes", ref_id=in_id,
+        old={"status": "DRAFT"}, new={"status": "PENDING"},
+    )
+    await _notify(
+        actor=user, type="issue_note.created", module="stock_out",
+        title=f"Issue Note {inn['in_no']}",
+        message=f"{user.get('email')} finalized {inn['in_no']} for '{inn.get('assigned_to_name') or '—'}' with {len(inn['items'])} item(s) — picking pending.",
+        audience="module", ref_collection="issue_notes", ref_id=in_id,
+    )
+    if inn.get("assigned_to_user_id"):
+        await _notify(
+            actor=user, type="issue_note.assigned", module="stock_out",
+            title=f"Assigned to you: {inn['in_no']}",
+            message=f"{user.get('email')} assigned Issue Note {inn['in_no']} to you for picking.",
+            audience="user", target_user_id=inn["assigned_to_user_id"],
+            ref_collection="issue_notes", ref_id=in_id,
+        )
+    doc = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
+    return doc
+
+
 @router.get("/issue-notes")
 async def list_issue_notes(
     response: Response,
@@ -349,9 +418,16 @@ async def list_issue_notes(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"in_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
@@ -399,6 +475,7 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     update = {
         "items": stored_items,
+        "narration": (payload.narration or "").strip(),
         "updated_at": now_iso(),
         **assignee,
     }
@@ -460,13 +537,17 @@ async def next_picking_note_no(user=Depends(get_current_user)):
 
 @router.get("/picking-notes/prepare/{in_id}")
 async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, user=Depends(get_current_user)):
-    """Return one row per AUTHORIZED picking location for each still-pending Issue Note
+    """Return one row per SUGGESTED picking location for each still-pending Issue Note
     line — a fresh greedy allocation across current stock (see _allocate_locations_for),
     scoped to whatever is pending for this specific Picking Note (already correctly
     reduced for a follow-up/partial-pick continuation, since `base_items` in that case
-    is the frozen remainder, not the original full request). Locations are fixed —
-    the picker confirms/adjusts quantity only; see requirement: "Picking Locations Must
-    Match the Issued Locations"."""
+    is the frozen remainder, not the original full request).
+
+    The suggestion is pre-filled but never locked: each row also carries
+    `available_locations` — every valid stock location currently holding this
+    part/make, with its live quantity — so the store user can accept the suggestion,
+    pick partially from it, or choose a different valid location entirely. Real
+    warehouse stock rarely matches the office user's assumption exactly."""
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=404, detail="Issue note not found")
@@ -486,6 +567,7 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
         if pending <= 0:
             continue
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+        available_locations = await _stock_locations_for(part_no, make)
         allocation = await _allocate_locations_for(part_no, make, pending, selected_godown_id)
         allocated_qty = sum(a["quantity"] for a in allocation)
         common = {
@@ -500,21 +582,23 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
             "remarks_oem": master.get("remarks_oem", ""),
             "remarks_others": master.get("remarks_others", ""),
             "item_category": master.get("item_category", ""),
+            "available_locations": available_locations,
         }
         for a in allocation:
             items_out.append({
                 **common,
-                "quantity": a["quantity"], "allocated_qty": a["quantity"],
+                "quantity": a["quantity"], "allocated_qty": a["quantity"], "suggested": True,
                 "godown_id": a["godown_id"], "godown_name": a["godown_name"],
                 "rack_id": a["rack_id"], "rack_no": a["rack_no"],
                 "box_id": a["box_id"], "box_no": a["box_no"], "box_category": a.get("box_category", ""),
             })
         if allocated_qty + 1e-6 < pending:
-            # Stock fell short of the authorized quantity since the Issue Note was
-            # created/edited (e.g. concurrent consumption elsewhere) — surface the gap
-            # as an unallocated row so the picker can only reject it, not invent a location.
+            # Stock fell short of the greedily-suggested quantity since the Issue Note
+            # was created/edited (e.g. concurrent consumption elsewhere) — surface the
+            # gap as an unfilled row; the picker can reject it or pick it from another
+            # location in `available_locations`.
             items_out.append({
-                **common, "quantity": 0, "allocated_qty": 0, "unallocated_shortfall": pending - allocated_qty,
+                **common, "quantity": 0, "allocated_qty": 0, "suggested": False, "unallocated_shortfall": pending - allocated_qty,
                 "godown_id": "", "godown_name": "", "rack_id": "", "rack_no": "",
                 "box_id": "", "box_no": "", "box_category": "",
             })
@@ -583,19 +667,27 @@ async def list_picking_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     issue_note_id: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     from helpers.stock_helpers import _enrich_with_parent_assignee
     query = {}
     if issue_note_id:
         query["issue_note_id"] = issue_note_id
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"pn_no": {"$regex": s, "$options": "i"}},
+            {"issue_note_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
-    if not issue_note_id and not status and not not_status:
+    if not issue_note_id and not status and not not_status and not search:
         query["status"] = {"$in": ["PENDING", "DRAFT", "RECORDING"]}
     total = await db.picking_notes.count_documents(query)
     skip = (page - 1) * page_size
@@ -765,13 +857,49 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
                 )
                 if not finalized:
                     raise HTTPException(status_code=409, detail="Picking note recording state changed; stock out was not finalized")
+
+                # Planned-vs-actual audit: the Issue Note's suggested/allocated locations
+                # for each part/make, compared against the location the store user actually
+                # picked from. "What was suggested" must never be lost once the actual pick
+                # supersedes it everywhere else (previews, print, transactions, reports) —
+                # mirrors the same pattern used for Transfer Note (record_transfer_note).
+                planned_locs_by_key: dict[str, list] = {}
+                for pit in (assigned_items or []):
+                    k = _key(pit.get("part_no"), pit.get("make"))
+                    for loc in pit.get("allocated_locations") or []:
+                        planned_locs_by_key.setdefault(k, []).append({
+                            "godown_id": loc.get("godown_id", "") or "", "godown_name": loc.get("godown_name", "") or "",
+                            "rack_id": loc.get("rack_id", "") or "", "rack_no": loc.get("rack_no", "") or "",
+                            "box_id": loc.get("box_id", "") or "", "box_no": loc.get("box_no", "") or "",
+                        })
+
+                def _loc(d):
+                    return {
+                        "godown_id": d.get("godown_id", "") or "", "godown_name": d.get("godown_name", "") or "",
+                        "rack_id": d.get("rack_id", "") or "", "rack_no": d.get("rack_no", "") or "",
+                        "box_id": d.get("box_id", "") or "", "box_no": d.get("box_no", "") or "",
+                    }
+
+                location_changes = []
+                for it in items:
+                    if (it.get("quantity") or 0) <= 0:
+                        continue
+                    planned_locs = planned_locs_by_key.get(_key(it.get("part_no"), it.get("make"))) or []
+                    actual = _loc(it)
+                    if planned_locs and actual not in planned_locs:
+                        location_changes.append({
+                            "part_no": it.get("part_no"), "make": it.get("make"),
+                            "suggested_locations": planned_locs, "actual_location": actual,
+                        })
+
                 await uow.audit.record(
                     action="picking_note.completed", actor=user,
                     ref_collection="picking_notes", ref_id=pn_id,
                     old={"status": "RECORDING"},
                     new={"status": "COMPLETED", "items": items, "transactions_created": len(tx_docs)},
+                    reason="Actual pick location differs from the issue note's suggested location" if location_changes else "",
                     module="stock_out",
-                    links={"issue_note_id": pn.get("issue_note_id", "")},
+                    links={"issue_note_id": pn.get("issue_note_id", ""), "location_changes": location_changes},
                 )
             # transaction committed here, still holding the location locks
         # location locks released here

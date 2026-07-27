@@ -19,10 +19,10 @@ import { useAuth } from "../lib/auth";
 import { AssigneeBadge } from "../components/AssigneeSelect";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
-import { ReceiptNoteDetailDialog, stockInTypeMeta, stockInTypeLabel } from "./StockInPage";
+import { ReceiptNoteDetailDialog } from "./StockInPage";
 import { useStockInNav } from "../lib/stockInNav";
 import { exportToExcel } from "../lib/exportExcel";
-import { formatLocationText } from "../lib/printDocument";
+import { formatLocationText, buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 
@@ -88,85 +88,60 @@ async function exportRackingNote(rkn) {
     const key = `${it.part_no}||${it.make}`;
     const locs = existingByKey[key] || [];
     const hasDestination = !!(it.godown_name || it.rack_no || it.box_no);
-    const destCell = hasDestination
-      ? `<td>${escapeHtml(it.godown_name || "—")}</td><td>${escapeHtml(it.rack_no || "—")}</td><td>${escapeHtml(it.box_no || "—")}</td>`
-      : `<td class="blank-cell"></td><td class="blank-cell"></td><td class="blank-cell"></td>`;
-    const baseCells = (showItem) => `
-      <td>${escapeHtml(it.model || "—")}</td>
-      <td>${showItem ? `<strong>${escapeHtml(it.part_no || "")}</strong>` : ""}</td>
-      <td>${showItem ? escapeHtml(it.description_1 || "—") : ""}</td>
-      <td>${showItem ? escapeHtml(it.make || "") : ""}</td>
-      <td style="text-align:right">${showItem ? (it.quantity ?? "—") : ""}</td>`;
+    const destCells = hasDestination
+      ? [escapeHtml(it.godown_name || "—"), escapeHtml(it.rack_no || "—"), escapeHtml(it.box_no || "—")]
+      : ["—", "—", "—"];
+    const baseCells = (showItem) => [
+      escapeHtml(it.model || "—"),
+      showItem ? `<strong>${escapeHtml(it.part_no || "")}</strong>` : "",
+      showItem ? escapeHtml(it.description_1 || "—") : "",
+      showItem ? escapeHtml(it.make || "") : "",
+      `<span style="text-align:right;display:block">${showItem ? escapeHtml(it.quantity ?? "—") : ""}</span>`,
+    ];
     if (locs.length === 0) {
-      rows.push(`<tr>
-        <td>${idx + 1}</td>
-        ${baseCells(true)}
-        <td colspan="3" style="font-style:italic;color:#94a3b8">No existing stock at any location</td>
-        ${destCell}
-      </tr>`);
+      rows.push([
+        String(idx + 1), ...baseCells(true),
+        `<span style="font-style:italic;color:#94a3b8">No existing stock</span>`, "", "",
+        `<span style="text-align:right;display:block">—</span>`,
+        ...destCells,
+      ]);
     } else {
       locs.forEach((l, li) => {
-        rows.push(`<tr>
-          <td>${idx + 1}${locs.length > 1 ? `.${li + 1}` : ""}</td>
-          ${baseCells(li === 0)}
-          <td>${escapeHtml(l.godown_name || "—")}</td>
-          <td>${escapeHtml(l.rack_no || "—")}</td>
-          <td>${escapeHtml(l.box_no || "—")}</td>
-          <td style="text-align:right">${l.current_qty}</td>
-          ${li === 0 ? destCell : `<td class="blank-cell"></td><td class="blank-cell"></td><td class="blank-cell"></td>`}
-        </tr>`);
+        rows.push([
+          `${idx + 1}${locs.length > 1 ? `.${li + 1}` : ""}`,
+          ...baseCells(li === 0),
+          escapeHtml(l.godown_name || "—"), escapeHtml(l.rack_no || "—"), escapeHtml(l.box_no || "—"),
+          `<span style="text-align:right;display:block">${escapeHtml(l.current_qty)}</span>`,
+          ...(li === 0 ? destCells : ["—", "—", "—"]),
+        ]);
       });
     }
   });
 
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8" />
-<title>${escapeHtml(rkn.rkn_no)} — Racking Note</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 32px; color: #020617; }
-  h1 { font-size: 22px; font-weight: 900; margin: 0 0 4px; text-align: center; letter-spacing: 0.12em; text-transform: uppercase; color: #000000; }
-  .header-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  .field-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
-  .field-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; margin-top: 2px; color: #0f172a; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
-  th { text-align: left; padding: 6px 8px; background: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; color: #0f172a; }
-  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; vertical-align: top; color: #0f172a; }
-  .blank-cell { min-width: 70px; border-left: 1px dashed #94a3b8; background: repeating-linear-gradient(0deg, transparent, transparent 17px, #e2e8f0 18px); }
-  .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 8px; }
-  @media print { body { padding: 12mm; } }
-</style></head>
-<body>
-  <h1>Racking Note</h1>
-  <div class="header-grid">
-    <div><div class="field-label">Racking Note No</div><div class="field-value">${escapeHtml(rkn.rkn_no)}</div></div>
-    <div><div class="field-label">Racking Note Date</div><div class="field-value">${escapeHtml(fmtDate(rkn.rkn_date))}</div></div>
-    <div><div class="field-label">Status</div><div class="field-value">${escapeHtml(rkn.status === "RECORDED" ? "Complete" : "In Process")}</div></div>
-    <div><div class="field-label">Racked Against</div><div class="field-value">${escapeHtml(rkn.source_type || "RN")} · ${escapeHtml(rkn.source_no || rkn.receipt_note_no || "—")}</div></div>
-    <div><div class="field-label">Receipt Note No</div><div class="field-value">${escapeHtml(rkn.receipt_note_no || "—")}</div></div>
-    <div><div class="field-label">Created By</div><div class="field-value">${escapeHtml(rkn.created_by || "—")}</div></div>
-  </div>
-  <table>
-    <thead><tr>
-      <th>Sl</th><th>Model</th><th>Part No</th><th>Description</th><th>Make</th>
-      <th style="text-align:right">Qty</th>
-      <th>Existing Godown</th><th>Existing Rack</th><th>Existing Box</th>
-      <th style="text-align:right">Existing Qty</th>
-      <th>New Godown</th><th>New Rack</th><th>New Box</th>
-    </tr></thead>
-    <tbody>${rows.join("")}</tbody>
-  </table>
-  <div class="footer">
-    Printed: ${escapeHtml(new Date().toLocaleString())} &nbsp;·&nbsp; Printed by: ${escapeHtml(rkn.created_by || "—")}
-  </div>
-  <script>window.onload = () => { setTimeout(() => window.print(), 100); };</script>
-</body></html>`;
-
-  const w = window.open("", "_blank", "width=1000,height=750");
-  if (!w) { toast.error("Popup blocked — allow popups for this site to print"); return; }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
+  const html = buildStandardPrintHtml({
+    docTitle: "Racking Note",
+    docNo: rkn.rkn_no,
+    statusLabel: rkn.status === "RECORDED" ? "Complete" : "In Process",
+    fieldsLeft: [
+      ["Racking Note No", rkn.rkn_no],
+      ["Racking Note Date", fmtDate(rkn.rkn_date)],
+      ["Status", rkn.status === "RECORDED" ? "Complete" : "In Process"],
+    ],
+    fieldsRight: [
+      ["Racked Against", `${rkn.source_type || "RN"} · ${rkn.source_no || rkn.receipt_note_no || "—"}`],
+      ["Receipt Note No", rkn.receipt_note_no || "—"],
+      ["Created By", rkn.created_by || "—"],
+    ],
+    columns: [
+      { label: "Sl" }, { label: "Model" }, { label: "Part No" }, { label: "Description" }, { label: "Make" },
+      { label: "Qty", align: "right" },
+      { label: "Existing Godown" }, { label: "Existing Rack" }, { label: "Existing Box" }, { label: "Existing Qty", align: "right" },
+      { label: "New Godown" }, { label: "New Rack" }, { label: "New Box" },
+    ],
+    rows,
+    printedBy: rkn.created_by,
+  });
+  if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
 
@@ -295,12 +270,10 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
   };
 
   const columns = useMemo(() => [
+    { key: "rkn_date", label: "RACKING DATE", value: (r) => fmtDate(r.rkn_date) },
     { key: "rkn_no", label: "RACKING NOTE NO", value: (r) => r.rkn_no || "" },
-    { key: "rkn_date", label: "RACKING NOTE DATE", value: (r) => fmtDate(r.rkn_date) },
-    { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.receipt_note_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.receipt_note_no || "" },
-    { key: "material_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
     { key: "status", label: "STATUS", value: (r) => r.status === "RECORDED" ? "Complete" : "In Process" },
   ], []);
   const {
@@ -381,6 +354,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
                   <td>
                     <button
                       onClick={() => onOpen(r)}
@@ -389,15 +363,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                     >
                       {r.rkn_no}
                     </button>
-                  </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
-                  <td>
-                    {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
-                            data-testid={`rkn-stock-in-type-${r.rkn_no}`}>
-                        {sit.label}
-                      </span>
-                    ); })()}
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
                   <td>
@@ -411,7 +376,6 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       </button>
                     ) : <span className="font-mono text-slate-400">—</span>}
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : "bg-blue-50 text-blue-800"}`}
                       data-testid={`rkn-status-${r.rkn_no}`}>
@@ -457,7 +421,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={7} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No racking notes. Click 'Create New Racking Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>

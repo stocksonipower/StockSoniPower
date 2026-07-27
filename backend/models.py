@@ -387,9 +387,10 @@ class IssueNoteItem(BaseModel):
     model: Optional[str] = ""
     description_1: Optional[str] = ""
     item_category: Optional[str] = ""
-    # Authorized picking locations — computed server-side (greedy-fill across existing
-    # stock locations) at create/edit time. Picking is restricted to exactly these
-    # (godown_id, rack_id, box_id) combinations; not user-editable. Each entry:
+    # Suggested picking locations — computed server-side (greedy-fill across existing
+    # stock locations) at create/edit time, pre-filled onto the Picking Note. Not a
+    # lock: the store user may accept, partially pick, or choose a different valid
+    # location (see _validate_picking_constraints). Each entry:
     # {godown_id, godown_name, rack_id, rack_no, box_id, box_no, box_category, quantity}.
     allocated_locations: Optional[List[dict]] = Field(default_factory=list)
 
@@ -397,6 +398,11 @@ class IssueNoteItem(BaseModel):
 class IssueNoteCreate(BaseModel):
     items: List[IssueNoteItem] = []
     assigned_to_user_id: Optional[str] = None
+    narration: Optional[str] = ""
+    # True -> land as DRAFT (no Picking Note yet; use POST .../finalize when ready).
+    # False (default) -> unchanged existing behavior: immediately PENDING with its
+    # Picking Note auto-created, same as before this field existed.
+    save_as_draft: Optional[bool] = False
 
 
 class IssueNote(BaseModel):
@@ -406,12 +412,16 @@ class IssueNote(BaseModel):
     fy: str
     serial: int
     items: List[IssueNoteItem] = []
-    # Active 3-status set: PENDING (nothing picked/rejected yet) -> IN_PROCESS
-    # (some picked/rejected, some pending) -> COMPLETE (picked+rejected == requested
-    # for every line). Legacy PICKING_PENDING/PICKING_IN_PROGRESS/PARTIALLY_PICKED/
-    # FULLY_PICKED/OPEN are migrated on startup.
+    # DRAFT is an internal pre-finalize marker only (gates /finalize; no Picking Note
+    # exists yet; always shown as "Pending" in the UI). Once finalized (or created
+    # directly as final), the active 3-status set applies: PENDING (nothing
+    # picked/rejected yet) -> IN_PROCESS (some picked/rejected, some pending) ->
+    # COMPLETE (picked+rejected == requested for every line). Legacy
+    # PICKING_PENDING/PICKING_IN_PROGRESS/PARTIALLY_PICKED/FULLY_PICKED/OPEN are
+    # migrated on startup.
     status: str = "PENDING"
     picked_at: Optional[str] = None
+    narration: Optional[str] = ""
     created_at: str
     created_by: str = ""
     assigned_to_user_id: Optional[str] = None

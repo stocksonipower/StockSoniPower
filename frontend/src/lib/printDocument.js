@@ -50,8 +50,9 @@ export function formatLocationHtml(loc, fallback = "—") {
  * @param {string[][]} opts.rows - pre-formatted (already-escaped) cell HTML per row
  * @param {string} [opts.printedBy]
  * @param {string} [opts.sectionTitle] - defaults to "Items"
+ * @param {string} [opts.narration] - optional narration/remarks block, rendered below the header grid
  */
-export function buildStandardPrintHtml({ docTitle, docNo, statusLabel, fieldsLeft, fieldsRight, columns, rows, printedBy, sectionTitle = "Items" }) {
+export function buildStandardPrintHtml({ docTitle, docNo, statusLabel, fieldsLeft, fieldsRight, columns, rows, printedBy, sectionTitle = "Items", narration = "" }) {
   const pField = ([label, value]) =>
     `<div><div class="field-label">${htmlEscape(label)}</div><div class="field-value">${htmlEscape(value == null || value === "" ? "—" : value)}</div></div>`;
   const theadCells = columns.map((c) => `<th${c.align ? ` style="text-align:${c.align}"` : ""}>${htmlEscape(c.label)}</th>`).join("");
@@ -87,6 +88,8 @@ export function buildStandardPrintHtml({ docTitle, docNo, statusLabel, fieldsLef
     <div>${fieldsLeft.map(pField).join("")}</div>
     <div>${fieldsRight.map(pField).join("")}</div>
   </div>
+
+  ${narration ? `<div style="margin:0 0 16px;"><div class="field-label">Narration</div><div class="field-value" style="white-space:pre-wrap;">${htmlEscape(narration)}</div></div>` : ""}
 
   <div class="section-title">${htmlEscape(sectionTitle)} (${rows.length})</div>
   <table>

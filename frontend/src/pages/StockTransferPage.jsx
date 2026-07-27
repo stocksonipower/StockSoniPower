@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -14,7 +14,7 @@ import { toast } from "sonner";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
   Pencil, CheckCircle, ArrowsLeftRight, Package, MapPin, Printer,
-  DownloadSimple, ArrowsClockwise,
+  DownloadSimple, ArrowsClockwise, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
@@ -313,17 +313,31 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/transfer-requests", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/transfer-requests", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
-  useEffect(() => { load(); }, [load, reloadKey]);
+  }, [page, search]);
+  useEffect(() => { load(); }, [load, reloadKey, search]);
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleDelete = async (s) => {
     if (!window.confirm(`Delete ${s.str_no}?`)) return;
@@ -362,9 +376,18 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="str-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
-          </div>
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search transfer requests…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
+            data-testid="str-search-input"
+          />
+        </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="str-export-button">
             <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
@@ -1007,17 +1030,31 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [recordingId, setRecordingId] = useState(null);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/transfer-notes", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/transfer-notes", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
-  useEffect(() => { load(); }, [load, reloadKey]);
+  }, [page, search]);
+  useEffect(() => { load(); }, [load, reloadKey, search]);
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleDelete = async (stn) => {
     if (!window.confirm(`Delete ${stn.stn_no}?`)) return;
@@ -1064,8 +1101,17 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="stn-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search transfer notes…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
+            data-testid="stn-search-input"
+          />
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="stn-export-button">

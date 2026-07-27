@@ -262,6 +262,10 @@ async def _recompute_in_status(in_id: str):
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         return
+    # DRAFT (pre-finalize, no Picking Note exists yet) never gets auto-promoted —
+    # mirrors Receipt Note's _recompute_rn_status DRAFT guard.
+    if inn.get("status") == "DRAFT":
+        return
     requested = {}
     for it in inn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))

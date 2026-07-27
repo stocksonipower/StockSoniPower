@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, formatApiError } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -11,10 +11,11 @@ import {
 } from "../components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { toast } from "sonner";
+import * as XLSX from "xlsx";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight,
   Pencil, CheckCircle, Package, Printer,
-  DownloadSimple, ArrowsClockwise,
+  DownloadSimple, UploadSimple, ArrowsClockwise, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
@@ -22,7 +23,7 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
-import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
+import { buildStandardPrintHtml, openPrintWindow, formatLocationText } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 const NO_GODOWN = "__NO_GODOWN__";
@@ -81,6 +82,13 @@ function pickingNoteStatusLabel(status) {
 // to freshly-prepared ones needs the full location, not just part/make.
 function pickingLocKey(it) {
   return `${it.part_no || ""}||${it.make || ""}||${it.godown_id || ""}||${it.rack_id || ""}||${it.box_id || ""}`;
+}
+
+// Location-only key (no part/make) — `available_locations` entries are already
+// scoped to one item's part/make, so this is enough to match a row's current
+// selection against one of its own choices.
+function locOnlyKey(L) {
+  return `${L?.godown_id || ""}||${L?.rack_id || ""}||${L?.box_id || ""}`;
 }
 
 function pickingAssignedItems(pn) {
@@ -215,24 +223,33 @@ function printIssueNote(inn, pickingHistory = []) {
       { label: "Remarks" },
     ],
     rows,
+    narration: inn.narration || "",
     printedBy: inn.created_by,
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
 function buildPickingEditItems(editing, preparedItems) {
-  const preparedByKey = {};
-  (preparedItems || []).forEach((p) => { preparedByKey[pickingLocKey(p)] = p; });
+  const preparedByLocKey = {};
+  const availableByItemKey = {};
+  (preparedItems || []).forEach((p) => {
+    preparedByLocKey[pickingLocKey(p)] = p;
+    const k = pickingKey(p);
+    if (!availableByItemKey[k]) availableByItemKey[k] = p.available_locations || [];
+  });
   const existing = editing?.items || [];
   if (existing.length) {
     return existing.map((it) => {
-      const p = preparedByKey[pickingLocKey(it)] || {};
+      const p = preparedByLocKey[pickingLocKey(it)] || {};
+      const k = pickingKey(it);
       return {
       ...it,
       row_status: editing?.status === "RECORDED" ? "Picked" : "Draft Pick",
       pending_qty: p.pending_qty ?? it.pending_qty ?? 0,
       requested_qty: p.requested_qty ?? it.requested_qty ?? 0,
       allocated_qty: p.allocated_qty ?? it.allocated_qty ?? it.quantity ?? 0,
+      suggested: p.suggested ?? it.suggested ?? false,
+      available_locations: availableByItemKey[k] || it.available_locations || [],
       };
     });
   }
@@ -301,17 +318,31 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/issue-notes", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/issue-notes", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
-  useEffect(() => { load(); }, [load, reloadKey]);
+  }, [page, search]);
+  useEffect(() => { load(); }, [load, reloadKey, search]);
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleDelete = async (inn) => {
     if (!window.confirm(`Delete ${inn.in_no}?`)) return;
@@ -348,8 +379,17 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="in-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search issue notes…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
+            data-testid="in-search-input"
+          />
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="in-export-button">
@@ -501,6 +541,12 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                 </div>
               </div>
             </div>
+            {inn.narration && (
+              <div className="pt-3 pb-1 border-b border-slate-200">
+                <div className="label-sm mb-1">NARRATION</div>
+                <div className="text-sm text-slate-700 whitespace-pre-wrap">{inn.narration}</div>
+              </div>
+            )}
             <div className="mt-2">
               <div className="label-sm mb-2">Items ({(inn.items || []).length})</div>
               <div className="overflow-x-auto">
@@ -591,6 +637,7 @@ const emptyIssueItem = () => ({
   part_no: "",
   make: "",
   quantity: "",
+  description_1: "",
   selected_godown_id: null,
   selected_godown_name: null,
   godowns: [],
@@ -601,19 +648,26 @@ const emptyIssueItem = () => ({
 
 function IssueNoteForm({ editing, onCancel, onSaved }) {
   const isEdit = !!editing;
+  const isDraftEdit = isEdit && editing.status === "DRAFT";
+  const isFinalEdit = isEdit && !isDraftEdit;
   const [inNo, setInNo] = useState("");
   const [inDate, setInDate] = useState("");
   const [items, setItems] = useState([emptyIssueItem()]);
-  const [saving, setSaving] = useState(false);
+  const [narration, setNarration] = useState("");
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savingFinal, setSavingFinal] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (isEdit) {
       setInNo(editing.in_no || "");
       setInDate(editing.in_date || "");
       setAssignedToUserId(editing.assigned_to_user_id || "");
+      setNarration(editing.narration || "");
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "", make: it.make || "", quantity: it.quantity ?? "",
+        description_1: it.description_1 || "",
         selected_godown_id: it.selected_godown_id || null,
         selected_godown_name: it.selected_godown_name || null,
         godowns: it.selected_godown_id ? [{
@@ -631,7 +685,10 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           .then(({ data }) => {
             const makesArr = data.makes || [];
             const found = makesArr.find((m) => m.make === row.make);
-            setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: makesArr, available_qty: found?.available_qty || 0 } : r));
+            setItems((prev) => prev.map((r, i) => i === idx ? {
+              ...r, makes: makesArr, available_qty: found?.available_qty || 0,
+              description_1: r.description_1 || found?.description_1 || "",
+            } : r));
             if (row.make) loadIssueGodowns(idx, row.part_no, row.make, row.selected_godown_id);
           })
           .catch(() => {});
@@ -673,7 +730,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
-    if (!v) { updateItem(i, { makes: [], make: "", partLooked: false, available_qty: 0, godowns: [], selected_godown_id: null, selected_godown_name: null }); return; }
+    if (!v) { updateItem(i, { makes: [], make: "", description_1: "", partLooked: false, available_qty: 0, godowns: [], selected_godown_id: null, selected_godown_name: null }); return; }
     try {
       const { data } = await api.get(`/issue-notes/lookup/${encodeURIComponent(v)}`);
       const list = data.makes || [];
@@ -682,18 +739,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
         makes: list, partLooked: true,
         make: auto ? auto.make : "",
         available_qty: auto ? auto.available_qty : 0,
+        description_1: auto ? (auto.description_1 || "") : "",
         godowns: [],
         selected_godown_id: null,
         selected_godown_name: null,
       });
       if (auto) loadIssueGodowns(i, v, auto.make);
-    } catch { updateItem(i, { makes: [], partLooked: true, make: "", available_qty: 0 }); }
+    } catch { updateItem(i, { makes: [], partLooked: true, make: "", description_1: "", available_qty: 0 }); }
   };
 
   const onMakeChange = (i, makeVal) => {
     const row = items[i];
     const found = (row.makes || []).find((m) => m.make === makeVal);
-    updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0, godowns: [], selected_godown_id: null, selected_godown_name: null });
+    updateItem(i, {
+      make: makeVal, available_qty: found?.available_qty || 0,
+      description_1: found?.description_1 || "",
+      godowns: [], selected_godown_id: null, selected_godown_name: null,
+    });
     loadIssueGodowns(i, row.part_no, makeVal);
   };
 
@@ -732,23 +794,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     return m;
   }, [items]);
 
-  const save = async () => {
-    if (items.length === 0) { toast.error("Add at least one item"); return; }
+  const validateRows = () => {
+    if (items.length === 0) { toast.error("Add at least one item"); return false; }
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return; }
-      if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
+      if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return false; }
+      if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return false; }
       const q = parseInt(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
+      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return false; }
       if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock, cannot issue ${q}`);
-        return;
+        return false;
       }
       if (it.selected_godown_id) {
         const selected = (it.godowns || []).find((g) => g.godown_id === it.selected_godown_id);
         if (selected && q > (selected.available_qty || 0) + 1e-6) {
           toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${selected.available_qty || 0} in ${it.selected_godown_name || "selected godown"}, cannot issue ${q}`);
-          return;
+          return false;
         }
       }
     }
@@ -759,7 +821,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       const avail = row?.available_qty || 0;
       if (total > avail + 1e-6) {
         toast.error(`${p}/${m}: total requested across rows is ${total} but only ${avail} in stock`);
-        return;
+        return false;
       }
     }
     for (const [k, total] of Object.entries(requestedByGodownKey)) {
@@ -768,29 +830,167 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       const selected = (row?.godowns || []).find((g) => g.godown_id === gid);
       if (selected && total > (selected.available_qty || 0) + 1e-6) {
         toast.error(`${p}/${m}: total requested from ${selected.godown_name || "selected godown"} is ${total} but only ${selected.available_qty || 0} is available there`);
-        return;
+        return false;
       }
     }
-    setSaving(true);
+    return true;
+  };
+
+  const buildPayload = (asDraft) => ({
+    assigned_to_user_id: assignedToUserId || null,
+    narration: narration.trim(),
+    save_as_draft: asDraft,
+    items: items.map((it) => ({
+      part_no: it.part_no.trim(),
+      make: it.make.trim(),
+      quantity: parseInt(it.quantity),
+      description_1: it.description_1 || "",
+      selected_godown_id: it.selected_godown_id || null,
+      selected_godown_name: it.selected_godown_name || null,
+    })),
+  });
+
+  const saveDraft = async () => {
+    if (!validateRows()) return;
+    setSavingDraft(true);
     try {
-      const payload = {
-        assigned_to_user_id: assignedToUserId || null,
-        items: items.map((it) => ({
-          part_no: it.part_no.trim(),
-          make: it.make.trim(),
-          quantity: parseInt(it.quantity),
-          selected_godown_id: it.selected_godown_id || null,
-          selected_godown_name: it.selected_godown_name || null,
-        })),
-      };
+      const payload = buildPayload(true);
       const { data } = isEdit
         ? await api.put(`/issue-notes/${editing.id}`, payload)
         : await api.post("/issue-notes", payload);
-      toast.success(`Issue Note ${data.in_no} ${isEdit ? "updated" : "saved"}`);
+      toast.success(`Draft saved · ${data.in_no}`);
+      onSaved();
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save draft");
+    } finally { setSavingDraft(false); }
+  };
+
+  const saveFinal = async () => {
+    if (!validateRows()) return;
+    setSavingFinal(true);
+    try {
+      const payload = buildPayload(false);
+      let inId, inNoDisplay;
+      if (isEdit) {
+        const { data } = await api.put(`/issue-notes/${editing.id}`, payload);
+        inId = data.id; inNoDisplay = data.in_no;
+        if (isDraftEdit) {
+          await api.post(`/issue-notes/${inId}/finalize`);
+          toast.success(`Issue Note ${inNoDisplay} finalized — picking pending`);
+        } else {
+          toast.success(`Issue Note ${inNoDisplay} updated`);
+        }
+      } else {
+        const { data } = await api.post("/issue-notes", payload);
+        inNoDisplay = data.in_no;
+        toast.success(`Issue Note ${inNoDisplay} saved — picking pending`);
+      }
       onSaved();
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
-    } finally { setSaving(false); }
+    } finally { setSavingFinal(false); }
+  };
+
+  const handleDownloadTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["Part No", "Make", "Quantity", "Godown Preference"],
+      ["EXAMPLE-001", "ACME", 5, ""],
+      ["", "", "", ""],
+    ]);
+    ws["!cols"] = [{ wch: 18 }, { wch: 16 }, { wch: 12 }, { wch: 20 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Issue Note Template");
+    XLSX.writeFile(wb, "Issue_Note_Template.xlsx");
+    toast.success("Template downloaded");
+  };
+
+  const handleExcelImport = async (file) => {
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+      if (!rows.length) { toast.error("Excel file has no rows"); return; }
+      const norm = (s) => String(s || "").toLowerCase().replace(/[\s_-]+/g, "");
+      const pickCol = (row, names) => {
+        const map = {};
+        Object.keys(row).forEach((k) => { map[norm(k)] = k; });
+        for (const n of names) {
+          const k = map[norm(n)];
+          if (k != null) return row[k];
+        }
+        return "";
+      };
+      const newRows = [];
+      for (const row of rows) {
+        const part_no = String(pickCol(row, ["part no", "partno", "part_no", "part number"]) || "").trim();
+        const make = String(pickCol(row, ["make"]) || "").trim();
+        const qtyRaw = pickCol(row, ["quantity", "qty", "requested quantity", "requested_qty"]);
+        const godownPref = String(pickCol(row, ["godown preference", "godown", "godown_preference"]) || "").trim();
+        if (!part_no && (qtyRaw === "" || qtyRaw == null)) continue;
+        if (!part_no) { toast.error("Skipped row — Part No missing"); continue; }
+        const qty = parseInt(qtyRaw);
+        if (isNaN(qty) || qty <= 0) { toast.error(`Row for ${part_no} skipped — Quantity must be > 0`); continue; }
+        newRows.push({
+          ...emptyIssueItem(),
+          part_no, make, quantity: qty, _godownPrefName: godownPref,
+          // Stable id to re-find this exact row across the two chained async lookups
+          // below — matching by object reference breaks once the first lookup's
+          // setItems() has already replaced the row with a new object (which is
+          // what was happening: the godown lookup's setItems could never find its
+          // row again, so `godowns` never got populated and the Godown Preference
+          // dropdown stayed permanently disabled after an import).
+          _importId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        });
+      }
+      if (!newRows.length) { toast.error("No valid rows found in file"); return; }
+      setItems((prev) => {
+        const onlyEmpty = prev.length === 1 && !prev[0].part_no && !prev[0].quantity;
+        return onlyEmpty ? newRows : [...prev, ...newRows];
+      });
+      newRows.forEach((row) => {
+        const importId = row._importId;
+        setTimeout(() => {
+          api.get(`/issue-notes/lookup/${encodeURIComponent(row.part_no)}`)
+            .then(({ data }) => {
+              const list = data.makes || [];
+              const matched = row.make ? list.find((m) => m.make === row.make) : (list.length === 1 ? list[0] : null);
+              setItems((prev) => prev.map((r) => {
+                if (r._importId !== importId) return r;
+                return {
+                  ...r, makes: list, partLooked: true,
+                  make: matched ? matched.make : row.make,
+                  available_qty: matched ? matched.available_qty : 0,
+                  description_1: matched ? (matched.description_1 || "") : "",
+                };
+              }));
+              if (matched) {
+                api.get(`/issue-notes/lookup/${encodeURIComponent(row.part_no)}/godowns`, { params: { make: matched.make } })
+                  .then(({ data: gd }) => {
+                    const glist = gd.godowns || [];
+                    const gmatch = row._godownPrefName
+                      ? glist.find((g) => g.godown_name.toLowerCase() === row._godownPrefName.toLowerCase())
+                      : (glist.length === 1 ? glist[0] : null);
+                    setItems((prev) => prev.map((r) => r._importId !== importId ? r : {
+                      ...r, godowns: glist,
+                      selected_godown_id: gmatch ? gmatch.godown_id : null,
+                      selected_godown_name: gmatch ? gmatch.godown_name : null,
+                    }));
+                  }).catch(() => {});
+              }
+            })
+            .catch(() => {
+              setItems((prev) => prev.map((r) => r._importId !== importId ? r : { ...r, partLooked: true }));
+            });
+        }, 0);
+      });
+      toast.success(`Imported ${newRows.length} row${newRows.length > 1 ? "s" : ""} from Excel`);
+    } catch (err) {
+      toast.error("Could not read Excel file");
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   return (
@@ -799,9 +999,9 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="in-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <Button onClick={save} disabled={saving} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="in-save-button">
-          <FloppyDisk size={14} weight="bold" className="mr-2" /> {saving ? "Saving…" : (isEdit ? "Update Issue Note" : "Save Issue Note")}
-        </Button>
+        {isDraftEdit && (
+          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm bg-slate-100 text-slate-600">Draft</span>
+        )}
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-3 gap-4">
@@ -829,16 +1029,42 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             <div className="label-sm">Items Requested</div>
             <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""}</div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button onClick={addItems} variant="outline" className="rounded-sm" data-testid="in-add-row-button">
-              <Plus size={14} weight="bold" className="mr-1" /> Add Row
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              onChange={(e) => handleExcelImport(e.target.files?.[0])}
+              className="hidden"
+              data-testid="in-excel-input"
+            />
+            <Button
+              onClick={handleDownloadTemplate}
+              variant="outline"
+              className="rounded-sm border-slate-300"
+              data-testid="in-excel-template-button"
+              title="Download an empty Excel template (Part No, Make, Quantity, Godown Preference)"
+            >
+              <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Template
+            </Button>
+            <Button
+              onClick={() => fileInputRef.current?.click()}
+              variant="outline"
+              className="rounded-sm border-slate-300"
+              data-testid="in-excel-import-button"
+              title="Columns: Part No, Make, Quantity, Godown Preference"
+            >
+              <UploadSimple size={16} weight="bold" className="mr-2" /> Import Excel
+            </Button>
+            <Button onClick={addItems} variant="outline" className="rounded-sm border-slate-300" data-testid="in-add-row-button">
+              <Plus size={16} weight="bold" className="mr-2" /> Add Row
             </Button>
           </div>
         </div>
 
         <table className="data-table w-full">
           <thead>
-            <tr><th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>QUANTITY</th><th>GODOWN</th><th className="w-14"></th></tr>
+            <tr><th className="w-14">SL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th>QUANTITY</th><th>GODOWN PREFERENCE</th><th className="w-14"></th></tr>
           </thead>
           <tbody>
             {items.map((it, idx) => {
@@ -863,6 +1089,9 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                     onBlur={(e) => lookupMakes(idx, e.target.value)}
                     placeholder="Enter part no"
                     className="rounded-sm font-mono h-8" data-testid={`in-part-no-${idx}`} />
+                </td>
+                <td className="text-slate-600 text-xs max-w-[220px] truncate" title={it.description_1 || ""} data-testid={`in-description-${idx}`}>
+                  {it.description_1 || "—"}
                 </td>
                 <td className="w-64">
                   <Select disabled={!it.partLooked || it.makes.length === 0}
@@ -924,6 +1153,45 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             })}
           </tbody>
         </table>
+
+        {/* SAVE BAR — narration on left, action buttons on right */}
+        <div className="flex items-start justify-between gap-4 p-4 border-t border-slate-200 bg-slate-50">
+          <div className="flex-1 max-w-sm">
+            <label className="label-sm block mb-1.5">Narration</label>
+            <textarea
+              value={narration}
+              onChange={(e) => setNarration(e.target.value)}
+              placeholder="Optional narration…"
+              rows={2}
+              className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
+              data-testid="in-narration"
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-7">
+            {!isFinalEdit && (
+              <Button
+                onClick={saveDraft}
+                disabled={savingDraft || savingFinal}
+                variant="outline"
+                className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
+                data-testid="in-save-draft-button"
+              >
+                <FloppyDisk size={14} weight="bold" className="mr-2" />
+                {savingDraft ? "Saving…" : "Save as Draft"}
+              </Button>
+            )}
+            <Button
+              onClick={saveFinal}
+              disabled={savingDraft || savingFinal}
+              className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+              data-testid="in-save-final-button"
+              title={isFinalEdit ? "Update Issue Note" : "Final Save — releases for picking"}
+            >
+              <FloppyDisk size={14} weight="bold" className="mr-2" />
+              {savingFinal ? "Saving…" : (isFinalEdit ? "Update Issue Note" : "Save Final")}
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -954,17 +1222,31 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [recordingId, setRecordingId] = useState(null);
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/picking-notes", { params: { page, page_size: PAGE_SIZE } });
+      const res = await api.get("/picking-notes", { params: { page, page_size: PAGE_SIZE, search: search || undefined } });
       setRows(res.data);
       const t = parseInt(res.headers["x-total-count"], 10);
       setTotal(isNaN(t) ? res.data.length : t);
     } finally { setLoading(false); }
-  }, [page]);
-  useEffect(() => { load(); }, [load, reloadKey]);
+  }, [page, search]);
+  useEffect(() => { load(); }, [load, reloadKey, search]);
+  // Ctrl+F focusses the search input
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleRecord = async (pn) => {
     if (!window.confirm(`Record ${pn.pn_no} as Stock Out?\n\n${pn.items.length} OUT transaction(s) will be created.`)) return;
@@ -981,10 +1263,10 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   };
 
   const columns = useMemo(() => [
-    { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.issue_note_date) },
-    { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
     { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
     { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
+    { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.issue_note_date) },
+    { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
     { key: "parent_assigned_to_name", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || "" },
     { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r),},
     { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r)},
@@ -1008,8 +1290,17 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <div className="mt-4" data-testid="pn-list-view">
-      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="text-sm text-slate-600">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input
+            ref={searchInputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search picking notes…"
+            className="rounded-sm font-mono h-9 pl-10 w-full"
+            data-testid="pn-search-input"
+          />
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="pn-export-button">
@@ -1065,12 +1356,12 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               return (
                 <tr key={r.id} data-testid={`pn-row-${r.pn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
-                  <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`pn-open-${r.pn_no}`}>{r.pn_no}</button>
                   </td>
+                  <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
+                  <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="text-slate-700">{r.parent_assigned_to_name || "—"}</td>
                   <td className="font-mono text-slate-600">{pickingDisplayCount(r)}</td>
                   <td className="font-mono font-bold text-slate-900">{totalQty}</td>
@@ -1215,7 +1506,15 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       api.get(`/picking-notes/prepare/${editing.issue_note_id}`, { params: { exclude_pn_id: editing.id } })
         .then((r) => {
           setItems(buildPickingEditItems(editing, r.data.items || []));
-        }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0 }))));
+        }).catch(() => setItems((editing.items || []).map((it) => ({
+          ...it, pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0,
+          // Prepare failed — fall back to a single-option location list so the
+          // dropdown/qty editing still works using the row's already-stored location.
+          available_locations: it.godown_id ? [{
+            godown_id: it.godown_id, godown_name: it.godown_name, rack_id: it.rack_id, rack_no: it.rack_no,
+            box_id: it.box_id, box_no: it.box_no, box_category: it.box_category, current_qty: it.quantity || 0,
+          }] : [],
+        }))));
     } else {
       api.get("/picking-notes/next-no").then((r) => { setPnNo(r.data.next_pn_no); setPnDate(r.data.pn_date); })
         .catch(() => toast.error("Could not preview picking-note number"));
@@ -1238,9 +1537,68 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
 
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
-  // Picking locations are pre-authorized by the Issue Note (see requirement: "Picking
-  // Locations Must Match the Issued Locations") — the operator confirms/adjusts
-  // quantities only, never chooses a different godown/rack/box.
+  // A row's location is a SUGGESTION, not a lock: switching the dropdown re-points
+  // this row at any other location currently holding stock for the same part/make.
+  const onLocationSelect = (i, locKeyValue) => {
+    const row = items[i];
+    const loc = (row.available_locations || []).find((L) => locOnlyKey(L) === locKeyValue);
+    if (!loc) return;
+    updateItem(i, {
+      godown_id: loc.godown_id || "", godown_name: loc.godown_name || "",
+      rack_id: loc.rack_id || "", rack_no: loc.rack_no || "",
+      box_id: loc.box_id || "", box_no: loc.box_no || "",
+      box_category: loc.box_category || "",
+    });
+  };
+
+  // Split an item across another location: append a fresh row for the same part/make
+  // (qty starts blank) so the picker can partially pick the suggestion and take the
+  // remainder from somewhere else, without being forced to choose just one location.
+  const addLocationRow = (i) => {
+    const row = items[i];
+    setItems((prev) => {
+      const copy = [...prev];
+      copy.splice(i + 1, 0, {
+        ...row, quantity: "", rejected_qty: "", rejection_reason: "",
+        godown_id: "", godown_name: "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "",
+        row_status: "Assigned", allocated_qty: 0, suggested: false, manual: true,
+      });
+      return copy;
+    });
+  };
+  const removeLocationRow = (i) => setItems((prev) => prev.filter((_, idx) => idx !== i));
+
+  // Cumulative (picked + rejected) per part/make across every row, and what was
+  // actually requested — mirrors the backend's aggregate check so the picker sees the
+  // same constraint before submitting, regardless of how many locations they split across.
+  const requestedByItemKey = useMemo(() => {
+    const m = {};
+    items.forEach((r) => {
+      const k = pickingKey(r);
+      if (!(k in m)) m[k] = r.requested_qty || 0;
+    });
+    return m;
+  }, [items]);
+  const processedByItemKey = useMemo(() => {
+    const m = {};
+    items.forEach((r) => {
+      const k = pickingKey(r);
+      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0) + (parseInt(r.rejected_qty) || 0);
+    });
+    return m;
+  }, [items]);
+  // Live "available here" per row, netting out what other rows in this same form
+  // already claim at the identical location (server does the authoritative check).
+  const availableAtRow = (row, idx) => {
+    const loc = (row.available_locations || []).find((L) => locOnlyKey(L) === locOnlyKey(row));
+    if (!loc) return 0;
+    const claimedElsewhere = items.reduce((sum, r, ri) => {
+      if (ri === idx || r.part_no !== row.part_no || r.make !== row.make) return sum;
+      return locOnlyKey(r) === locOnlyKey(row) ? sum + (parseInt(r.quantity) || 0) : sum;
+    }, 0);
+    return Math.max(0, (loc.current_qty || 0) - claimedElsewhere);
+  };
+
   const save = async () => {
     if (!selectedInId) { toast.error("Select an Issue Note"); return; }
     if (items.length === 0) { toast.error("No items to pick"); return; }
@@ -1251,12 +1609,22 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       const it = pickRows[i];
       const q = parseInt(it.quantity) || 0;
       const rejected = parseInt(it.rejected_qty) || 0;
-      const allocated = it.allocated_qty ?? it.quantity ?? 0;
       if (q < 0 || rejected < 0) { toast.error(`Row ${rowNo}: quantities cannot be negative`); return; }
       if (rejected > 0 && !(it.rejection_reason || "").trim()) { toast.error(`Row ${rowNo}: select a Rejection Reason`); return; }
-      if (q > 0 && !it.godown_id) { toast.error(`Row ${rowNo}: no stock location available here — use Rejected Qty instead`); return; }
-      if (q + rejected > allocated + 1e-6) {
-        toast.error(`Row ${rowNo}: Picked (${q}) + Rejected (${rejected}) exceeds the ${allocated} authorized at this location`);
+      if (q > 0 && !it.godown_id) { toast.error(`Row ${rowNo}: choose a pick location, or use Rejected Qty instead`); return; }
+      if (q > 0) {
+        const availHere = availableAtRow(it, items.indexOf(it));
+        if (q > availHere + 1e-6) {
+          toast.error(`Row ${rowNo}: only ${availHere} available at ${it.godown_name || "—"}/${it.rack_no || "—"}/${it.box_no || "—"}`);
+          return;
+        }
+      }
+    }
+    for (const [k, total] of Object.entries(processedByItemKey)) {
+      const requested = requestedByItemKey[k] || 0;
+      if (total > requested + 1e-6) {
+        const [p, m] = k.split("||");
+        toast.error(`${p}/${m}: Picked + Rejected (${total}) exceeds requested (${requested})`);
         return;
       }
     }
@@ -1331,8 +1699,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
           <div className="px-4 pt-3 text-xs text-slate-500">
-            Locations are pre-authorized by the Issue Note — confirm or adjust the Picked / Rejected quantity for
-            each. Picking from a different location isn't available here.
+            The Location column is pre-filled with the Issue Note's suggested pick location (marked <span className="font-bold text-blue-700">Suggested</span>) —
+            accept it, pick partially and use <span className="font-bold">+ Split</span> to take the remainder from
+            another location, or switch the dropdown to any other location currently holding stock.
           </div>
           <table className="data-table w-full text-xs">
             <thead>
@@ -1343,51 +1712,65 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 <th>MODEL</th>
                 <th>DESCRIPTION</th>
                 <th>CATEGORY</th>
-                <th>AUTHORIZED GODOWN</th>
-                <th>AUTHORIZED RACK</th>
-                <th>AUTHORIZED BOX</th>
-                <th className="text-center">ALLOCATED QTY</th>
+                <th className="min-w-[220px]">LOCATION</th>
+                <th className="text-center">AVAILABLE HERE</th>
                 <th className="text-center">PICKED QTY</th>
                 <th className="text-center min-w-[90px]">REJECTED QTY</th>
                 <th className="min-w-[140px]">REASON</th>
+                <th className="w-10"></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const allocated = it.allocated_qty ?? it.quantity ?? 0;
+                const k = pickingKey(it);
+                const requested = requestedByItemKey[k] || 0;
+                const processed = processedByItemKey[k] || 0;
+                const overRequested = processed > requested + 1e-6;
+                const noStockAtAll = (it.available_locations || []).length === 0;
+                const availHere = availableAtRow(it, idx);
                 const q = parseInt(it.quantity) || 0;
-                const rejected = parseInt(it.rejected_qty) || 0;
-                const overAllocated = q + rejected > allocated + 1e-6;
-                const noLocation = !it.godown_id;
                 return (
-                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : (noLocation ? "bg-amber-50" : "")}>
+                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={overRequested ? "bg-red-50" : (noStockAtAll ? "bg-amber-50" : "")}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                     <td>{it.make}</td>
                     <td className="font-mono text-slate-600">{it.model || "—"}</td>
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
-                    {noLocation ? (
-                      <td colSpan={3} className="text-[11px] text-amber-700 italic">
-                        No stock currently available{it.unallocated_shortfall ? ` (short ${it.unallocated_shortfall})` : ""} — reject this line
-                      </td>
-                    ) : (
-                      <>
-                        <td className="font-mono">{it.godown_name}</td>
-                        <td className="font-mono">{it.rack_no}</td>
-                        <td className="font-mono">{it.box_no || "—"}</td>
-                      </>
-                    )}
-                    <td className="text-center font-mono font-bold text-slate-700">{allocated}</td>
+                    <td>
+                      {noStockAtAll ? (
+                        <span className="text-[11px] text-amber-700 italic">
+                          No stock currently available{it.unallocated_shortfall ? ` (short ${it.unallocated_shortfall})` : ""} — reject this line
+                        </span>
+                      ) : (
+                        <>
+                          <Select value={it.godown_id ? locOnlyKey(it) : undefined} onValueChange={(v) => onLocationSelect(idx, v)}>
+                            <SelectTrigger className="rounded-sm h-8" data-testid={`pn-location-${idx}`}>
+                              <SelectValue placeholder="Choose location" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(it.available_locations || []).map((L) => (
+                                <SelectItem key={locOnlyKey(L)} value={locOnlyKey(L)} data-testid={`pn-location-${idx}-option-${locOnlyKey(L)}`}>
+                                  <span className="font-mono">{formatLocationText(L)}</span>
+                                  <span className="ml-2 text-xs text-slate-500">avail {L.current_qty}</span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          {it.suggested && <div className="text-[10px] font-bold text-blue-700 mt-0.5">Suggested</div>}
+                        </>
+                      )}
+                    </td>
+                    <td className="text-center font-mono font-bold text-slate-700">{noStockAtAll ? "—" : availHere}</td>
                     <td className="text-center">
                       <Input type="number" min="0" step="1" value={it.quantity}
-                        disabled={noLocation}
+                        disabled={noStockAtAll}
                         onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`}
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overRequested || q > availHere + 1e-6 ? "border-red-400" : ""}`}
                         data-testid={`pn-qty-${idx}`} />
-                      {overAllocated && (
+                      {overRequested && (
                         <div className="text-[10px] mt-0.5 text-red-600 font-bold" data-testid={`pn-pending-hint-${idx}`}>
-                          Over {q + rejected}/{allocated}
+                          Over {processed}/{requested}
                         </div>
                       )}
                     </td>
@@ -1395,7 +1778,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                       <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
                         onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
                         placeholder="0"
-                        className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`}
+                        className={`rounded-sm font-mono h-8 text-center w-20 ${overRequested ? "border-red-400" : ""}`}
                         data-testid={`pn-rejected-qty-${idx}`} />
                     </td>
                     <td>
@@ -1408,6 +1791,18 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                           {REJECTION_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
                         </SelectContent>
                       </Select>
+                    </td>
+                    <td className="whitespace-nowrap">
+                      <button type="button" onClick={() => addLocationRow(idx)} title="Split — pick the remainder from another location"
+                        className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700" data-testid={`pn-split-row-${idx}`}>
+                        <Plus size={14} />
+                      </button>
+                      {it.manual && (
+                        <button type="button" onClick={() => removeLocationRow(idx)} title="Remove this split row"
+                          className="p-1.5 rounded-sm hover:bg-red-50 text-red-700" data-testid={`pn-remove-row-${idx}`}>
+                          <Trash size={14} />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );

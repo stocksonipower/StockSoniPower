@@ -299,7 +299,6 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.stock_in_type) },
     { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.rn_date) },
     { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.rn_no || "" },
-    { key: "supplier_name", label: "SUPPLIER", value: (r) => r.supplier_name || "" },
     { key: "invoice_date", label: "INVOICE DATE", value: (r) => fmtDate(r.invoice_date) },
     { key: "invoice_no", label: "INVOICE NO", value: (r) => r.invoice_no || "" },
     { key: "goods_received_date", label: "MATERIAL RECEIVED DATE", value: (r) => fmtDate(r.goods_received_date) },
@@ -407,7 +406,6 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     {r.rn_no}
   </button>
 </td>
-<td className="font-mono text-slate-700">{r.supplier_name || "—"}</td>
 <td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
 <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
 <td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
@@ -441,7 +439,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={9} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No receipt notes. Click 'Create New Receipt Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -947,7 +945,6 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
     <div>
       ${pField("Receipt Note No", rn.rn_no)}
       ${pField("Receipt Note Date", fmtDate(rn.rn_date))}
-      ${pField("Supplier Name", rn.supplier_name || "—")}
       ${pField("Invoice No", rn.invoice_no || "—")}
       ${pField("Invoice Date", fmtDate(rn.invoice_date))}
       ${pField("Material Received Date", fmtDate(rn.goods_received_date))}
@@ -1150,7 +1147,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [rnNo, setRnNo] = useState("");
   const [rnDate, setRnDate] = useState("");
   const [stockInType, setStockInType] = useState("INVOICE"); // "INVOICE" | "GENERAL"
-  const [supplierName, setSupplierName] = useState("");
   const [invoiceNo, setInvoiceNo] = useState("");
   const [invoiceDate, setInvoiceDate] = useState("");
   const [goodsReceivedDate, setGoodsReceivedDate] = useState("");
@@ -1178,7 +1174,6 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
       setRnNo(editing.rn_no || "");
       setRnDate(editing.rn_date || "");
       setStockInType((editing.stock_in_type || "INVOICE").toUpperCase());
-      setSupplierName(editing.supplier_name || "");
       setInvoiceNo(editing.invoice_no || "");
       setInvoiceDate(editing.invoice_date || "");
       setGoodsReceivedDate(editing.goods_received_date || "");
@@ -1493,7 +1488,6 @@ const canFinalize = useMemo(() => {
 
   const buildPayload = () => ({
     stock_in_type: stockInType,
-    supplier_name: supplierName.trim(),
     invoice_no: isGeneral ? "" : invoiceNo.trim(),
     invoice_date: isGeneral ? "" : (invoiceDate || ""),
     goods_received_date: goodsReceivedDate || "",
@@ -1627,17 +1621,6 @@ const canFinalize = useMemo(() => {
             <Label className="label-sm">Receipt Note No</Label>
             <Input value={rnNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="rn-no-input" />
             <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
-          </div>
-          <div>
-            <Label className="label-sm">Supplier Name</Label>
-            <Input
-              value={supplierName}
-              onChange={(e) => setSupplierName(e.target.value)}
-              placeholder="e.g. Acme Distributors"
-              className="mt-2 rounded-sm font-mono"
-              data-testid="rn-supplier-input"
-            />
-            <div className="text-[11px] text-slate-500 mt-1">Optional</div>
           </div>
           <div>
             <Label className="label-sm">Material Received Date</Label>
@@ -2285,8 +2268,8 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const columns = useMemo(() => {
     const cols = [
-      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
+      { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
       { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
       { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.parent_rn_date) },
       { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.parent_rn_no || "" },
@@ -2348,6 +2331,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
                   <td>
                     <button
                       onClick={() => onOpen(r)}
@@ -2357,7 +2341,6 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                       {r[idField]}
                     </button>
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
                   <td>
                     {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
                       <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}

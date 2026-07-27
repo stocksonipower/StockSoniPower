@@ -205,9 +205,16 @@ async def list_transfer_requests(
     page_size: int = Query(5000, ge=1, le=5000),
     status: Optional[str] = None,
     not_status: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"str_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
@@ -538,18 +545,26 @@ async def list_transfer_notes(
     status: Optional[str] = None,
     not_status: Optional[str] = None,
     transfer_request_id: Optional[str] = None,
+    search: Optional[str] = None,
     user=Depends(get_current_user),
 ):
     query = {}
     if transfer_request_id:
         query["transfer_request_id"] = transfer_request_id
+    if search:
+        s = search.strip()
+        query["$or"] = [
+            {"stn_no": {"$regex": s, "$options": "i"}},
+            {"transfer_request_no": {"$regex": s, "$options": "i"}},
+            {"items.part_no": {"$regex": s, "$options": "i"}},
+        ]
     if status:
         vals = [s.strip().upper() for s in status.split(",") if s.strip()]
         query["status"] = {"$in": vals} if len(vals) > 1 else vals[0]
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
-    if not transfer_request_id and not status and not not_status:
+    if not transfer_request_id and not status and not not_status and not search:
         query["status"] = {"$in": ["PENDING", "DRAFT", "PROCESSING"]}
     total = await db.transfer_notes.count_documents(query)
     skip = (page - 1) * page_size

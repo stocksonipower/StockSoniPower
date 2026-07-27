@@ -206,23 +206,20 @@ def _validate_picking_items(items):
 
 
 async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Optional[str] = None, assigned_items: Optional[list] = None):
+    """Picking locations are a suggestion, not a lock: the Issue Note's Godown
+    Preference and greedy `allocated_locations` only decide what's pre-filled on the
+    Picking Note (see `prepare_picking_note`). The store user may accept the
+    suggestion, pick partially from it, or choose any other valid stock location —
+    enforced below only on (1) cumulative qty vs what was requested and (2) real
+    stock availability at whichever location was actually picked."""
     from helpers.stock_helpers import _stock_locations_for
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
-    allowed_godowns = {}
-    authorized_locs = {}  # (part,make) -> set of (godown_id, rack_id, box_id) it may be picked from
     for it in (assigned_items if assigned_items is not None else inn.get("items", [])):
         k = _key(it.get("part_no"), it.get("make"))
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-        gid = it.get("selected_godown_id") or ""
-        if gid:
-            allowed_godowns.setdefault(k, set()).add(gid)
-        for loc in it.get("allocated_locations") or []:
-            authorized_locs.setdefault(k, set()).add(
-                (loc.get("godown_id") or "", loc.get("rack_id") or "", loc.get("box_id") or "")
-            )
     other_sums = {} if assigned_items is not None else await _pick_aggregate_other(in_id, exclude_pn_id)
 
     new_sums = {}
@@ -236,21 +233,6 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
-        allowed = allowed_godowns.get(k)
-        if allowed and (it.quantity or 0) > 0 and it.godown_id not in allowed:
-            raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make}: selected godown does not match the issue note")
-        # Picking is restricted to the locations the Issue Note pre-allocated (see
-        # _allocate_locations_for). Only enforced when this line actually carries
-        # allocation data — legacy Issue Notes created before this feature exists don't,
-        # and must not be retroactively blocked.
-        auth = authorized_locs.get(k)
-        if auth and (it.godown_id or "").strip():
-            loc_tuple = (it.godown_id or "", it.rack_id or "", it.box_id or "")
-            if loc_tuple not in auth:
-                raise HTTPException(status_code=400, detail=(
-                    f"{it.part_no} / {it.make}: picking from {it.godown_name or '—'}/{it.rack_no or '—'}/{it.box_no or '—'} "
-                    f"is not authorized — the issue note allocates this item to a different location"
-                ))
     # 1. cumulative qty — picked + rejected together cannot exceed what was requested
     for k, new_q in new_sums.items():
         recv = requested.get(k, 0)
