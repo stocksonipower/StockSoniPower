@@ -32,6 +32,13 @@ function pickDocumentNo(t) {
   return { kind: null, id: null, no: "" };
 }
 
+// Transfer Note legs carry the same IN/OUT type as Stock In/Out but should read as
+// Transfer In / Transfer Out so they're not confused with actual Stock In/Out entries.
+function displayType(t) {
+  if (t.transfer_note_no) return t.type === "IN" ? "TSIN" : "TSOUT";
+  return t.type || "";
+}
+
 export default function TransactionsPage() {
   const [txns, setTxns] = useState([]);
   const [filter, setFilter] = useState("ALL");
@@ -62,7 +69,7 @@ export default function TransactionsPage() {
   const columns = useMemo(() => [
     { key: "date", label: "Date", value: (t) => fmtDateOnly(t.created_at) },
     { key: "time", label: "Time", value: (t) => fmtTimeOnly(t.created_at) },
-    { key: "type", label: "Type", value: (t) => t.type || "" },
+    { key: "type", label: "Type", value: (t) => displayType(t) },
     { key: "doc_no", label: "Document No", value: (t) => pickDocumentNo(t).no || "" },
     { key: "part_no", label: "Part No", value: (t) => t.part_no || "" },
     { key: "description_1", label: "Description 1", value: (t) => t.description_1 || "" },
@@ -140,9 +147,17 @@ export default function TransactionsPage() {
                     <td className="text-xs font-mono text-slate-500">{fmtDateOnly(t.created_at)}</td>
                     <td className="text-xs font-mono text-slate-500">{fmtTimeOnly(t.created_at)}</td>
                     <td>
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${
-                        t.type === "IN" ? "bg-green-50 text-green-700" : "bg-orange-50 text-orange-700"
-                      }`}>{t.type}</span>
+                      {(() => {
+                        const dt = displayType(t);
+                        const cls =
+                          dt === "TSIN" ? "bg-teal-50 text-teal-700" :
+                          dt === "TSOUT" ? "bg-purple-50 text-purple-700" :
+                          dt === "IN" ? "bg-green-50 text-green-700" :
+                          "bg-orange-50 text-orange-700";
+                        return (
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`}>{dt}</span>
+                        );
+                      })()}
                     </td>
                     <td>
                       {doc.no ? (
