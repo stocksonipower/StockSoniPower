@@ -1326,14 +1326,22 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
 
   /* ---- Excel template download ---- */
   const handleDownloadTemplate = () => {
-    // Template columns match handleExcelImport's header parser (case-/separator-insensitive).
-    // Include 2 hint rows showing a generic example + an empty row the user can fill in.
-    const ws = XLSX.utils.aoa_to_sheet([
-      ["Part No", "Invoice Qty", "Received Qty", "Make"],
-      ["EXAMPLE-001", 10, 10, "ACME"],
-      ["", "", "", ""],
-    ]);
-    ws["!cols"] = [{ wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 16 }];
+    // Column order matches the entry table's importable fields: Part No, Make,
+    // Invoice Qty, Received Qty (Model / Description 1 are always auto-populated
+    // from Stock Master by Part No + Make, so they're not import columns).
+    // Header names match handleExcelImport's parser (case-/separator-insensitive).
+    // Include 2 hint rows: a generic example + an empty row the user can fill in.
+    const header = isGeneral
+      ? ["Part No", "Make", "Received Qty"]
+      : ["Part No", "Make", "Invoice Qty", "Received Qty"];
+    const example = isGeneral
+      ? ["EXAMPLE-001", "ACME", 10]
+      : ["EXAMPLE-001", "ACME", 10, 10];
+    const blank = header.map(() => "");
+    const ws = XLSX.utils.aoa_to_sheet([header, example, blank]);
+    ws["!cols"] = isGeneral
+      ? [{ wch: 18 }, { wch: 16 }, { wch: 14 }]
+      : [{ wch: 18 }, { wch: 16 }, { wch: 12 }, { wch: 14 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Receipt Note Template");
     XLSX.writeFile(wb, "Receipt_Note_Template.xlsx");
@@ -1756,7 +1764,7 @@ const canFinalize = useMemo(() => {
               variant="outline"
               className="rounded-sm"
               data-testid="rn-excel-template-button"
-              title="Download an empty Excel template (Part No, Invoice Qty, Received Qty, Make)"
+              title={isGeneral ? "Download an empty Excel template (Part No, Make, Received Qty)" : "Download an empty Excel template (Part No, Make, Invoice Qty, Received Qty)"}
             >
               <DownloadSimple size={14} weight="bold" className="mr-1" /> Download Template
             </Button>
@@ -1765,7 +1773,7 @@ const canFinalize = useMemo(() => {
               variant="outline"
               className="rounded-sm"
               data-testid="rn-excel-import-button"
-              title={isGeneral ? "Columns: Part No, Make, Received Qty" : "Columns: Part No, Invoice Qty, Make, Received Qty"}
+              title={isGeneral ? "Columns: Part No, Make, Received Qty" : "Columns: Part No, Make, Invoice Qty, Received Qty"}
             >
               <UploadSimple size={14} weight="bold" className="mr-1" /> Import Excel
             </Button>
@@ -2496,6 +2504,26 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
           </Button>
         </div>
       </div>
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+        <div>
+  {total === 0 ? "No short received notes" : (
+    <>
+      Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+      {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+    </>
+  )}
+</div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-prev`}>
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-next`}>
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+        </div>
+      </div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
         <table className="data-table w-full">
           <thead>
@@ -2588,27 +2616,6 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
             )}
           </tbody>
         </table>
-      </div>
-
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <div>
-  {total === 0 ? "No short received notes" : (
-    <>
-      Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-      {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-    </>
-  )}
-</div>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-prev`}>
-            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-          </Button>
-          <span className="font-mono">Page {page} of {totalPages}</span>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid={`${kind}-next`}>
-            Next <CaretRight size={12} weight="bold" className="ml-1" />
-          </Button>
-          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-        </div>
       </div>
     </div>
   );

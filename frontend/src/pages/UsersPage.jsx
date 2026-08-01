@@ -200,11 +200,7 @@ export default function UsersPage() {
             <Users size={24} weight="bold" />
           </div>
           <div>
-            <div className="label-sm mb-1">Administration</div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Users</h1>
-            <p className="text-sm text-slate-600 mt-2">
-              Create and manage warehouse staff accounts. Control which modules each user can access.
-            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">

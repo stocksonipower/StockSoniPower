@@ -97,7 +97,6 @@ export default function TransactionsPage() {
     <div className="p-8 max-w-[1700px] mx-auto" data-testid="transactions-page">
       <div className="mb-6 flex items-end justify-between gap-4">
         <div>
-          <div className="label-sm mb-2">History</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Transactions</h1>
         </div>
         <div className="flex items-center gap-2">
@@ -117,6 +116,24 @@ export default function TransactionsPage() {
           <TabsTrigger value="OUT" className="rounded-sm" data-testid="filter-out">Stock Out</TabsTrigger>
         </TabsList>
       </Tabs>
+
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600" data-testid="transactions-pagination">
+        <div>
+          {total === 0 ? "No transactions" : (
+            <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{txns.length}</span> on this page · <span className="font-semibold text-slate-900">{total}</span> total</>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="prev-page-button">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="next-page-button">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE} / page</span>
+        </div>
+      </div>
 
       <div className="bg-white border border-slate-200 rounded-sm overflow-visible">
         <div className="overflow-x-auto">
@@ -186,24 +203,6 @@ export default function TransactionsPage() {
               )}
             </tbody>
           </table>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600" data-testid="transactions-pagination">
-        <div>
-          {total === 0 ? "No transactions" : (
-            <>Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span> of <span className="font-semibold text-slate-900">{txns.length}</span> on this page · <span className="font-semibold text-slate-900">{total}</span> total</>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="prev-page-button">
-            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-          </Button>
-          <span className="font-mono">Page {page} of {totalPages}</span>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7" data-testid="next-page-button">
-            Next <CaretRight size={12} weight="bold" className="ml-1" />
-          </Button>
-          <span className="text-slate-400 ml-2">{PAGE_SIZE} / page</span>
         </div>
       </div>
 

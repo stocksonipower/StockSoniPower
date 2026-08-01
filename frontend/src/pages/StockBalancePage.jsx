@@ -192,11 +192,7 @@ export default function StockBalancePage() {
     <div className="p-8 max-w-[1900px] mx-auto" data-testid="balance-page">
       <div className="mb-6 flex items-end justify-between gap-4">
         <div>
-          <div className="label-sm mb-2">Live Inventory</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Summary</h1>
-          <p className="text-sm text-slate-600 mt-2">
-            Live join of Stock Master + Locations + Transactions. Edits in any of those reflect here on next refresh.
-          </p>
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="balance-export-button">

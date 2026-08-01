@@ -268,7 +268,6 @@ export default function StockTransferPage() {
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-transfer-page">
       <div className="mb-6">
-        <div className="label-sm mb-2">Internal Movement</div>
         <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Transfer</h1>
       </div>
       <Tabs value={tab} onValueChange={setTab}>
@@ -400,11 +399,31 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           </Button>
         </div>
       </div>
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+        <div>
+        {total === 0 ? "No transfer requests" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -477,26 +496,6 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <div>
-        {total === 0 ? "No transfer requests" : (
-      <>
-        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-      </>
-    )}
-  </div>
-  <div className="flex items-center gap-2">
-    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-    </Button>
-    <span className="font-mono">Page {page} of {totalPages}</span>
-    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      Next <CaretRight size={12} weight="bold" className="ml-1" />
-    </Button>
-    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-  </div>
-</div>
     </div>
   );
 }
@@ -1165,11 +1164,31 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </Button>
         </div>
       </div>
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+        <div>
+    {total === 0 ? "No transfer notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -1249,26 +1268,6 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <div>
-    {total === 0 ? "No transfer notes" : (
-      <>
-        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-      </>
-    )}
-  </div>
-  <div className="flex items-center gap-2">
-    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-    </Button>
-    <span className="font-mono">Page {page} of {totalPages}</span>
-    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      Next <CaretRight size={12} weight="bold" className="ml-1" />
-    </Button>
-    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-  </div>
-</div>
     </div>
   );
 }

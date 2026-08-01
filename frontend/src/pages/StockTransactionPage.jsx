@@ -69,7 +69,6 @@ export default function StockTransactionPage({ type = "IN" }) {
     return (
       <div className="p-8 max-w-[900px] mx-auto" data-testid="stock-in-direct-disabled-page">
         <div className="bg-white border border-slate-200 rounded-sm p-6">
-          <div className="label-sm mb-2">Stock In</div>
           <h1 className="text-3xl font-black text-slate-900 mb-3">Use Receipt Notes</h1>
           <p className="text-sm text-slate-600 mb-5">
             Direct Stock In is disabled. Create a Receipt Note, complete the Racking Note, and record Stock In from the racking workflow.
@@ -122,7 +121,6 @@ export default function StockTransactionPage({ type = "IN" }) {
           {isOut ? <ArrowUp size={24} weight="bold" /> : <ArrowDown size={24} weight="bold" />}
         </div>
         <div>
-          <div className="label-sm mb-1">Transaction</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock {isOut ? "Out" : "In"}</h1>
         </div>
       </div>

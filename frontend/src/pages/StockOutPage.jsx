@@ -264,7 +264,6 @@ export default function StockOutPage() {
   return (
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-out-page">
       <div className="mb-6">
-        <div className="label-sm mb-2">Outward</div>
         <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Out</h1>
       </div>
       <Tabs value={tab} onValueChange={setTab}>
@@ -403,11 +402,31 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           </Button>
         </div>
       </div>
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+  <div>
+    {total === 0 ? "No issue notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -477,26 +496,6 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-  <div>
-    {total === 0 ? "No issue notes" : (
-      <>
-        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-      </>
-    )}
-  </div>
-  <div className="flex items-center gap-2">
-    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-    </Button>
-    <span className="font-mono">Page {page} of {totalPages}</span>
-    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      Next <CaretRight size={12} weight="bold" className="ml-1" />
-    </Button>
-    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-  </div>
-</div>
     </div>
   );
 }
@@ -553,7 +552,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                 <table className="data-table w-full">
                   <thead>
                     <tr>
-                      <th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+                      <th className="w-14">SL</th><th className="w-28">MODEL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
                       <th>GODOWN</th><th>RACK</th><th>BOX</th>
                       <th className="text-center">QTY</th>
                     </tr>
@@ -565,6 +564,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                         return [(
                           <tr key={`${idx}-none`}>
                             <td className="font-mono text-slate-500">{idx + 1}</td>
+                            <td className="text-slate-700">{it.model || "—"}</td>
                             <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                             <td>{it.make}</td>
                             <td className="text-slate-700">{it.description_1 || "—"}</td>
@@ -576,6 +576,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                       return locs.map((loc, li) => (
                         <tr key={`${idx}-${li}`}>
                           <td className="font-mono text-slate-500">{idx + 1}{locs.length > 1 ? `.${li + 1}` : ""}</td>
+                          <td className="text-slate-700">{li === 0 ? (it.model || "—") : ""}</td>
                           <td>{li === 0 ? <PartNoLink partNo={it.part_no} make={it.make} /> : ""}</td>
                           <td>{li === 0 ? it.make : ""}</td>
                           <td className="text-slate-700">{li === 0 ? (it.description_1 || "—") : ""}</td>
@@ -638,6 +639,7 @@ const emptyIssueItem = () => ({
   make: "",
   quantity: "",
   description_1: "",
+  model: "",
   selected_godown_id: null,
   selected_godown_name: null,
   godowns: [],
@@ -668,6 +670,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       const initial = (editing.items || []).map((it) => ({
         part_no: it.part_no || "", make: it.make || "", quantity: it.quantity ?? "",
         description_1: it.description_1 || "",
+        model: it.model || "",
         selected_godown_id: it.selected_godown_id || null,
         selected_godown_name: it.selected_godown_name || null,
         godowns: it.selected_godown_id ? [{
@@ -688,6 +691,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             setItems((prev) => prev.map((r, i) => i === idx ? {
               ...r, makes: makesArr, available_qty: found?.available_qty || 0,
               description_1: r.description_1 || found?.description_1 || "",
+              model: r.model || found?.model || "",
             } : r));
             if (row.make) loadIssueGodowns(idx, row.part_no, row.make, row.selected_godown_id);
           })
@@ -730,7 +734,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
-    if (!v) { updateItem(i, { makes: [], make: "", description_1: "", partLooked: false, available_qty: 0, godowns: [], selected_godown_id: null, selected_godown_name: null }); return; }
+    if (!v) { updateItem(i, { makes: [], make: "", description_1: "", model: "", partLooked: false, available_qty: 0, godowns: [], selected_godown_id: null, selected_godown_name: null }); return; }
     try {
       const { data } = await api.get(`/issue-notes/lookup/${encodeURIComponent(v)}`);
       const list = data.makes || [];
@@ -740,12 +744,13 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
         make: auto ? auto.make : "",
         available_qty: auto ? auto.available_qty : 0,
         description_1: auto ? (auto.description_1 || "") : "",
+        model: auto ? (auto.model || "") : "",
         godowns: [],
         selected_godown_id: null,
         selected_godown_name: null,
       });
       if (auto) loadIssueGodowns(i, v, auto.make);
-    } catch { updateItem(i, { makes: [], partLooked: true, make: "", description_1: "", available_qty: 0 }); }
+    } catch { updateItem(i, { makes: [], partLooked: true, make: "", description_1: "", model: "", available_qty: 0 }); }
   };
 
   const onMakeChange = (i, makeVal) => {
@@ -754,6 +759,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     updateItem(i, {
       make: makeVal, available_qty: found?.available_qty || 0,
       description_1: found?.description_1 || "",
+      model: found?.model || "",
       godowns: [], selected_godown_id: null, selected_godown_name: null,
     });
     loadIssueGodowns(i, row.part_no, makeVal);
@@ -963,6 +969,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                   make: matched ? matched.make : row.make,
                   available_qty: matched ? matched.available_qty : 0,
                   description_1: matched ? (matched.description_1 || "") : "",
+                  model: matched ? (matched.model || "") : "",
                 };
               }));
               if (matched) {
@@ -1064,7 +1071,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
         <table className="data-table w-full">
           <thead>
-            <tr><th className="w-14">SL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th>QUANTITY</th><th>GODOWN PREFERENCE</th><th className="w-14"></th></tr>
+            <tr><th className="w-14">SL</th><th className="w-32">MODEL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th>QUANTITY</th><th>GODOWN PREFERENCE</th><th className="w-14"></th></tr>
           </thead>
           <tbody>
             {items.map((it, idx) => {
@@ -1074,6 +1081,15 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
               return (
               <tr key={idx} data-testid={`in-item-row-${idx}`} className={(overStock || overGodown) ? "bg-red-50" : ""}>
                 <td className="font-mono text-slate-500">{idx + 1}</td>
+                <td>
+                  <div
+                    className="text-xs text-slate-700 px-2 py-1 bg-slate-50 rounded-sm border border-slate-200 truncate"
+                    title={it.model || "—"}
+                    data-testid={`in-model-${idx}`}
+                  >
+                    {it.model || <span className="text-slate-400 italic">(auto from master)</span>}
+                  </div>
+                </td>
                 <td>
                   <Input value={it.part_no}
                     onChange={(e) => updateItem(idx, {
@@ -1314,11 +1330,31 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </Button>
         </div>
       </div>
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+  <div>
+    {total === 0 ? "No picking notes" : (
+      <>
+        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+      </>
+    )}
+  </div>
+  <div className="flex items-center gap-2">
+    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+    </Button>
+    <span className="font-mono">Page {page} of {totalPages}</span>
+    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+      Next <CaretRight size={12} weight="bold" className="ml-1" />
+    </Button>
+    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+  </div>
+</div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -1396,26 +1432,6 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-  <div>
-    {total === 0 ? "No picking notes" : (
-      <>
-        Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-        {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-      </>
-    )}
-  </div>
-  <div className="flex items-center gap-2">
-    <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-    </Button>
-    <span className="font-mono">Page {page} of {totalPages}</span>
-    <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-      Next <CaretRight size={12} weight="bold" className="ml-1" />
-    </Button>
-    <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-  </div>
-</div>
     </div>
   );
 }

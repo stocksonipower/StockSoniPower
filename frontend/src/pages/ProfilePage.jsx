@@ -67,7 +67,6 @@ export default function ProfilePage() {
           <UserCircle size={24} weight="bold" />
         </div>
         <div>
-          <div className="label-sm mb-1">Account</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">My Profile</h1>
         </div>
       </div>

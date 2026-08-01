@@ -135,7 +135,6 @@ export default function Dashboard() {
     <div className="p-8 max-w-[1600px] mx-auto" data-testid="dashboard-page">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <div className="label-sm mb-2">Overview</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Dashboard</h1>
         </div>
         <div className="flex items-center gap-3">

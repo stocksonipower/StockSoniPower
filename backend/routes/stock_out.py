@@ -250,12 +250,19 @@ async def issue_lookup_makes(part_no: str, user=Depends(get_current_user)):
         {"$sort": {"_id.make": 1}},
     ]).to_list(1000)
     makes = [p["_id"]["make"] for p in pairs]
-    desc_by_make = {}
+    sm_by_make = {}
     if makes:
-        async for sm in db.stock_master.find({"part_no": part_no, "make": {"$in": makes}}, {"_id": 0, "make": 1, "description_1": 1}):
-            desc_by_make[sm.get("make")] = sm.get("description_1", "") or ""
+        async for sm in db.stock_master.find(
+            {"part_no": part_no, "make": {"$in": makes}},
+            {"_id": 0, "make": 1, "description_1": 1, "model": 1},
+        ):
+            sm_by_make[sm.get("make")] = sm
     return {"makes": [
-        {"make": p["_id"]["make"], "available_qty": p["q"], "description_1": desc_by_make.get(p["_id"]["make"], "")}
+        {
+            "make": p["_id"]["make"], "available_qty": p["q"],
+            "description_1": sm_by_make.get(p["_id"]["make"], {}).get("description_1", "") or "",
+            "model": sm_by_make.get(p["_id"]["make"], {}).get("model", "") or "",
+        }
         for p in pairs
     ]}
 

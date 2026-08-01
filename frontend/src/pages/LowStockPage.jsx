@@ -55,11 +55,7 @@ export default function LowStockPage() {
             <Warning size={24} weight="bold" />
           </div>
           <div>
-            <div className="label-sm mb-1">Alerts</div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Low Stock</h1>
-            <p className="text-sm text-slate-600 mt-2">
-              Shows items where current stock is at or below the per-item Reorder Level set in Stock Master.
-            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
