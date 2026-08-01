@@ -317,7 +317,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter

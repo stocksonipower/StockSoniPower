@@ -91,7 +91,7 @@ table {
 }
 
 .data-table-fixed td {
-    text-align: center;
+    text-align: left;
 }
 
 .data-table tr:hover td {

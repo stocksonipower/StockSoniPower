@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import HTTPException
 from deps import db, now_iso
-from helpers.note_helpers import _key
+from helpers.note_helpers import _key, _ern_rackable_qty
 
 
 def _compute_srn_status(srn: dict) -> str:
@@ -33,51 +33,6 @@ def _compute_srn_status(srn: dict) -> str:
         return "COMPLETE"
     return "PARTIALLY_RECEIVED"
 
-
-def _compute_ern_status(ern: dict) -> str:
-    """Inline-child model status:
-       Each child entry has accepted_qty + rejected_qty.
-
-         total_decided = sum(accepted+rejected) across all children
-         no children                            -> PENDING
-         total_decided >= sum(extra_qty)        -> COMPLETE
-         any decided activity but not complete  -> PARTIALLY_ACCEPTED
-                                                   (legacy PARTIALLY_REJECTED collapsed
-                                                    into PARTIALLY_ACCEPTED in iter-30)
-    """
-    items = ern.get("items") or []
-    total_extra = 0.0
-    total_acc = 0.0
-    total_rej = 0.0
-    has_activity = False
-    for it in items:
-        total_extra += float(it.get("extra_qty") or 0)
-        children = it.get("children") or []
-        if children:
-            for c in children:
-                has_activity = True
-                total_acc += float(c.get("accepted_qty") or 0)
-                total_rej += float(c.get("rejected_qty") or 0)
-        elif it.get("accepted_qty") is not None or it.get("rejected_qty") is not None:
-            has_activity = True
-            total_acc += float(it.get("accepted_qty") or 0)
-            total_rej += float(it.get("rejected_qty") or 0)
-    if total_extra <= 0:
-        return "PENDING"
-    decided = total_acc + total_rej
-    if not has_activity or decided <= 0:
-        return "PENDING"
-    if decided + 1e-6 >= total_extra:
-        return "COMPLETE"
-    if total_acc > 0:
-        return "PARTIALLY_ACCEPTED"
-    # Only rejections so far → still partially-accepted (zero accepted)
-    # so the user knows fulfillment is in progress.
-    if total_rej > 0:
-        return "PARTIALLY_ACCEPTED"
-    return "PENDING"
-
-
 async def _recompute_rn_status(rn_id: str):
     """Recompute racking-progress status. DRAFT (pre-finalize) receipts stay at DRAFT
     — that's an internal pre-finalize marker only (gates the /finalize endpoint and
@@ -86,7 +41,7 @@ async def _recompute_rn_status(rn_id: str):
     Status precedence (highest to lowest), active 3-status set for finalized RNs:
       PENDING     : finalized RN with at most DRAFT racking notes (or none yet —
                     SRN/ERN tree may still emit auto-RKNs later). Nothing racked.
-      COMPLETE    : all rackable qty (RN.received + SRN.fulfilled + ERN.accepted
+      COMPLETE    : all rackable qty (RN.received + SRN.fulfilled + approved ERN.extra
                     across descendants) is covered by RECORDED racking notes
                     AND every descendant SRN/ERN is COMPLETE
       IN_PROCESS  : some RECORDED racking exists but not yet fully covered
@@ -173,16 +128,12 @@ async def _recompute_rn_status(rn_id: str):
                 else:
                     rackable[k] = rackable.get(k, 0) + float(it.get("fulfilled_qty") or 0)
     if ern_ids:
-        async for ern in db.extra_received_notes.find({"id": {"$in": ern_ids}}, {"_id": 0, "items": 1}):
+        async for ern in db.extra_received_notes.find({"id": {"$in": ern_ids}}, {"_id": 0, "items": 1, "status": 1}):
+            if (ern.get("status") or "").upper() not in ("APPROVED", "COMPLETE"):
+                continue
             for it in ern.get("items") or []:
                 k = _key(it.get("part_no"), it.get("make"))
-                children = it.get("children") or []
-                if children:
-                    rackable[k] = rackable.get(k, 0) + sum(
-                        float(c.get("accepted_qty") or 0) for c in children
-                    )
-                else:
-                    rackable[k] = rackable.get(k, 0) + float(it.get("accepted_qty") or 0)
+                rackable[k] = rackable.get(k, 0) + _ern_rackable_qty(it)
 
     # Total racked qty across RECORDED RKNs against any of these sources.
     racked: dict = {}
@@ -208,7 +159,7 @@ async def _recompute_rn_status(rn_id: str):
         async for ern in db.extra_received_notes.find(
             {"id": {"$in": ern_ids}}, {"_id": 0, "status": 1}
         ):
-            if (ern.get("status") or "PENDING").upper() != "COMPLETE":
+            if (ern.get("status") or "PENDING_APPROVAL").upper() not in ("COMPLETE", "REJECTED"):
                 has_open_descendant = True
                 break
 
@@ -245,11 +196,20 @@ async def _recompute_srn_racking_status(srn_id: str):
 
 
 async def _recompute_ern_racking_status(ern_id: str):
-    """Legacy field cleanup — see _recompute_srn_racking_status."""
-    await db.extra_received_notes.update_one(
-        {"id": ern_id},
-        {"$unset": {"racking_status": "", "racked_at": ""}},
-    )
+    """Approval-workflow status recompute. PENDING_APPROVAL/REJECTED are decision
+    states set explicitly by the approve/reject routes and are left untouched here.
+    APPROVED is promoted to COMPLETE once every rackable qty is covered by RECORDED
+    racking notes sourced from this ERN; COMPLETE can fall back to APPROVED if a
+    recorded racking note is later reversed."""
+    ern = await db.extra_received_notes.find_one({"id": ern_id}, {"_id": 0})
+    if not ern:
+        return
+    current = (ern.get("status") or "PENDING_APPROVAL").upper()
+    if current not in ("APPROVED", "COMPLETE"):
+        return
+    new_status = "COMPLETE" if await _is_source_fully_racked("ERN", ern) else "APPROVED"
+    if new_status != current:
+        await db.extra_received_notes.update_one({"id": ern_id}, {"$set": {"status": new_status}})
 
 
 async def _recompute_in_status(in_id: str):
@@ -342,15 +302,10 @@ async def _is_source_fully_racked(source_type: str, source_doc: dict) -> bool:
             else:
                 rackable[k] = rackable.get(k, 0) + float(it.get("fulfilled_qty") or 0)
     elif source_type == "ERN":
-        for it in source_doc.get("items") or []:
-            k = _key(it.get("part_no"), it.get("make"))
-            children = it.get("children") or []
-            if children:
-                rackable[k] = rackable.get(k, 0) + sum(
-                    float(c.get("accepted_qty") or 0) for c in children
-                )
-            else:
-                rackable[k] = rackable.get(k, 0) + float(it.get("accepted_qty") or 0)
+        if (source_doc.get("status") or "").upper() in ("APPROVED", "COMPLETE"):
+            for it in source_doc.get("items") or []:
+                k = _key(it.get("part_no"), it.get("make"))
+                rackable[k] = rackable.get(k, 0) + _ern_rackable_qty(it)
     else:
         return False
     if not rackable or sum(rackable.values()) == 0:
@@ -364,6 +319,28 @@ async def _is_source_fully_racked(source_type: str, source_doc: dict) -> bool:
             k = _key(it.get("part_no"), it.get("make"))
             racked[k] = racked.get(k, 0) + float(it.get("quantity") or 0)
     return all(racked.get(k, 0) + 1e-6 >= q for k, q in rackable.items() if q > 0)
+
+
+async def _stamp_racked_flag(rows: list, source_type: str) -> None:
+    """Annotate SRN/ERN rows with `has_recorded_racking` for the UI's edit gate.
+
+    A note stays editable/re-decidable until stock has been racked against it (see
+    ``assert_note_unracked``), so the list and detail views need that fact per row.
+    One query for the whole page rather than one per row.
+    """
+    if not rows:
+        return
+    ids = [r.get("id") for r in rows if r.get("id")]
+    if not ids:
+        return
+    racked = set()
+    async for rkn in db.racking_notes.find(
+        {"source_type": source_type, "source_id": {"$in": ids}, "status": "RECORDED"},
+        {"_id": 0, "source_id": 1},
+    ):
+        racked.add(rkn.get("source_id"))
+    for r in rows:
+        r["has_recorded_racking"] = r.get("id") in racked
 
 
 async def _aggregate_other_rkn_qty(rn_id: str, exclude_rkn_id: Optional[str] = None) -> dict:

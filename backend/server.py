@@ -36,7 +36,7 @@ from deps import (
 from models import *  # noqa: F401,F403
 
 # Helpers needed by startup migration
-from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _compute_ern_status, _recompute_in_status, _recompute_str_status
+from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _recompute_ern_racking_status, _recompute_in_status, _recompute_str_status
 from services.unit_of_work import ensure_collections, probe_transaction_support
 
 
@@ -342,18 +342,46 @@ async def startup():
             await coll.update_one({"id": doc["id"]}, {"$set": {"parent_stock_in_type": sit}})
     # New active values:
     #   SRN: PENDING / PARTIALLY_RECEIVED / COMPLETE
-    #   ERN: PENDING / PARTIALLY_ACCEPTED / COMPLETE
     # Drop legacy racking_status entirely (now derived at runtime).
     await db.short_received_notes.update_many({"status": "DRAFT"}, {"$set": {"status": "PENDING"}})
     await db.short_received_notes.update_many({"status": "FINAL"}, {"$set": {"status": "PENDING"}})
     await db.short_received_notes.update_many({"status": "FULLY_RECEIVED"}, {"$set": {"status": "COMPLETE"}})
     await db.short_received_notes.update_many({}, {"$unset": {"racking_status": "", "racked_at": ""}})
-    await db.extra_received_notes.update_many({"status": "DRAFT"}, {"$set": {"status": "PENDING"}})
-    await db.extra_received_notes.update_many({"status": "FINAL"}, {"$set": {"status": "PENDING"}})
-    await db.extra_received_notes.update_many({"status": "PARTIALLY_REJECTED"}, {"$set": {"status": "PARTIALLY_ACCEPTED"}})
+
+    # ---- ERN approval-workflow migration ----
+    # ERN moved from a per-row accepted/rejected inspection model to a single
+    # whole-note Store Manager approve/reject decision:
+    #   PENDING_APPROVAL / APPROVED / REJECTED / COMPLETE
+    # Map any existing document not already in that set based on its legacy
+    # accepted_qty/rejected_qty data, since this is live production data:
+    #   any item ever had accepted_qty > 0  -> APPROVED (grandfathered; real stock
+    #                                          may already be racked against it)
+    #   every item's activity was reject-only -> REJECTED
+    #   otherwise (untouched)                 -> PENDING_APPROVAL
+    active_ern_statuses = {"PENDING_APPROVAL", "APPROVED", "REJECTED", "COMPLETE"}
+    async for ern in db.extra_received_notes.find(
+        {"status": {"$nin": list(active_ern_statuses)}}, {"_id": 0}
+    ):
+        had_accepted = False
+        had_activity = False
+        for it in ern.get("items", []) or []:
+            for c in (it.get("children") or [{
+                "accepted_qty": it.get("accepted_qty"), "rejected_qty": it.get("rejected_qty"),
+            }]):
+                acc = float(c.get("accepted_qty") or 0)
+                rej = float(c.get("rejected_qty") or 0)
+                if acc > 0:
+                    had_accepted = True
+                if acc > 0 or rej > 0:
+                    had_activity = True
+        new_status = "APPROVED" if had_accepted else ("REJECTED" if had_activity else "PENDING_APPROVAL")
+        await db.extra_received_notes.update_one({"id": ern["id"]}, {"$set": {
+            "status": new_status, "decided_at": ern.get("finalized_at"), "decided_by": None,
+        }})
     await db.extra_received_notes.update_many({}, {"$unset": {"racking_status": "", "racked_at": ""}})
 
-    # Recompute SRN/ERN derived statuses on startup so any data loaded with old shapes is consistent.
+    # Recompute SRN derived status; ERN's APPROVED->COMPLETE promotion is derived
+    # from actually-RECORDED racking notes, so it needs the async, DB-querying path.
     async for srn in db.short_received_notes.find({}, {"_id": 0}):
         try:
             new_status = _compute_srn_status(srn)
@@ -361,11 +389,9 @@ async def startup():
                 await db.short_received_notes.update_one({"id": srn["id"]}, {"$set": {"status": new_status}})
         except Exception:
             pass
-    async for ern in db.extra_received_notes.find({}, {"_id": 0}):
+    async for ern in db.extra_received_notes.find({"status": "APPROVED"}, {"_id": 0, "id": 1}):
         try:
-            new_status = _compute_ern_status(ern)
-            if ern.get("status") != new_status:
-                await db.extra_received_notes.update_one({"id": ern["id"]}, {"$set": {"status": new_status}})
+            await _recompute_ern_racking_status(ern["id"])
         except Exception:
             pass
     # Migrate Stock Master schema: oem→remarks_oem, remarks→remarks_others

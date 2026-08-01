@@ -160,6 +160,10 @@ class ReceiptNoteCreate(BaseModel):
     # Optional client-generated token so a retried/duplicated submit (double-click,
     # network retry) returns the already-created document instead of creating a duplicate.
     client_token: Optional[str] = None
+    # Optimistic lock: the `version` the client loaded. When supplied, an edit is
+    # rejected with 409 if someone else saved in the meantime. Omit for
+    # last-write-wins (older clients).
+    version: Optional[int] = None
 
 
 class ReceiptNote(BaseModel):
@@ -192,6 +196,8 @@ class ReceiptNote(BaseModel):
     # racking note holds no stock and must not lock the parent.
     has_racking_note: Optional[bool] = False
     narration: Optional[str] = ""
+    # Bumped on every edit; drives the optimistic-lock check on PUT.
+    version: int = 0
 
 # ===================== SHORT RECEIVED NOTES (Phase 1: auto-created stubs) =====================
 
@@ -251,6 +257,9 @@ class ShortReceivedNote(BaseModel):
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
+    # Derived on read: True once a Racking Note sourced from THIS note is RECORDED.
+    # Drives the UI's edit gate — the note stays editable until stock actually moves.
+    has_recorded_racking: Optional[bool] = False
     narration: Optional[str] = ""
 
 
@@ -262,8 +271,11 @@ class ExtraReceivedNoteItem(BaseModel):
     invoice_qty: float = 0                    # invoice qty on the parent RN row
     received_qty: float = 0                   # received qty on the parent RN row
     extra_qty: float                          # qty over the invoice (= received_qty - invoice_qty)
-    accepted_qty: Optional[float] = None      # filled when finalized; rackable
-    rejected_qty: Optional[float] = None      # filled when finalized; returned to supplier (NOT rackable)
+    # Store Manager's decision split. Null until the note is decided. On a
+    # whole-note approve/reject these mirror extra_qty/0 (or 0/extra_qty); a
+    # partial decision splits them, and only approved_qty ever becomes rackable.
+    approved_qty: Optional[float] = None
+    rejected_qty: Optional[float] = None
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -272,12 +284,6 @@ class ExtraReceivedNoteItem(BaseModel):
     remarks_oem: Optional[str] = ""
     remarks_others: Optional[str] = ""
     item_category: Optional[str] = ""
-    # Legacy alias - mirrors accepted_qty for the racking pipeline.
-    quantity: Optional[float] = None
-    # Slice-model: list of accepted batches. Each entry references a child ERN
-    # holding the accepted portion. {child_ern_id, child_ern_no, accepted_qty,
-    # accepted_date, created_at}.
-    children: Optional[List[dict]] = []
 
 
 class ExtraReceivedNote(BaseModel):
@@ -296,19 +302,23 @@ class ExtraReceivedNote(BaseModel):
     invoice_date: str = ""
     goods_received_date: str = ""              # carried from parent at create time
     items: List[ExtraReceivedNoteItem] = []
-    # Status values (active set after iter-30 cleanup):
-    #   PENDING             : no children, or all children with zero accepted+rejected
-    #   PARTIALLY_ACCEPTED  : accepted_qty + rejected_qty > 0 and < extra
-    #   COMPLETE            : accepted + rejected >= extra
-    # When the user finalizes an ERN with accepted+rejected < extra, a CHILD ERN is auto-created
-    # for the residual undecided qty.
-    status: str = "PENDING"
+    # Status values (approval-workflow set):
+    #   PENDING_APPROVAL : created, awaiting a whole-note approve/reject decision
+    #   APPROVED         : decided; full extra qty is rackable; not yet fully racked
+    #   REJECTED         : decided; terminal; never rackable
+    #   COMPLETE         : APPROVED and its Racking Note is fully RECORDED
+    status: str = "PENDING_APPROVAL"
+    decided_at: Optional[str] = None
+    decided_by: Optional[str] = None
     finalized_at: Optional[str] = None
     created_at: str
     created_by: str = ""
     assigned_to_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = ""
     assigned_to_email: Optional[str] = ""
+    # Derived on read: True once a Racking Note sourced from THIS note is RECORDED.
+    # Drives the UI's edit gate — the note stays editable until stock actually moves.
+    has_recorded_racking: Optional[bool] = False
     narration: Optional[str] = ""
 
 class RackingNoteItem(BaseModel):

@@ -174,7 +174,10 @@ export function isRnEditable(rn, me, isAdmin) {
   return !(hasRacking || isAssignedToOther);
 }
 export function isChildEditable(doc) { // SRN / ERN
-  return doc?.status !== "COMPLETE";
+  // Locked only once stock has actually been racked from this note. A COMPLETE
+  // SRN or a decided ERN stays correctable until then — same "mutable until stock
+  // moves" rule the Receipt Note uses.
+  return !doc?.has_recorded_racking;
 }
 export function isRknEditable(rkn, me, isAdmin) {
   if (!rkn) return false;

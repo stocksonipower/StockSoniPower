@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 import {
   Plus, Trash, ArrowLeft, FloppyDisk, FileText, CaretLeft, CaretRight, Pencil, PencilSimple, Stack,
   DownloadSimple, ArrowsClockwise, UploadSimple, Printer, CheckCircle, Warning, Eye, X,
-  Receipt, Package as PackageIcon, MagnifyingGlass, XCircle, CircleNotch, ArrowUUpLeft,
+  Receipt, Package as PackageIcon, MagnifyingGlass, CircleNotch,
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
@@ -74,9 +74,30 @@ function sumSrnQty(srn)           { return (srn.items||[]).reduce((s,it) => s + 
 function sumSrnReceived(srn)      { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.received_qty||0), 0), 0); }
 function sumSrnNotReceivable(srn) { return (srn.items||[]).reduce((s,it) => s + (it.children||[]).reduce((c,ch) => c + (+ch.not_receivable_qty||0), 0), 0); }
 function sumErnQty(ern)           { return (ern.items||[]).reduce((s,it) => s + (+it.extra_qty||0), 0); }
-function sumErnAccepted(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.accepted_qty||0), 0); }
-function sumErnRejected(ern)      { return (ern.items||[]).reduce((s,it) => s + (+it.rejected_qty||0), 0); }
 function sumRknQty(rkn)           { return (rkn.items||[]).reduce((s,it) => s + (+it.quantity||0), 0); }
+
+/** True once a Store Manager has decided an ERN — approved, partly approved, or rejected. */
+function isErnDecided(ern) {
+  return ["APPROVED", "REJECTED", "COMPLETE"].includes((ern?.status || "").toUpperCase());
+}
+/** Approved / rejected slice of an ERN row.
+ *  Notes decided before the per-row split existed carry no approved_qty, so they
+ *  fall back to the whole-note meaning the status implies: everything approved on
+ *  an APPROVED/COMPLETE note, everything rejected on a REJECTED one. */
+function ernApprovedQty(it, status) {
+  if (it?.approved_qty != null) return +it.approved_qty || 0;
+  return (status || "").toUpperCase() === "REJECTED" ? 0 : (+it?.extra_qty || 0);
+}
+function ernRejectedQty(it, status) {
+  if (it?.rejected_qty != null) return +it.rejected_qty || 0;
+  return Math.max(0, (+it?.extra_qty || 0) - ernApprovedQty(it, status));
+}
+function sumErnApproved(ern) {
+  return (ern.items||[]).reduce((s,it) => s + ernApprovedQty(it, ern.status), 0);
+}
+function sumErnRejected(ern) {
+  return (ern.items||[]).reduce((s,it) => s + ernRejectedQty(it, ern.status), 0);
+}
 
 /** Status pill metadata used in list view AND detail dialog. */
 export function stockInTypeMeta(type) {
@@ -119,6 +140,12 @@ function statusMeta(status) {
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
     case "PARTIALLY_ACCEPTED":
       return { label: "In Process", cls: "bg-blue-50 text-blue-800" };
+    case "PENDING_APPROVAL":
+      return { label: "Pending Approval", cls: "bg-amber-50 text-amber-700" };
+    case "APPROVED":
+      return { label: "Approved", cls: "bg-blue-50 text-blue-800" };
+    case "REJECTED":
+      return { label: "Rejected", cls: "bg-red-50 text-red-700" };
     case "COMPLETE":
       return { label: "Complete", cls: "bg-green-100 text-green-800" };
     case "FULLY_RACKED":
@@ -154,7 +181,6 @@ export default function StockInPage() {
     <StockInNavContext.Provider value={navValue}>
       <div className="p-8 max-w-[1600px] mx-auto" data-testid="stock-in-page">
         <div className="mb-6">
-          <div className="label-sm mb-2">Inward</div>
           <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock In</h1>
         </div>
 
@@ -346,11 +372,32 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
         </div>
       </div>
 
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600">
+        <div>
+          {total === 0 ? "No receipt notes" : (
+            <>
+              Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
+              {" - "}<span className="font-semibold text-slate-900">{total}</span> total
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
+          </Button>
+          <span className="font-mono">Page {page} of {totalPages}</span>
+          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
+            Next <CaretRight size={12} weight="bold" className="ml-1" />
+          </Button>
+          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
+        </div>
+      </div>
+
       <div className="bg-white border border-slate-200 rounded-sm overflow-auto" style={{ maxHeight: "70vh" }}>
         <table className="data-table w-full">
           <thead className="sticky top-0 z-10 bg-slate-50">
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -443,27 +490,6 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
             )}
           </tbody>
         </table>
-      </div>
-
-      <div className="flex items-center justify-between mt-3 text-xs text-slate-600">
-        <div>
-          {total === 0 ? "No racking notes" : (
-            <>
-              Showing <span className="font-semibold text-slate-900">{filteredRows.length}</span>
-              {" - "}<span className="font-semibold text-slate-900">{total}</span> total
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} variant="outline" size="sm" className="rounded-sm h-7">
-            <CaretLeft size={12} weight="bold" className="mr-1" /> Prev
-          </Button>
-          <span className="font-mono">Page {page} of {totalPages}</span>
-          <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} variant="outline" size="sm" className="rounded-sm h-7">
-            Next <CaretRight size={12} weight="bold" className="ml-1" />
-          </Button>
-          <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
-        </div>
       </div>
     </div>
   );
@@ -599,7 +625,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                 <table className="data-table w-full">
                   <thead>
                     <tr>
-                      <th className="w-12">SL NO</th>
+                      <th className="w-16 whitespace-nowrap">SL NO</th>
                       <th>MODEL</th>
                       <th>PART NO</th>
                       <th>DESCRIPTION 1</th>
@@ -709,10 +735,8 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                     <div className="text-xs text-slate-400 italic">No ERN Created</div>
                   ) : ernTree.map(({ parent, children }) => {
                     const ernQty = sumErnQty(parent);
-                    const acc    = sumErnAccepted(parent);
-                    const rej    = sumErnRejected(parent);
-                    const pend   = Math.max(0, ernQty - acc - rej);
                     const em     = statusMeta(parent.status);
+                    const pDecided = isErnDecided(parent);
                     return (
                       <div key={parent.id} className="mb-3">
                         <div className="rounded border border-slate-200 p-2 text-xs bg-slate-50">
@@ -722,21 +746,25 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                           </button>
                           <div className="mt-1 space-y-0.5 text-slate-600">
                             <div><span className="font-semibold">Date:</span> {fmtDate(parent.ern_date)}</div>
-                            <div><span className="font-semibold">ERN Qty:</span> {ernQty || "—"}</div>
-                            <div><span className="font-semibold">Accepted Qty:</span> {acc || "—"}</div>
-                            <div><span className="font-semibold">Rejected Qty:</span> {rej || "—"}</div>
-                            <div><span className="font-semibold">Pending Qty:</span> {pend || "—"}</div>
+                            <div><span className="font-semibold">Extra Qty:</span> {ernQty || "—"}</div>
+                            {pDecided && (
+                              <>
+                                <div><span className="font-semibold">Approved Qty:</span> {sumErnApproved(parent).toFixed(2)}</div>
+                                <div><span className="font-semibold">Rejected Qty:</span> {sumErnRejected(parent).toFixed(2)}</div>
+                              </>
+                            )}
                             <div><span className="font-semibold">Status:</span>{" "}
                               <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${em.cls}`}>{em.label}</span>
                             </div>
+                            {parent.decided_by && (
+                              <div><span className="font-semibold">Decided By:</span> {parent.decided_by}</div>
+                            )}
                           </div>
                         </div>
                         {children.map(child => {
                           const cQty  = sumErnQty(child);
-                          const cAcc  = sumErnAccepted(child);
-                          const cRej  = sumErnRejected(child);
-                          const cPend = Math.max(0, cQty - cAcc - cRej);
                           const cEm   = statusMeta(child.status);
+                          const cDecided = isErnDecided(child);
                           return (
                             <div key={child.id} className="ml-3 mt-1 border-l-2 border-slate-300 pl-2 rounded-r border border-l-0 border-slate-200 p-1.5 text-xs bg-white">
                               <button onClick={() => goToErn(child)}
@@ -745,10 +773,13 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
                               </button>
                               <div className="mt-0.5 space-y-0.5 text-slate-600">
                                 <div><span className="font-semibold">Date:</span> {fmtDate(child.ern_date)}</div>
-                                <div><span className="font-semibold">ERN Qty:</span> {cQty || "—"}</div>
-                                <div><span className="font-semibold">Accepted:</span> {cAcc || "—"}</div>
-                                <div><span className="font-semibold">Rejected:</span> {cRej || "—"}</div>
-                                <div><span className="font-semibold">Pending:</span> {cPend || "—"}</div>
+                                <div><span className="font-semibold">Extra Qty:</span> {cQty || "—"}</div>
+                                {cDecided && (
+                                  <>
+                                    <div><span className="font-semibold">Approved Qty:</span> {sumErnApproved(child).toFixed(2)}</div>
+                                    <div><span className="font-semibold">Rejected Qty:</span> {sumErnRejected(child).toFixed(2)}</div>
+                                  </>
+                                )}
                                 <div><span className="font-semibold">Status:</span>{" "}
                                   <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${cEm.cls}`}>{cEm.label}</span>
                                 </div>
@@ -873,18 +904,18 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
 
   const pErnCard = (ern, indented = false) => {
     const ernQty = sumErnQty(ern);
-    const acc    = sumErnAccepted(ern);
-    const rej    = sumErnRejected(ern);
-    const pend   = Math.max(0, ernQty - acc - rej);
+    const decided = isErnDecided(ern);
+    const appr = sumErnApproved(ern);
+    const rej = sumErnRejected(ern);
     const indent = indented ? "margin-left:16px;border-left:3px solid #cbd5e1;padding-left:8px;" : "";
     return `<div class="note-card" style="${indent}">
       <div class="note-no">${escapeHtml(ern.ern_no)}</div>
       <div>Date: ${escapeHtml(fmtDate(ern.ern_date))}</div>
-      <div>ERN Qty: ${ernQty || "—"}</div>
-      <div>Accepted Qty: ${acc || "—"}</div>
-      <div>Rejected Qty: ${rej || "—"}</div>
-      <div>Pending Qty: ${pend || "—"}</div>
+      <div>Extra Qty: ${ernQty || "—"}</div>
+      ${decided ? `<div>Approved Qty: ${appr.toFixed(2)}</div>
+      <div>Rejected Qty: ${rej.toFixed(2)}</div>` : ""}
       <div>Status: ${escapeHtml(statusMeta(ern.status).label)}</div>
+      ${ern.decided_by ? `<div>Decided By: ${escapeHtml(ern.decided_by)}</div>` : ""}
     </div>`;
   };
 
@@ -1038,10 +1069,7 @@ function printChildDoc(doc, kind) {
       </tr>`;
     }
     const extraQ = parseFloat(it.extra_qty) || 0;
-    const childAcc = (it.children || []).reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
-    const childRej = (it.children || []).reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
-    const acc = (it.children || []).length > 0 ? childAcc : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
-    const rej = (it.children || []).length > 0 ? childRej : (it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0));
+    const decided = isErnDecided(doc);
     return `<tr>
       <td>${idx + 1}</td>
       <td><strong>${escapeHtml(it.part_no || "")}</strong></td>
@@ -1050,14 +1078,14 @@ function printChildDoc(doc, kind) {
       <td style="text-align:right">${inv}</td>
       <td style="text-align:right">${rec}</td>
       <td style="text-align:right">${extraQ.toFixed(2)}</td>
-      <td style="text-align:right">${acc == null ? "—" : acc.toFixed(2)}</td>
-      <td style="text-align:right">${rej == null ? "—" : rej.toFixed(2)}</td>
+      <td style="text-align:right">${decided ? ernApprovedQty(it, doc.status).toFixed(2) : "—"}</td>
+      <td style="text-align:right">${decided ? ernRejectedQty(it, doc.status).toFixed(2) : "—"}</td>
     </tr>`;
   }).join("");
 
   const extraCols = isSrn
     ? `<th style="text-align:right">Short Qty</th><th style="text-align:right">Fulfilled Qty</th><th style="text-align:right">Pending Qty</th>`
-    : `<th style="text-align:right">Extra Qty</th><th style="text-align:right">Accepted Qty</th><th style="text-align:right">Rejected Qty</th>`;
+    : `<th style="text-align:right">Extra Qty</th><th style="text-align:right">Approved Qty</th><th style="text-align:right">Rejected Qty</th>`;
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
@@ -1094,8 +1122,8 @@ function printChildDoc(doc, kind) {
     </div>
     <div>
       ${isSrn ? pField("Pending Quantity", fmtQty(sumSrnQty(doc))) : pField("Extra Quantity", fmtQty(sumErnQty(doc)))}
-      ${isSrn ? pField("Received Quantity", fmtQty(sumSrnReceived(doc))) : pField("Accepted Quantity", fmtQty(sumErnAccepted(doc)))}
-      ${isSrn ? pField("Remaining Quantity", fmtQty(Math.max(0, sumSrnQty(doc) - sumSrnReceived(doc) - sumSrnNotReceivable(doc)))) : pField("Rejected Quantity", fmtQty(sumErnRejected(doc)))}
+      ${isSrn ? pField("Received Quantity", fmtQty(sumSrnReceived(doc))) : pField("Decided By", doc.decided_by || "—")}
+      ${isSrn ? pField("Remaining Quantity", fmtQty(Math.max(0, sumSrnQty(doc) - sumSrnReceived(doc) - sumSrnNotReceivable(doc)))) : pField("Decided At", fmtDate(doc.decided_at) || "—")}
       ${pField("Created By", doc.created_by || "—")}
       ${pField("Assigned To", doc.assigned_to_name || doc.assigned_to_email || "—")}
     </div>
@@ -1135,6 +1163,7 @@ const emptyItem = () => ({
   invoice_qty: "",
   received_qty: "",
   description_1: "",
+  model: "",
   makes: [],
   partLooked: false,
 });
@@ -1155,6 +1184,9 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [narration, setNarration] = useState("");
   const [savingDraft, setSavingDraft] = useState(false);
   const [savingFinal, setSavingFinal] = useState(false);
+  // { data, proceed } while the recompute preview is on screen; null otherwise.
+  const [preview, setPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
 
   const [masterDialog, setMasterDialog] = useState(null);
@@ -1185,6 +1217,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
         invoice_qty: (it.invoice_qty ?? it.quantity ?? ""),
         received_qty: (it.received_qty ?? (isFinalEdit ? (it.quantity ?? "") : "")),
         description_1: it.description_1 || "",
+        model: it.model || "",
         makes: it.make ? [it.make] : [],
         partLooked: !!it.part_no,
       }));
@@ -1234,34 +1267,34 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const lookupMakes = async (i, partNo) => {
     const v = (partNo || "").trim();
     if (!v) {
-      updateItem(i, { makes: [], make: "", partLooked: false, description_1: "" });
+      updateItem(i, { makes: [], make: "", partLooked: false, description_1: "", model: "" });
       return;
     }
     try {
       const { data } = await api.get("/stock-master/lookup/makes", { params: { part_no: v } });
       const list = data.makes || [];
-      // If exactly one make is auto-selected, also fetch description_1 for that pair
+      // If exactly one make is auto-selected, also fetch description_1/model for that pair
       const autoMake = list.length === 1 ? list[0] : "";
       updateItem(i, { makes: list, partLooked: true, make: autoMake });
       if (autoMake) {
         try {
           const { data: m } = await api.get("/stock-master/lookup/item", { params: { part_no: v, make: autoMake } });
-          updateItem(i, { description_1: m.description_1 || "" });
+          updateItem(i, { description_1: m.description_1 || "", model: m.model || "" });
         } catch { /* ignore */ }
       } else {
-        updateItem(i, { description_1: "" });
+        updateItem(i, { description_1: "", model: "" });
       }
     } catch {
-      updateItem(i, { makes: [], partLooked: true, make: "", description_1: "" });
+      updateItem(i, { makes: [], partLooked: true, make: "", description_1: "", model: "" });
     }
   };
 
-  // Fetch description_1 when make is picked
+  // Fetch description_1 / model when make is picked
   const fetchDescription = async (i, partNo, make) => {
     if (!partNo || !make) return;
     try {
       const { data } = await api.get("/stock-master/lookup/item", { params: { part_no: partNo, make } });
-      updateItem(i, { description_1: data.description_1 || "" });
+      updateItem(i, { description_1: data.description_1 || "", model: data.model || "" });
     } catch { /* ignore */ }
   };
 
@@ -1285,7 +1318,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
     if (masterDialog == null) return;
     const i = masterDialog.rowIdx;
     setItems((prev) => prev.map((r, idx) => idx === i
-      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "", masterMissing: false }
+      ? { ...r, makes: [...new Set([...(r.makes || []), newItem.make])], make: newItem.make, partLooked: true, description_1: newItem.description_1 || "", model: newItem.model || "", masterMissing: false }
       : r));
     setMasterDialog(null);
     toast.success(`Master created: ${newItem.part_no} / ${newItem.make}`);
@@ -1347,6 +1380,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
           invoice_qty: inv,
           received_qty: rec,
           description_1: "",
+          model: "",
           makes: make ? [make] : [],
           partLooked: false,
         });
@@ -1378,7 +1412,7 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
                     if (r.part_no === row.part_no && r.make && !r.description_1 && !r.masterMissing) {
                       api.get("/stock-master/lookup/item", { params: { part_no: r.part_no, make: r.make } })
                         .then(({ data: m }) => {
-                          setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "" } : rr));
+                          setItems((p) => p.map((rr, i) => i === idx ? { ...rr, description_1: m.description_1 || "", model: m.model || "" } : rr));
                         }).catch(() => {});
                     }
                   });
@@ -1494,6 +1528,9 @@ const canFinalize = useMemo(() => {
     assigned_to_user_id: assignedToUserId || null,
     narration: narration.trim(),
     client_token: isEdit ? undefined : clientTokenRef.current,
+    // Optimistic lock: the version we loaded. The server rejects the save with a
+    // 409 if someone else edited this receipt in the meantime.
+    version: isEdit ? (editing?.version ?? 0) : undefined,
     items: items.map((it) => ({
       part_no: it.part_no.trim(),
       make: it.make.trim(),
@@ -1503,9 +1540,33 @@ const canFinalize = useMemo(() => {
     })),
   });
 
+  // Editing a finalized receipt recomputes its SRN / ERN / Racking Notes. Show the
+  // user exactly what that will do before anything is written.
+  const needsPreview = isEdit && editing?.status && editing.status !== "DRAFT";
+
+  const runPreview = async (proceed) => {
+    if (!needsPreview) return proceed();
+    setPreviewLoading(true);
+    try {
+      const { data } = await api.post(`/receipt-notes/${editing.id}/edit-preview`, buildPayload());
+      const noChanges =
+        !data.srn.create.length && !data.srn.update.length && !data.srn.delete.length &&
+        !data.ern.create.length && !data.ern.update.length && !data.ern.delete.length &&
+        !data.racking.create.length && !data.racking.update.length && !data.racking.delete.length;
+      if (noChanges && !data.blocked.length) return proceed();
+      setPreview({ data, proceed });
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not preview this change");
+    } finally { setPreviewLoading(false); }
+  };
+
   const saveDraft = async () => {
     if (!validateBaseRows()) return;
     if (!validateDates()) return;
+    return runPreview(doSaveDraft);
+  };
+
+  const doSaveDraft = async () => {
     setSavingDraft(true);
     try {
       const payload = buildPayload();
@@ -1522,6 +1583,10 @@ const canFinalize = useMemo(() => {
   const saveFinal = async () => {
     if (!validateBaseRows()) return;
     if (!validateDates()) return;
+    return runPreview(doSaveFinal);
+  };
+
+  const doSaveFinal = async () => {
     // Received Qty may be 0 (treated as "nothing received yet"). No explicit > 0 check.
     setSavingFinal(true);
     try {
@@ -1727,13 +1792,14 @@ const canFinalize = useMemo(() => {
           <table className="data-table w-full">
             <thead>
               <tr>
-                <th className="w-14">SL NO</th>
+                <th className="w-16 whitespace-nowrap">SL NO</th>
+                <th className="w-32">MODEL</th>
                 <th className="w-44">PART NO</th>
                 <th>DESCRIPTION 1</th>
+                <th className="w-56">MAKE</th>
                 <th className="w-28 text-center">{isGeneral ? "INV QTY" : "INVOICE QTY"}</th>
                 <th className="w-28 text-center">RECEIVED QTY</th>
                 <th className="w-24 text-center">QTY DIFF</th>
-                <th className="w-56">MAKE</th>
                 <th className="w-14"></th>
               </tr>
             </thead>
@@ -1765,9 +1831,18 @@ const canFinalize = useMemo(() => {
                   >
                     <td className="font-mono text-slate-500">{idx + 1}</td>
                     <td>
+                      <div
+                        className="text-xs text-slate-700 px-2 py-1 bg-slate-50 rounded-sm border border-slate-200 truncate"
+                        title={it.model || "—"}
+                        data-testid={`rn-model-${idx}`}
+                      >
+                        {it.model || <span className="text-slate-400 italic">(auto from master)</span>}
+                      </div>
+                    </td>
+                    <td>
                       <Input
                         value={it.part_no}
-                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "" })}
+                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "", model: "" })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
                         placeholder="Enter part no"
                         className="rounded-sm font-mono h-8"
@@ -1782,6 +1857,22 @@ const canFinalize = useMemo(() => {
                       >
                         {it.description_1 || <span className="text-slate-400 italic">(auto from master)</span>}
                       </div>
+                    </td>
+                    <td className="w-56">
+                      <MakeDropdown
+  value={it.make}
+  makes={it.makes}
+  partLooked={it.partLooked}
+  onChange={(v) => handleMakeChange(idx, v)}
+  onKeyDown={(e) => {
+    if (isLastRow && e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      const addBtn = document.querySelector(`[data-testid="rn-add-row-${idx}"]`);
+      if (addBtn) addBtn.focus();
+    }
+  }}
+  testid={`rn-make-${idx}`}
+/>
                     </td>
                     <td className="w-28">
                       <Input
@@ -1812,22 +1903,6 @@ const canFinalize = useMemo(() => {
                     </td>
                     <td className={`w-24 text-center font-mono ${diffCls}`} data-testid={`rn-qty-diff-${idx}`}>
                       {!recFilled ? "—" : (diff > 0 ? `+${diff}` : diff)}
-                    </td>
-                    <td className="w-56">
-                      <MakeDropdown
-  value={it.make}
-  makes={it.makes}
-  partLooked={it.partLooked}
-  onChange={(v) => handleMakeChange(idx, v)}
-  onKeyDown={(e) => {
-    if (isLastRow && e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      const addBtn = document.querySelector(`[data-testid="rn-add-row-${idx}"]`);
-      if (addBtn) addBtn.focus();
-    }
-  }}
-  testid={`rn-make-${idx}`}
-/>
                     </td>
                                         <td>
                       <div className="flex items-center gap-1">
@@ -1891,6 +1966,7 @@ const canFinalize = useMemo(() => {
               {items.some((it) => qtyDiff(it) < 0) && items.some((it) => qtyDiff(it) > 0) && " and"}
               {items.some((it) => qtyDiff(it) > 0) && <> an <strong>Extra Received Note (ERN)</strong> for overage rows</>}
               {". Check the matching tabs to finalize them when ready."}
+              {items.some((it) => qtyDiff(it) > 0) && " An ERN's extra quantity needs Store Manager approval before it can be racked."}
             </div>
           </div>
         )}
@@ -1925,7 +2001,7 @@ const canFinalize = useMemo(() => {
               <Button
                 ref={draftBtnRef}
                 onClick={saveDraft}
-                disabled={savingDraft || savingFinal}
+                disabled={savingDraft || savingFinal || previewLoading}
                 variant="outline"
                 className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50"
                 data-testid="rn-save-draft-button"
@@ -1937,7 +2013,7 @@ const canFinalize = useMemo(() => {
             <Button
               ref={finalBtnRef}
               onClick={saveFinal}
-              disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
+              disabled={savingDraft || savingFinal || previewLoading || (!canFinalize && !isFinalEdit)}
               className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
               data-testid="rn-save-final-button"
               title={!canFinalize && !isFinalEdit ? "Fill Part No and Make on every row to enable Final Save (Received Qty may be 0)" : (isFinalEdit ? "Update finalized receipt" : "Final Save — promotes to Racking")}
@@ -1955,7 +2031,136 @@ const canFinalize = useMemo(() => {
         onClose={() => setMasterDialog(null)}
         onCreated={handleMasterCreated}
       />
+
+      <RecomputePreviewDialog
+        preview={preview}
+        busy={savingDraft || savingFinal}
+        onClose={() => setPreview(null)}
+        onConfirm={() => { const p = preview; setPreview(null); p?.proceed(); }}
+      />
     </div>
+  );
+}
+
+/** Old -> new preview of what editing a finalized Receipt Note will do to its
+ *  derived documents. Shown before anything is written, so the user confirms the
+ *  recompute rather than discovering it afterwards. */
+function RecomputePreviewDialog({ preview, busy, onClose, onConfirm }) {
+  const d = preview?.data;
+  if (!d) return null;
+  const blocked = d.blocked?.length > 0;
+
+  const qtyList = (rows) =>
+    rows.map((r) => `${r.part_no} / ${r.make} → ${r.qty}`).join(", ");
+
+  const Section = ({ title, plan, unit }) => {
+    const has = plan.create.length || plan.update.length || plan.delete.length;
+    if (!has) return null;
+    return (
+      <div className="rounded-sm border border-slate-200">
+        <div className="bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700">{title}</div>
+        <div className="divide-y divide-slate-100 text-sm">
+          {plan.create.length > 0 && (
+            <div className="px-3 py-2">
+              <span className="mr-2 rounded-sm bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">Create</span>
+              {qtyList(plan.create)} <span className="text-slate-400">{unit}</span>
+            </div>
+          )}
+          {plan.update.map((u, i) => (
+            <div key={i} className="px-3 py-2">
+              <span className="mr-2 rounded-sm bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">Update</span>
+              <span className="font-medium">{u.no}</span> — {qtyList(u.items)} <span className="text-slate-400">{unit}</span>
+              {u.re_approval_required && (
+                <span className="ml-2 text-xs font-medium text-amber-700">· needs re-approval</span>
+              )}
+            </div>
+          ))}
+          {plan.delete.length > 0 && (
+            <div className="px-3 py-2">
+              <span className="mr-2 rounded-sm bg-rose-50 px-1.5 py-0.5 text-xs font-medium text-rose-700">Remove</span>
+              {plan.delete.join(", ")}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-2xl" data-testid="rn-recompute-preview">
+        <DialogHeader>
+          <DialogTitle>
+            {blocked ? "This edit cannot be saved" : "Confirm changes to derived documents"}
+          </DialogTitle>
+        </DialogHeader>
+
+        {blocked ? (
+          <div className="space-y-2 rounded-sm border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+            {d.blocked.map((b, i) => <div key={i}>{b}</div>)}
+          </div>
+        ) : (
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto">
+            <p className="text-sm text-slate-600">
+              The Receipt Note is the master document. Saving recomputes everything derived from it:
+            </p>
+
+            {d.items.some((i) => i.old_received_qty !== i.new_received_qty ||
+                                 i.old_invoice_qty !== i.new_invoice_qty) && (
+              <div className="rounded-sm border border-slate-200">
+                <div className="bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700">Quantities</div>
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-slate-500">
+                    <tr>
+                      <th className="px-3 py-1 text-left font-medium">Item</th>
+                      <th className="px-3 py-1 text-right font-medium">Invoice</th>
+                      <th className="px-3 py-1 text-right font-medium">Received</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {d.items.map((i, idx) => (
+                      <tr key={idx}>
+                        <td className="px-3 py-1.5">{i.part_no} / {i.make}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {i.old_invoice_qty !== i.new_invoice_qty
+                            ? <><span className="text-slate-400 line-through">{i.old_invoice_qty ?? "—"}</span> {i.new_invoice_qty}</>
+                            : i.new_invoice_qty}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {i.old_received_qty !== i.new_received_qty
+                            ? <><span className="text-slate-400 line-through">{i.old_received_qty ?? "—"}</span> {i.new_received_qty}</>
+                            : i.new_received_qty}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <Section title="Racking Note" plan={d.racking} unit="qty" />
+            <Section title="Short Received Note (SRN)" plan={d.srn} unit="short" />
+            <Section title="Extra Received Note (ERN)" plan={d.ern} unit="extra" />
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" className="rounded-sm" onClick={onClose}>
+            {blocked ? "Close" : "Cancel"}
+          </Button>
+          {!blocked && (
+            <Button
+              className="rounded-sm bg-blue-700 hover:bg-blue-800"
+              disabled={busy}
+              onClick={onConfirm}
+              data-testid="rn-recompute-confirm"
+            >
+              {busy ? "Saving…" : "Save changes"}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2247,17 +2452,6 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  const handleDelete = async (r) => {
-    if (!window.confirm(`Delete ${r[idField]}? This cannot be undone.`)) return;
-    try {
-      await api.delete(`${path}/${r.id}`);
-      toast.success(`${r[idField]} deleted`);
-      onChanged();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
-    }
-  };
-
   // Item-aggregation helpers for the list display
   const sumQty = (r) => {
     if (isSrn) {
@@ -2306,7 +2500,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-14">SL NO</th>
+              <th className="w-16 whitespace-nowrap">SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -2327,7 +2521,10 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
           <tbody>
             {filteredRows.map((r, idx) => {
               const meta = statusMeta(r.status);
-              const canEdit = r.status !== "COMPLETE";
+              // Editable until stock has actually been racked from this note — a
+              // terminal status is not itself a lock, so a decision or fulfilment
+              // recorded in error can still be corrected.
+              const canEdit = !r.has_recorded_racking;
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -2373,19 +2570,14 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                         onClick={() => onEdit(r)}
                         disabled={!canEdit}
                         className={`p-1.5 rounded-sm ${canEdit ? "hover:bg-blue-50 text-blue-700" : "text-slate-300 cursor-not-allowed"}`}
-                        title={canEdit ? "Edit / Finalize" : (isSrn ? "Already fully received" : "Already complete")}
+                        title={canEdit ? "Edit / Finalize" : "Locked — stock has already been racked from this note"}
                         data-testid={`${kind}-edit-${r[idField]}`}
                       >
                         <Pencil size={14} />
                       </button>
-                      <button
-                        onClick={() => handleDelete(r)}
-                        className="p-1.5 rounded-sm hover:bg-red-50 text-red-700"
-                        title="Delete"
-                        data-testid={`${kind}-delete-${r[idField]}`}
-                      >
-                        <Trash size={14} />
-                      </button>
+                      {/* No delete action: SRN and ERN are derived from the Receipt
+                          Note. Removing one means removing the shortfall/overage at
+                          source — edit the Receipt Note's Received Qty instead. */}
                     </div>
                   </td>
                 </tr>
@@ -2504,8 +2696,8 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
             ) : (
               <>
                 <Detail k="EXTRA QUANTITY" v={fmtQty(sumErnQty(doc))} />
-                <Detail k="ACCEPTED QUANTITY" v={fmtQty(sumErnAccepted(doc))} />
-                <Detail k="REJECTED QUANTITY" v={fmtQty(sumErnRejected(doc))} />
+                <Detail k="DECIDED BY" v={doc.decided_by || "—"} />
+                <Detail k="DECIDED AT" v={fmtDate(doc.decided_at) || "—"} />
               </>
             )}
             <Detail k="STATUS" v={
@@ -2553,10 +2745,8 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
                 ) : (
                   <>
                     <th className="text-center">EXTRA QTY</th>
-                    <th className="text-center">ACCEPTED QTY</th>
+                    <th className="text-center">APPROVED QTY</th>
                     <th className="text-center">REJECTED QTY</th>
-                    <th className="text-center">UNDECIDED</th>
-                    <th className="text-center">CHILD ERNs</th>
                   </>
                 )}
               </tr>
@@ -2592,19 +2782,7 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
                   );
                 }
                 const extraQ = parseFloat(it.extra_qty) || 0;
-                const childAcc = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.accepted_qty) || 0), 0,
-                );
-                const childRej = (it.children || []).reduce(
-                  (s, c) => s + (parseFloat(c.rejected_qty) || 0), 0,
-                );
-                const acc = (it.children || []).length > 0
-                  ? childAcc
-                  : (it.accepted_qty == null ? null : (parseFloat(it.accepted_qty) || 0));
-                const rej = (it.children || []).length > 0
-                  ? childRej
-                  : (it.rejected_qty == null ? null : (parseFloat(it.rejected_qty) || 0));
-                const undecided = extraQ - (acc || 0) - (rej || 0);
+                const decided = isErnDecided(doc);
                 return (
                   <tr key={idx}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -2614,10 +2792,12 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
                     <td className="text-center font-mono">{fmtQty(it.invoice_qty)}</td>
                     <td className="text-center font-mono">{fmtQty(it.received_qty)}</td>
                     <td className="text-center font-mono font-bold text-amber-700">{extraQ.toFixed(2)}</td>
-                    <td className="text-center font-mono">{acc == null ? "—" : acc.toFixed(2)}</td>
-                    <td className="text-center font-mono">{rej == null ? "—" : rej.toFixed(2)}</td>
-                    <td className={`text-center font-mono font-bold ${undecided > 0 ? "text-amber-700" : "text-green-700"}`}>{undecided.toFixed(2)}</td>
-                    <td className="text-center">{renderChildren(it)}</td>
+                    <td className="text-center font-mono font-bold text-green-700">
+                      {decided ? ernApprovedQty(it, doc.status).toFixed(2) : "—"}
+                    </td>
+                    <td className="text-center font-mono text-red-700">
+                      {decided ? ernRejectedQty(it, doc.status).toFixed(2) : "—"}
+                    </td>
                   </tr>
                 );
               })}
@@ -2964,133 +3144,83 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
 }
 function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
   const [parent, setParent] = useState(initialErn);
-  const [drafts, setDrafts] = useState({});
-  const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
   const [narration, setNarration] = useState(initialErn.narration || "");
-  const [savingNarration, setSavingNarration] = useState(false);
 
   const reload = async () => {
     try {
       const { data } = await api.get(`/extra-received-notes/${parent.id}`);
       setParent(data);
+      setApprovedQty(seedApproved(data));
     } catch (err) {
       toast.error(formatApiError(err.response?.data?.detail) || "Could not reload");
     }
   };
 
-  const setDraft = (idx, patch) =>
-    setDrafts((d) => ({ ...d, [idx]: { ...(d[idx] || { accepted_qty: "", rejected_qty: "" }), ...patch } }));
-  const startAdd = (idx) => setDraft(idx, {});
-  const cancelAdd = (idx) => setDrafts((d) => { const n = { ...d }; delete n[idx]; return n; });
+  const isPending = (parent.status || "PENDING_APPROVAL") === "PENDING_APPROVAL";
+  const isDecided = !isPending;
+  const totalExtra = sumErnQty(parent);
+  // Editable for as long as nothing has actually been racked from this ERN yet —
+  // a decision, even a terminal-looking one, is correctable right up until then.
+  // No separate "reopen" step: changing the split and clicking Approve/Reject
+  // re-decides in place.
+  const canEdit = !parent.has_recorded_racking;
 
-  const totals = (it) => {
-    const children = it.children || [];
-    const acc = children.reduce((s, c) => s + (parseFloat(c.accepted_qty) || 0), 0);
-    const rej = children.reduce((s, c) => s + (parseFloat(c.rejected_qty) || 0), 0);
-    const pending = (parseFloat(it.extra_qty) || 0) - acc - rej;
-    return { acc, rej, pending };
+  // Per-row approved qty, seeded from the note's current state: the full extra
+  // for a still-pending row, or its existing split for one already decided.
+  const seedApproved = (doc) => (doc.items || []).map((it) => String(ernApprovedQty(it, doc.status)));
+  const [approvedQty, setApprovedQty] = useState(() => seedApproved(initialErn));
+  const splitFor = (idx, it) => {
+    const extra = parseFloat(it.extra_qty) || 0;
+    const app = Math.min(Math.max(parseFloat(approvedQty[idx]) || 0, 0), extra);
+    return { approved: app, rejected: extra - app };
   };
+  const totalApproved = (parent.items || []).reduce((s, it, i) => s + splitFor(i, it).approved, 0);
+  const isPartial = totalApproved > 0 && totalApproved < totalExtra - 1e-6;
 
-  const saveNew = async (idx) => {
-    const it = parent.items[idx];
-    const d = drafts[idx] || {};
-    const acc = parseFloat(d.accepted_qty || 0);
-    const rej = parseFloat(d.rejected_qty || 0);
-    if (!acc && !rej) { toast.error("Enter Accepted Qty or Rejected Qty"); return; }
-    const { pending } = totals(it);
-    if (acc + rej > pending + 1e-6) { toast.error(`Exceeds Pending Qty (${pending.toFixed(2)})`); return; }
+  const decisionItems = () => (parent.items || []).map((it, i) => {
+    const { approved, rejected } = splitFor(i, it);
+    return { part_no: it.part_no, make: it.make, approved_qty: approved, rejected_qty: rejected };
+  });
+
+  const narrationChanged = narration.trim() !== (parent.narration || "").trim();
+  const hasChanges = canEdit || narrationChanged;
+
+  // One button for the whole page: saves the approve/reject split (when the ERN
+  // is still editable) and the narration (whenever it changed) together. The
+  // server derives APPROVED vs REJECTED from the split's totals — nothing
+  // approved lands as REJECTED, anything approved (even partially) lands as
+  // APPROVED — so this same action covers the first decision, every
+  // re-decision after it, and a narration-only edit once the note is locked.
+  const saveErn = async () => {
+    const allApproved = totalApproved >= totalExtra - 1e-6;
+    const allRejected = totalApproved <= 1e-6;
+    if (canEdit) {
+      const verb = isDecided ? "Save" : (allApproved ? "Approve" : allRejected ? "Reject" : "Save");
+      const msg = allRejected
+        ? `${verb} — reject the full extra quantity (${totalExtra.toFixed(2)}) on ${parent.ern_no}? It will never be rackable.`
+        : allApproved
+          ? `${verb} — approve the full extra quantity (${totalExtra.toFixed(2)}) on ${parent.ern_no}? This makes it rackable.`
+          : `${verb} — approve ${totalApproved.toFixed(2)} of ${totalExtra.toFixed(2)} on ${parent.ern_no}? `
+            + `The remaining ${(totalExtra - totalApproved).toFixed(2)} is rejected and will never enter stock.`;
+      if (!window.confirm(msg)) return;
+    }
     setBusy(true);
     try {
-      const res = await api.post(`/extra-received-notes/${parent.id}/children`, {
-        part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej,
-      });
-      const autoRkn = res.headers?.["x-auto-rkn-no"];
-      if (autoRkn) toast.success(`Child row added — ${autoRkn} auto-created for racking`);
-      else toast.success("Child row added");
-      cancelAdd(idx);
+      let autoRkn = null;
+      if (canEdit) {
+        const res = await api.post(`/extra-received-notes/${parent.id}/approve`,
+          { items: decisionItems() });
+        autoRkn = res.headers?.["x-auto-rkn-no"];
+      }
+      if (narrationChanged) {
+        await api.patch(`/extra-received-notes/${parent.id}/narration`, { narration: narration.trim() });
+      }
+      toast.success(autoRkn ? `Saved — ${autoRkn} auto-created for racking` : "Saved");
       await reload();
     } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not add row");
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not save");
     } finally { setBusy(false); }
-  };
-
-  const saveEdit = async () => {
-    if (!editing) return;
-    const { itemIdx, child_ern_no, accepted_qty, rejected_qty } = editing;
-    const it = parent.items[itemIdx];
-    const acc = parseFloat(accepted_qty || 0);
-    const rej = parseFloat(rejected_qty || 0);
-    if (!acc && !rej) { toast.error("Enter Accepted or Rejected Qty"); return; }
-    setBusy(true);
-    try {
-      const res = await api.put(
-        `/extra-received-notes/${parent.id}/children/${encodeURIComponent(child_ern_no)}`,
-        { part_no: it.part_no, make: it.make, accepted_qty: acc, rejected_qty: rej },
-      );
-      const autoRkn = res.headers?.["x-auto-rkn-no"];
-      if (autoRkn) toast.success(`Row updated — ${autoRkn} auto-created for racking`);
-      else toast.success("Row updated");
-      setEditing(null);
-      await reload();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
-    } finally { setBusy(false); }
-  };
-
-  const deleteChild = async (childNo) => {
-    if (!window.confirm("Delete this row?")) return;
-    setBusy(true);
-    try {
-      await api.delete(`/extra-received-notes/${parent.id}/children/${encodeURIComponent(childNo)}`);
-      toast.success("Row deleted");
-      await reload();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not delete");
-    } finally { setBusy(false); }
-  };
-
-  const [rejectingIdx, setRejectingIdx] = useState(null);
-  const rejectRemaining = async (idx) => {
-    const it = parent.items[idx];
-    const { pending } = totals(it);
-    if (pending <= 1e-6) return;
-    if (!window.confirm(`Reject the remaining ${pending.toFixed(2)} of ${it.part_no} / ${it.make}? This never creates a Racking Note or moves stock.`)) return;
-    setRejectingIdx(idx);
-    try {
-      await api.post(`/extra-received-notes/${parent.id}/reject`, {
-        items: [{ part_no: it.part_no, make: it.make, rejected_qty: pending }],
-      });
-      toast.success("Remaining quantity rejected");
-      await reload();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not reject");
-    } finally { setRejectingIdx(null); }
-  };
-
-  const [markingReturnedNo, setMarkingReturnedNo] = useState(null);
-  const toggleReturned = async (childNo, currentlyReturned) => {
-    setMarkingReturnedNo(childNo);
-    try {
-      await api.patch(
-        `/extra-received-notes/${parent.id}/children-returned/${encodeURIComponent(childNo)}`,
-        { returned: !currentlyReturned },
-      );
-      toast.success(!currentlyReturned ? "Marked returned to supplier" : "Unmarked returned");
-      await reload();
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not update");
-    } finally { setMarkingReturnedNo(null); }
-  };
-
-  const saveNarration = async () => {
-    setSavingNarration(true);
-    try {
-      await api.patch(`/extra-received-notes/${parent.id}/narration`, { narration: narration.trim() });
-      toast.success("Narration saved");
-    } catch (err) {
-      toast.error(formatApiError(err.response?.data?.detail) || "Could not save narration");
-    } finally { setSavingNarration(false); }
   };
 
   const meta = statusMeta(parent.status);
@@ -3113,12 +3243,22 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
         <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
         <Detail k="Invoice No" v={parent.invoice_no || "—"} />
         <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
+        {!isPending && (
+          <>
+            <Detail k="Decided By" v={parent.decided_by || "—"} />
+            <Detail k="Decided At" v={fmtDate(parent.decided_at) || "—"} />
+          </>
+        )}
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-200 label-sm flex items-center justify-between">
-          <span>EXTRA ITEMS — Click + to add an accept/reject decision row</span>
-          <span className="text-[11px] text-slate-500 normal-case">Each row is a Child ERN (PARENT-A, -B…). Only Accepted Qty is rackable.</span>
+          <span>EXTRA ITEMS</span>
+          <span className="text-[11px] text-slate-500 normal-case">
+            {canEdit
+              ? "Set Approved on each row — the rest is rejected and never enters stock — then Save ERN."
+              : "Locked — stock has been racked from this ERN, so the decision is now final."}
+          </span>
         </div>
         <table className="data-table w-full">
           <thead>
@@ -3126,186 +3266,60 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
               <th className="w-8">#</th>
               <th className="w-44">PART NO</th>
               <th>DESCRIPTION 1</th>
-              <th className="w-20 text-center">EXTRA</th>
-              <th className="w-24 text-center">TOTAL ACC</th>
-              <th className="w-24 text-center">TOTAL REJ</th>
-              <th className="w-20 text-center">PENDING</th>
-              <th className="w-28">CHILD NO</th>
-              <th className="w-32">ACCEPTED QTY</th>
-              <th className="w-32">REJECTED QTY</th>
-              <th className="w-24 text-right">ACTION</th>
+              <th className="w-24 text-center">INVOICE</th>
+              <th className="w-24 text-center">RECEIVED</th>
+              <th className="w-24 text-center">EXTRA</th>
+              <th className="w-28 text-center">APPROVED</th>
+              <th className="w-24 text-center">REJECTED</th>
             </tr>
           </thead>
           <tbody>
-            {(parent.items || []).flatMap((it, idx) => {
-              const { acc, rej, pending } = totals(it);
-              const rows = [];
-              rows.push(
-                <tr key={`h-${idx}`} className="bg-slate-50">
-                  <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
-                  <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                  <td className="text-xs text-slate-700 truncate max-w-[200px]" title={it.description_1}>{it.description_1 || "—"}</td>
-                  <td className="text-center font-mono font-bold text-amber-700">{(parseFloat(it.extra_qty) || 0).toFixed(2)}</td>
-                  <td className="text-center font-mono font-bold text-green-700">{acc.toFixed(2)}</td>
-                  <td className="text-center font-mono text-red-700">{rej.toFixed(2)}</td>
-                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                  <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
-                  <td className="text-right">
-                    {pending > 1e-6 && drafts[idx] === undefined && (
-                      <div className="flex gap-1 justify-end">
-                        <button onClick={() => startAdd(idx)} disabled={busy}
-                          className="bg-blue-700 text-white hover:bg-blue-800 px-2 py-1 rounded-sm text-xs font-bold inline-flex items-center"
-                          data-testid={`ern-add-child-${idx}`}>
-                          <Plus size={12} weight="bold" className="mr-1" /> Add
-                        </button>
-                        <button onClick={() => rejectRemaining(idx)} disabled={busy || rejectingIdx === idx}
-                          title="Reject the remaining pending qty — never creates a Racking Note or moves stock"
-                          className="bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 px-2 py-1 rounded-sm text-xs font-bold inline-flex items-center"
-                          data-testid={`ern-reject-remaining-${idx}`}>
-                          {rejectingIdx === idx
-                            ? <CircleNotch size={12} weight="bold" className="mr-1 animate-spin" />
-                            : <XCircle size={12} weight="bold" className="mr-1" />}
-                          Reject Remaining
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
+            {(parent.items || []).map((it, idx) => {
+              const extra = parseFloat(it.extra_qty) || 0;
+              const { approved, rejected } = splitFor(idx, it);
+              return (
+              <tr key={idx} data-testid={`ern-row-${idx}`}>
+                <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
+                <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                <td className="text-xs text-slate-700 truncate max-w-[240px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                <td className="text-center font-mono">{(parseFloat(it.invoice_qty) || 0).toFixed(2)}</td>
+                <td className="text-center font-mono">{(parseFloat(it.received_qty) || 0).toFixed(2)}</td>
+                <td className="text-center font-mono font-bold text-amber-700">{extra.toFixed(2)}</td>
+                <td className="text-center">
+                  {canEdit ? (
+                    <input
+                      type="number" min={0} max={extra} step="any"
+                      value={approvedQty[idx] ?? ""}
+                      onChange={(e) => setApprovedQty((prev) => {
+                        const next = [...prev]; next[idx] = e.target.value; return next;
+                      })}
+                      className="w-20 rounded-sm border border-slate-300 px-2 py-1 text-center text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      data-testid={`ern-approved-${idx}`}
+                    />
+                  ) : (
+                    <span className="font-mono font-bold text-green-700">{(parseFloat(approved) || 0).toFixed(2)}</span>
+                  )}
+                </td>
+                <td className="text-center font-mono text-red-700">{(parseFloat(rejected) || 0).toFixed(2)}</td>
+              </tr>
               );
-              (it.children || []).forEach((c, ci) => {
-                const isEdit = editing && editing.child_ern_no === c.child_ern_no;
-                rows.push(
-                  <tr key={`${idx}-c-${ci}`} className="bg-green-50/30" data-testid={`ern-row-${idx}-${ci}`}>
-                    <td className="font-mono text-slate-400 text-[10px]">{idx + 1}.{ci + 1}</td>
-                    <td colSpan={6} className="text-xs text-slate-500 pl-8">
-                      <span className="text-slate-400">└─ </span>
-                      <span className="font-mono text-blue-700">{c.child_ern_no}</span>
-                      <span className="ml-2 text-[10px] text-slate-500">({fmtDate(c.created_at)})</span>
-                    </td>
-                    <td className="font-mono text-blue-700 text-xs">{c.child_ern_no}</td>
-                    <td>
-                      {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.accepted_qty}
-                          onChange={(e) => setEditing({ ...editing, accepted_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-center" />
-                      ) : <span className="font-mono font-bold text-green-800">{(parseFloat(c.accepted_qty) || 0).toFixed(2)}</span>}
-                    </td>
-                    <td>
-                      {isEdit ? (
-                        <Input type="number" min="0" step="any" value={editing.rejected_qty}
-                          onChange={(e) => setEditing({ ...editing, rejected_qty: e.target.value })}
-                          className="rounded-sm font-mono h-7 text-center" />
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-red-700">{(parseFloat(c.rejected_qty) || 0).toFixed(2)}</span>
-                          {(parseFloat(c.rejected_qty) || 0) > 0 && (
-                            <button
-                              onClick={() => toggleReturned(c.child_ern_no, !!c.returned)}
-                              disabled={markingReturnedNo === c.child_ern_no}
-                              title={c.returned ? "Material returned to supplier — click to unmark" : "Mark this rejected material as returned to supplier"}
-                              className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm border inline-flex items-center gap-1 ${
-                                c.returned ? "bg-green-50 text-green-700 border-green-200" : "bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100"
-                              }`}
-                              data-testid={`ern-returned-${c.child_ern_no}`}
-                            >
-                              {markingReturnedNo === c.child_ern_no
-                                ? <CircleNotch size={10} className="animate-spin" />
-                                : (c.returned ? <CheckCircle size={10} weight="bold" /> : <ArrowUUpLeft size={10} weight="bold" />)}
-                              {c.returned ? "Returned" : "Mark Returned"}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="text-right">
-                      {isEdit ? (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={saveEdit} disabled={busy}
-                            className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                            data-testid={`ern-row-save-${idx}-${ci}`}>
-                            <FloppyDisk size={14} weight="bold" />
-                          </button>
-                          <button onClick={() => setEditing(null)} disabled={busy}
-                            className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel">
-                            <X size={14} weight="bold" />
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex gap-1 justify-end">
-                          <button onClick={() => setEditing({
-                            itemIdx: idx, child_ern_no: c.child_ern_no,
-                            accepted_qty: c.accepted_qty, rejected_qty: c.rejected_qty,
-                          })} disabled={busy}
-                            className="text-blue-700 hover:bg-blue-100 p-1 rounded-sm" title="Edit"
-                            data-testid={`ern-row-edit-${idx}-${ci}`}>
-                            <PencilSimple size={14} weight="bold" />
-                          </button>
-                          <button onClick={() => deleteChild(c.child_ern_no)} disabled={busy}
-                            className="text-red-700 hover:bg-red-100 p-1 rounded-sm" title="Delete"
-                            data-testid={`ern-row-del-${idx}-${ci}`}>
-                            <Trash size={14} weight="bold" />
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                );
-              });
-              if (drafts[idx] !== undefined) {
-                const d = drafts[idx];
-                rows.push(
-                  <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`ern-draft-${idx}`}>
-                    <td className="font-mono text-blue-600 text-[10px]">+</td>
-                    <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
-                      <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
-                    </td>
-                    <td className="font-mono text-slate-400 italic text-xs">auto…</td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.accepted_qty || ""}
-                        onChange={(e) => setDraft(idx, { accepted_qty: e.target.value })}
-                        placeholder="0"
-                        className="rounded-sm font-mono h-8 text-center"
-                        data-testid={`ern-input-acc-${idx}`} />
-                    </td>
-                    <td>
-                      <Input type="number" min="0" step="any" max={pending}
-                        value={d.rejected_qty || ""}
-                        onChange={(e) => setDraft(idx, { rejected_qty: e.target.value })}
-                        placeholder="0"
-                        className="rounded-sm font-mono h-8 text-center"
-                        data-testid={`ern-input-rej-${idx}`} />
-                    </td>
-                    <td className="text-right">
-                      <div className="flex gap-1 justify-end">
-                        <button onClick={() => saveNew(idx)} disabled={busy}
-                          className="text-green-700 hover:bg-green-100 p-1 rounded-sm" title="Save"
-                          data-testid={`ern-draft-save-${idx}`}>
-                          <FloppyDisk size={14} weight="bold" />
-                        </button>
-                        <button onClick={() => cancelAdd(idx)} disabled={busy}
-                          className="text-slate-500 hover:bg-slate-100 p-1 rounded-sm" title="Cancel"
-                          data-testid={`ern-draft-cancel-${idx}`}>
-                          <X size={14} weight="bold" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              }
-              return rows;
             })}
           </tbody>
         </table>
-        <div className="px-4 py-3 border-t border-slate-200 bg-blue-50 text-blue-900 text-xs">
-          <strong>How this works:</strong> Click <strong>+ Add</strong> to record an inspection batch.
-          Each batch becomes a Child ERN ({parent.ern_no}-A, -B…). <em>Accepted Qty</em> is rackable;
-          <em> Rejected Qty</em> is recorded but won't count toward racking. Status auto-flips to
-          <strong> COMPLETE</strong> when Total Accepted + Total Rejected = Extra Qty.
+        <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-4">
+          <div className="text-xs text-slate-500">
+            {!canEdit
+              ? `This ERN was ${(parent.status || "").toLowerCase()} and stock has been racked from it — the decision is now final.`
+              : isPending
+                ? (isPartial
+                    ? `Partial decision: ${totalApproved.toFixed(2)} of ${totalExtra.toFixed(2)} will be approved and racked; the rest is rejected.`
+                    : "Awaiting a decision — set Approved qty and click Save ERN.")
+                : `This ERN was ${(parent.status || "").toLowerCase()}. Nothing has been racked from it yet — adjust Approved above and Save ERN to re-decide.`}
+          </div>
         </div>
       </div>
 
-      {/* NARRATION + SAVE BAR */}
+      {/* NARRATION + THE SINGLE SAVE ACTION FOR THIS PAGE */}
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-start justify-between gap-4 p-4">
           <div className="flex-1 max-w-sm">
@@ -3320,9 +3334,10 @@ function ErnFinalizeForm({ ern: initialErn, onCancel, onSaved }) {
             />
           </div>
           <div className="flex items-center gap-2 pt-7">
-            <Button onClick={saveNarration} disabled={savingNarration || busy} className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="ern-save-narration">
+            <Button onClick={saveErn} disabled={busy || !hasChanges}
+              className="rounded-sm bg-blue-700 hover:bg-blue-800 px-5" data-testid="ern-save">
               <FloppyDisk size={14} weight="bold" className="mr-2" />
-              {savingNarration ? "Saving…" : "Save ERN"}
+              {busy ? "Saving…" : "Save ERN"}
             </Button>
           </div>
         </div>

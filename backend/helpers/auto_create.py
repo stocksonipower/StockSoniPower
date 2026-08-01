@@ -8,9 +8,20 @@ from helpers.note_helpers import current_fy_label, _alloc_serial
 from helpers.stock_helpers import _enrich_items
 
 
-async def _build_master_snapshot(part_no: str, make: str) -> dict:
+def _session_of(uow) -> Optional[object]:
+    """Mongo session backing a unit of work, or None when called outside one.
+
+    Every auto-create helper below accepts an optional `uow` so it can be reused
+    from inside a caller's transaction (the Receipt Note edit resync) as well as
+    standalone (finalize, ERN approval). When a uow is supplied all reads and
+    writes join its session and commit/roll back with the rest of the edit.
+    """
+    return getattr(uow, "session", None) if uow is not None else None
+
+
+async def _build_master_snapshot(part_no: str, make: str, session=None) -> dict:
     """Pull denormalized master fields for an SRN/ERN item row."""
-    sm = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
+    sm = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}, session=session) or {}
     return {
         "model": sm.get("model", ""),
         "old_part_no": sm.get("old_part_no", ""),
@@ -23,7 +34,8 @@ async def _build_master_snapshot(part_no: str, make: str) -> dict:
     }
 
 
-async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, parent_srn: dict = None) -> str:
+async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, parent_srn: dict = None,
+                                  uow=None) -> str:
     """Create a PENDING Short Received Note for the given short rows.
 
     If `parent_srn` is provided, this is a CHILD SRN auto-created from the residual
@@ -32,10 +44,11 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
 
     Items consolidate duplicates by (part_no, make) so racking sees one row per pair.
     """
+    session = _session_of(uow)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     for _ in range(5):
-        serial = await _alloc_serial("srn", fy)
+        serial = await _alloc_serial("srn", fy, session=session)
         srn_no = f"SRN/{fy}/{serial:03d}"
         # Consolidate duplicates — sum short_qty for the same (part_no, make).
         merged = {}
@@ -57,7 +70,7 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
                 }
         items = []
         for m in merged.values():
-            snap = await _build_master_snapshot(m["part_no"], m["make"])
+            snap = await _build_master_snapshot(m["part_no"], m["make"], session=session)
             items.append({
                 "part_no": m["part_no"], "make": m["make"],
                 "invoice_qty": m["invoice_qty"],
@@ -98,7 +111,7 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
             "assigned_to_email": rn.get("assigned_to_email", ""),
         }
         try:
-            await db.short_received_notes.insert_one(doc)
+            await db.short_received_notes.insert_one(doc, session=session)
             # Track child SRN reference on each parent item that contributed residual.
             if parent_srn:
                 child_keys = {(it["part_no"], it["make"]): float(it.get("short_qty") or 0) for it in items}
@@ -117,7 +130,7 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
                         new_p["children"] = children
                     new_parent_items.append(new_p)
                 await db.short_received_notes.update_one(
-                    {"id": parent_srn["id"]}, {"$set": {"items": new_parent_items}}
+                    {"id": parent_srn["id"]}, {"$set": {"items": new_parent_items}}, session=session
                 )
             return srn_no
         except DuplicateKeyError:
@@ -126,17 +139,18 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
     return ""
 
 
-async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, parent_ern: dict = None) -> str:
-    """Create a PENDING Extra Received Note for the given overage rows.
+async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, uow=None) -> str:
+    """Create a PENDING_APPROVAL Extra Received Note for the given overage rows.
 
-    If `parent_ern` is provided, this is a CHILD ERN auto-created from the
-    residual undecided extra of an ancestor ERN (where accepted+rejected < extra).
-    Items consolidate duplicates by (part_no, make).
+    Awaits a single whole-note approve/reject decision (see the ERN approve/reject
+    routes) — no per-row acceptance and no residual chaining. Items consolidate
+    duplicates by (part_no, make).
     """
+    session = _session_of(uow)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     for _ in range(5):
-        serial = await _alloc_serial("ern", fy)
+        serial = await _alloc_serial("ern", fy, session=session)
         ern_no = f"ERN/{fy}/{serial:03d}"
         merged = {}
         for r in extra_rows:
@@ -157,25 +171,17 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
                 }
         items = []
         for m in merged.values():
-            snap = await _build_master_snapshot(m["part_no"], m["make"])
+            snap = await _build_master_snapshot(m["part_no"], m["make"], session=session)
             items.append({
                 "part_no": m["part_no"], "make": m["make"],
                 "invoice_qty": m["invoice_qty"],
                 "received_qty": m["received_qty"],
                 "extra_qty": m["extra_qty"],
-                "accepted_qty": None,
+                "approved_qty": None,
                 "rejected_qty": None,
-                "quantity": None,
                 **snap,
             })
-        if parent_ern:
-            chain = f"Auto-generated from {parent_ern['ern_no']} — residual extra on {len(items)} item(s)."
-            parent_ern_id = parent_ern["id"]
-            parent_ern_no = parent_ern["ern_no"]
-        else:
-            chain = f"Auto-generated from {rn['rn_no']} — extra on {len(items)} item(s)."
-            parent_ern_id = None
-            parent_ern_no = ""
+        chain = f"Auto-generated from {rn['rn_no']} — extra on {len(items)} item(s)."
         doc = {
             "id": str(uuid.uuid4()),
             "ern_no": ern_no, "ern_date": today.date().isoformat(),
@@ -184,14 +190,16 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
             "parent_rn_no": rn.get("rn_no", ""),
             "parent_rn_date": rn.get("rn_date", ""),
             "parent_stock_in_type": rn.get("stock_in_type", ""),
-            "parent_ern_id": parent_ern_id,
-            "parent_ern_no": parent_ern_no,
+            "parent_ern_id": None,
+            "parent_ern_no": "",
             "chain_remarks": chain,
             "invoice_no": rn.get("invoice_no", ""),
             "invoice_date": rn.get("invoice_date", ""),
             "goods_received_date": rn.get("goods_received_date", ""),
             "items": items,
-            "status": "PENDING",
+            "status": "PENDING_APPROVAL",
+            "decided_at": None,
+            "decided_by": None,
             "created_at": now_iso(),
             "created_by": actor.get("email", "system"),
             "assigned_to_user_id": rn.get("assigned_to_user_id"),
@@ -199,27 +207,7 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, paren
             "assigned_to_email": rn.get("assigned_to_email", ""),
         }
         try:
-            await db.extra_received_notes.insert_one(doc)
-            # Track child ERN reference on each parent item that contributed residual.
-            if parent_ern:
-                child_keys = {(it["part_no"], it["make"]): float(it.get("extra_qty") or 0) for it in items}
-                new_parent_items = []
-                for p_it in parent_ern.get("items", []):
-                    new_p = dict(p_it)
-                    k = (p_it.get("part_no"), p_it.get("make"))
-                    if k in child_keys:
-                        children = list(new_p.get("children") or [])
-                        children.append({
-                            "child_ern_id": doc["id"],
-                            "child_ern_no": ern_no,
-                            "extra_qty": child_keys[k],
-                            "created_at": doc["created_at"],
-                        })
-                        new_p["children"] = children
-                    new_parent_items.append(new_p)
-                await db.extra_received_notes.update_one(
-                    {"id": parent_ern["id"]}, {"$set": {"items": new_parent_items}}
-                )
+            await db.extra_received_notes.insert_one(doc, session=session)
             return ern_no
         except DuplicateKeyError:
             continue

@@ -991,10 +991,10 @@ export default function StockMasterPage() {
               };
               return (
                 <tr key={i.id} data-testid={`item-row-${i.part_no}-${i.make}`}>
-                  <td data-col-key="__sl__" className={tdCls(idx, null, "font-mono text-slate-500")} style={{ width: getWidth("__sl__", 70) }}>{idx + 1}</td>
+                  <td data-col-key="__sl__" className={tdCls(idx, null, "font-mono text-slate-500 text-center")} style={{ width: getWidth("__sl__", 70) }}>{idx + 1}</td>
                   {columns.map(renderCell)}
 
-                  <td data-col-key="__actions__" className={tdCls(idx, null, "whitespace-nowrap")} style={{ width: getWidth("__actions__", 96) }}>
+                  <td data-col-key="__actions__" className={tdCls(idx, null, "whitespace-nowrap text-center")} style={{ width: getWidth("__actions__", 96) }}>
                     <button onClick={() => openEdit(i)} className="p-1.5 hover:bg-slate-100 rounded-sm mr-1" data-testid={`edit-${i.id}`}>
                       <Pencil size={14} />
                     </button>

@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import HTTPException
 from deps import db
-from helpers.note_helpers import _key
+from helpers.note_helpers import _key, _ern_rackable_qty
 from helpers.status_helpers import (
     _aggregate_other_rkn_qty,
     _aggregate_other_rkn_qty_by_source,
@@ -76,7 +76,7 @@ async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[s
 
 async def _validate_cumulative_qty_polymorphic(source_type: str, source_id: str, parent_doc: dict, items, exclude_rkn_id: Optional[str] = None):
     """Cumulative racked qty per (part_no, make) across all RKNs for this source must
-    not exceed the rackable qty (received_qty for RN, fulfilled_qty for SRN, accepted_qty for ERN)."""
+    not exceed the rackable qty (received_qty for RN, fulfilled_qty for SRN, extra_qty for an APPROVED ERN)."""
     rackable = {}
     if source_type == "RN":
         for it in parent_doc.get("items", []):
@@ -99,15 +99,10 @@ async def _validate_cumulative_qty_polymorphic(source_type: str, source_id: str,
             else:
                 rackable[k] = rackable.get(k, 0) + float(it.get("fulfilled_qty") or 0)
     else:  # ERN
-        for it in parent_doc.get("items", []):
-            k = _key(it.get("part_no"), it.get("make"))
-            children = it.get("children") or []
-            if children:
-                rackable[k] = rackable.get(k, 0) + sum(
-                    float(c.get("accepted_qty") or 0) for c in children
-                )
-            else:
-                rackable[k] = rackable.get(k, 0) + float(it.get("accepted_qty") or 0)
+        if (parent_doc.get("status") or "").upper() in ("APPROVED", "COMPLETE"):
+            for it in parent_doc.get("items", []):
+                k = _key(it.get("part_no"), it.get("make"))
+                rackable[k] = rackable.get(k, 0) + _ern_rackable_qty(it)
 
     other_sums = await _aggregate_other_rkn_qty_by_source(source_type, source_id, exclude_rkn_id)
     new_sums = {}
