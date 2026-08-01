@@ -90,6 +90,10 @@ table {
     white-space: nowrap;
 }
 
+.data-table-fixed td {
+    text-align: center;
+}
+
 .data-table tr:hover td {
     @apply bg-slate-50;
 }

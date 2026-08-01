@@ -9,6 +9,8 @@ import {
   MagnifyingGlass, Package, ArrowDown, ArrowUp, ArrowsLeftRight,
   Stack, Warning, Plus, ClockCounterClockwise, MapPin,
 } from "@phosphor-icons/react";
+import AuthImage from "../components/AuthImage";
+import ImageViewerDialog from "../components/ImageViewerDialog";
 
 /* ---------- helpers ---------- */
 const fmtDate = (s) => {
@@ -159,7 +161,6 @@ const handleKeyDown = (e) => {
 
   return (
     <div className="p-8 max-w-7xl mx-auto" data-testid="item-details-page">
-      <div className="mb-1 text-xs uppercase font-bold tracking-[0.18em] text-slate-500">Stock Lookup</div>
       <h1 className="text-4xl font-black tracking-tight text-slate-900 mb-6">Item Details</h1>
 
       {/* Search box */}
@@ -186,15 +187,18 @@ const handleKeyDown = (e) => {
                     className={`w-full text-left px-3 py-2 border-b border-slate-100 last:border-b-0 flex items-center gap-3 ${idx === highlightIndex ? "bg-blue-50" : "hover:bg-slate-50"}`}
                     data-testid={`item-details-result-${r.part_no}-${r.make}`}
                   >
-                    <Package size={14} weight="bold" className="text-blue-700" />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-mono text-sm font-bold text-slate-900">{r.part_no}</div>
-                      <div className="text-xs text-slate-500 truncate">
-                        {r.model || "—"} · {r.description_1 || "—"} · {r.make}
-                      </div>
+                    <Package size={14} weight="bold" className="text-blue-700 shrink-0" />
+                    <div className="flex-1 min-w-0 truncate text-sm">
+                      <span className="font-mono text-slate-600">{r.model || "—"}</span>
+                      <span className="text-slate-300 mx-2">·</span>
+                      <span className="font-mono font-bold text-slate-900">{r.part_no}</span>
+                      <span className="text-slate-300 mx-2">·</span>
+                      <span className="text-slate-600">{r.description_1 || "—"}</span>
+                      <span className="text-slate-300 mx-2">·</span>
+                      <span className="font-mono text-slate-700">{r.make}</span>
                     </div>
                     {r.item_category && (
-                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm bg-slate-100 text-slate-700">
+                      <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm bg-slate-100 text-slate-700">
                         {r.item_category}
                       </span>
                     )}
@@ -244,6 +248,11 @@ const handleKeyDown = (e) => {
 function ItemDetailsContent({ details, selected }) {
   const m = details.master;
   const t = details.totals || {};
+  const images = (m && Array.isArray(m.images) && m.images.length > 0)
+    ? m.images
+    : (m?.image ? [m.image] : []);
+  const [viewer, setViewer] = useState(null);
+
   return (
     <div className="space-y-6" data-testid="item-details-content">
       {/* Master card */}
@@ -262,18 +271,41 @@ function ItemDetailsContent({ details, selected }) {
             </div>
           </div>
           {m ? (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-6 pt-6 border-t border-slate-100">
-              <Field k="Description 1" v={m.description_1} />
-              <Field k="Description 2" v={m.description_2} />
-              <Field k="Model" v={m.model} />
-              <Field k="Category" v={m.item_category} />
-              <Field k="Old Part No" v={m.old_part_no} />
-              <Field k="New Part No" v={m.new_part_no} />
-              <Field k="Make Part No" v={m.make_part_no} />
-              <Field k="OEM" v={m.remarks_oem} />
-              <Field k="Remarks" v={m.remarks_others} />
-              <Field k="Reorder Level" v={m.reorder_level} />
-              <Field k="Unit" v={m.unit} />
+            <div className="mt-6 pt-6 border-t border-slate-100" data-testid="item-details-field-list">
+              <DetailRow label="Model" value={m.model} testid="item-detail-model" />
+              <DetailRow label="Old Part No" value={m.old_part_no} testid="item-detail-old-part-no" />
+              <DetailRow label="Part No" value={m.part_no || selected.part_no} testid="item-detail-part-no" />
+              <DetailRow label="New No" value={m.new_part_no} testid="item-detail-new-no" />
+              <DetailRow label="Make Part No" value={m.make_part_no} testid="item-detail-make-part-no" />
+              <DetailRow label="Description 1" value={m.description_1} testid="item-detail-description-1" />
+              <DetailRow label="Description 2" value={m.description_2} testid="item-detail-description-2" />
+              <DetailRow label="Make" value={m.make || selected.make} testid="item-detail-make" />
+              <DetailRow label="Remarks" value={m.remarks_others} testid="item-detail-remarks" />
+              <DetailRow label="Item Category" value={m.item_category} testid="item-detail-item-category" />
+              <DetailRow label="OEM" value={m.remarks_oem} testid="item-detail-oem" />
+              <DetailRow label="Unit" value={m.unit} testid="item-detail-unit" />
+              <DetailRow label="Reorder" value={m.reorder_level} testid="item-detail-reorder" />
+              <div className="flex items-start gap-4 py-2.5" data-testid="item-detail-images-preview">
+                <div className="w-40 shrink-0 text-[10px] uppercase font-bold tracking-wider text-slate-500 pt-0.5">Images Preview</div>
+                <div className="flex-1">
+                  {images.length === 0 ? (
+                    <div className="font-mono text-sm text-slate-900">—</div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {images.map((img, idx) => (
+                        <AuthImage
+                          key={idx}
+                          path={img}
+                          alt=""
+                          className="h-14 w-14 object-cover rounded-sm border border-slate-200 cursor-pointer hover:opacity-80"
+                          onClick={() => setViewer({ images, idx })}
+                          testid={`item-detail-image-${idx}`}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           ) : (
             <div className="mt-4 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-sm p-3">
@@ -283,14 +315,24 @@ function ItemDetailsContent({ details, selected }) {
         </CardContent>
       </Card>
 
-      {/* Totals strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3" data-testid="item-totals-strip">
-        <StatTile label="Received" value={t.received_qty} icon={ArrowDown} tone="emerald" />
-        <StatTile label="Racked" value={t.racked_qty} icon={Stack} tone="blue" />
-        <StatTile label="Issued" value={t.issued_qty} icon={ArrowUp} tone="rose" />
-        <StatTile label="Picked" value={t.picked_qty} icon={ArrowUp} tone="indigo" />
-        <StatTile label="Transferred" value={t.transferred_qty} icon={ArrowsLeftRight} tone="violet" />
-        <StatTile label="Ledger Entries" value={t.txn_count} icon={ClockCounterClockwise} tone="slate" />
+      <ImageViewerDialog open={!!viewer} images={viewer?.images || []} startIndex={viewer?.idx || 0} onClose={() => setViewer(null)} />
+
+      {/* Inventory summary */}
+      <div className="space-y-3" data-testid="item-totals-strip">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatTile label="Received" value={t.received_qty} icon={ArrowDown} tone="emerald" />
+          <StatTile label="Short" value={t.short_qty} icon={Warning} tone="amber" />
+          <StatTile label="Extra" value={t.extra_qty} icon={Plus} tone="amber" />
+          <StatTile label="Racked" value={t.racked_qty} icon={Stack} tone="blue" />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <StatTile label="Issue" value={t.issued_qty} icon={ArrowUp} tone="rose" />
+          <StatTile label="Picked" value={t.picked_qty} icon={ArrowUp} tone="indigo" />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <StatTile label="Transfer Requested" value={t.transfer_requested_qty} icon={ArrowsLeftRight} tone="slate" />
+          <StatTile label="Transferred" value={t.transferred_qty} icon={ArrowsLeftRight} tone="violet" />
+        </div>
       </div>
 
       {/* Per-location balance */}
@@ -463,11 +505,11 @@ function ItemDetailsContent({ details, selected }) {
 }
 
 /* ---------- atoms ---------- */
-function Field({ k, v }) {
+function DetailRow({ label, value, testid }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500">{k}</div>
-      <div className="font-mono text-sm text-slate-900 mt-1">{v != null && v !== "" ? v : "—"}</div>
+    <div className="flex items-start gap-4 py-2.5 border-b border-slate-100 last:border-b-0" data-testid={testid}>
+      <div className="w-40 shrink-0 text-[10px] uppercase font-bold tracking-wider text-slate-500 pt-0.5">{label}</div>
+      <div className="font-mono text-sm text-slate-900 flex-1">{value != null && value !== "" ? value : "—"}</div>
     </div>
   );
 }
@@ -480,6 +522,7 @@ function StatTile({ label, value, icon: Icon, tone }) {
     indigo: "bg-indigo-50 text-indigo-800 border-indigo-100",
     violet: "bg-violet-50 text-violet-800 border-violet-100",
     slate: "bg-slate-50 text-slate-800 border-slate-100",
+    amber: "bg-amber-50 text-amber-800 border-amber-100",
   };
   return (
     <div className={`rounded-sm border p-3 ${tones[tone] || tones.slate}`} data-testid={`item-stat-${label.toLowerCase().replace(/\s+/g, "-")}`}>
