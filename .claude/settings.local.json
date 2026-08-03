@@ -36,7 +36,9 @@
       "Bash(npx --no-install eslint frontend/src/pages/StockTransferPage.jsx)",
       "Bash(timeout 60 node_modules/.bin/eslint src/pages/StockTransferPage.jsx)",
       "Bash(node_modules/.bin/eslint src/pages/StockTransferPage.jsx)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(grep -vE 'node_modules|package-lock.json|\\\\.lock$|dist/|build/')",
+      "Bash(grep -E '\\\\.\\(js|jsx|ts|tsx|py|java|go|rb|php|css|scss|html\\)$')"
     ]
   }
 }

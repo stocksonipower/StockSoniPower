@@ -613,7 +613,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
 }
 
 const emptyTransferReqItem = () => ({
-  part_no: "", make: "", quantity: "", makes: [], partLooked: false, available_qty: 0,
+  part_no: "", make: "", model: "", quantity: "", makes: [], partLooked: false, available_qty: 0,
   // All optional — leave blank to let the Transfer Note auto-resolve against current
   // inventory when it's prepared. As much or as little as is known can be specified.
   src_godown_id: "", src_godown_name: "",
@@ -671,7 +671,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
           .then(({ data }) => {
             const makesArr = data.makes || [];
             const found = makesArr.find((m) => m.make === row.make);
-            setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: makesArr, available_qty: found?.available_qty || 0 } : r));
+            setItems((prev) => prev.map((r, i) => i === idx ? { ...r, makes: makesArr, model: r.model || found?.model || "", available_qty: found?.available_qty || 0 } : r));
           })
           .catch(() => {});
         if (row.src_godown_id) ensureRacks(row.src_godown_id);
@@ -704,15 +704,16 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
       updateItem(i, {
         makes: list, partLooked: true,
         make: auto ? auto.make : "",
+        model: auto ? (auto.model || "") : "",
         available_qty: auto ? auto.available_qty : 0,
       });
-    } catch { updateItem(i, { makes: [], partLooked: true, make: "", available_qty: 0 }); }
+    } catch { updateItem(i, { makes: [], partLooked: true, make: "", model: "", available_qty: 0 }); }
   };
 
   const onMakeChange = (i, makeVal) => {
     const row = items[i];
     const found = (row.makes || []).find((m) => m.make === makeVal);
-    updateItem(i, { make: makeVal, available_qty: found?.available_qty || 0 });
+    updateItem(i, { make: makeVal, model: found?.model || "", available_qty: found?.available_qty || 0 });
   };
 
   // Recompute the row's location-specific available qty (undefined = no source
@@ -916,7 +917,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
           <table className="data-table w-full">
             <thead>
               <tr>
-                <th className="w-14">SL</th><th>PART NO</th><th>MAKE</th><th>QTY</th>
+                <th className="w-16">SL NO.</th><th className="w-64">PART NO</th><th className="w-40">MODEL</th><th className="w-48">MAKE</th><th className="w-24">QTY</th>
                 <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
                 <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th><th className="w-14"></th>
               </tr>
@@ -932,13 +933,18 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                 return (
                   <tr key={idx} data-testid={`str-item-row-${idx}`} className={overStock ? "bg-red-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td>
+                    <td className="w-64">
                       <Input value={it.part_no}
-                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", available_qty: 0 })}
+                        onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", model: "", available_qty: 0 })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
-                        placeholder="Enter part no" className="rounded-sm font-mono h-8" data-testid={`str-part-no-${idx}`} />
+                        placeholder="Enter part no" className="rounded-sm font-mono h-9 text-base" data-testid={`str-part-no-${idx}`} />
                     </td>
-                    <td className="w-56">
+                    <td className="w-40">
+                      <div className="h-8 flex items-center px-2 font-mono text-sm text-slate-700 truncate" data-testid={`str-model-${idx}`}>
+                        {it.model || <span className="text-slate-400 italic">—</span>}
+                      </div>
+                    </td>
+                    <td className="w-48">
                       <Select disabled={!it.partLooked || it.makes.length === 0}
                         value={it.make || undefined} onValueChange={(v) => onMakeChange(idx, v)}>
                         <SelectTrigger className="rounded-sm h-8" data-testid={`str-make-${idx}`}>
