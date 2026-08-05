@@ -1094,7 +1094,7 @@ async def prepare_racking_for_source(
             raise HTTPException(status_code=409, detail="This receipt note is already fully racked")
         # The qty available per (part,make) is invoice_qty (capped at invoice to exclude
         # extra qty, which goes to ERN and must be racked separately after ERN acceptance).
-        rackable = []
+        rackable_map = {}
         for it in rn.get("items", []):
             rec = it.get("received_qty")
             if rec is None:
@@ -1102,11 +1102,11 @@ async def prepare_racking_for_source(
             rec = float(rec or 0)
             inv = float(it.get("invoice_qty") or 0)
             rq = min(rec, inv) if inv > 0 else rec
-            rackable.append({
-                "part_no": it.get("part_no", ""),
-                "make": it.get("make", ""),
-                "rackable_qty": rq,
-            })
+            part_no, make = it.get("part_no", ""), it.get("make", "")
+            k = _key(part_no, make)
+            entry = rackable_map.setdefault(k, {"part_no": part_no, "make": make, "rackable_qty": 0})
+            entry["rackable_qty"] += rq
+        rackable = list(rackable_map.values())
         header = {
             "id": rn["id"], "no": rn["rn_no"], "date": rn["rn_date"],
             "type": "RN",
@@ -1121,18 +1121,18 @@ async def prepare_racking_for_source(
             raise HTTPException(status_code=404, detail="Short Received Note not found")
         if await _is_source_fully_racked("SRN", srn) and not exclude_rkn_id:
             raise HTTPException(status_code=409, detail="This SRN is already fully racked")
-        rackable = []
+        rackable_map = {}
         for it in srn.get("items", []):
             children = it.get("children") or []
             if children:
                 rqty = sum(float(c.get("received_qty") or 0) for c in children)
             else:
                 rqty = float(it.get("fulfilled_qty") or 0)
-            rackable.append({
-                "part_no": it.get("part_no", ""),
-                "make": it.get("make", ""),
-                "rackable_qty": rqty,
-            })
+            part_no, make = it.get("part_no", ""), it.get("make", "")
+            k = _key(part_no, make)
+            entry = rackable_map.setdefault(k, {"part_no": part_no, "make": make, "rackable_qty": 0})
+            entry["rackable_qty"] += rqty
+        rackable = list(rackable_map.values())
         header = {
             "id": srn["id"], "no": srn["srn_no"], "date": srn["srn_date"],
             "type": "SRN",
@@ -1156,11 +1156,13 @@ async def prepare_racking_for_source(
             raise HTTPException(status_code=409, detail="This ERN is already fully racked")
         # Only the approved slice is warehouse work — a partial approval leaves the
         # rejected remainder out of stock entirely.
-        rackable = [{
-            "part_no": it.get("part_no", ""),
-            "make": it.get("make", ""),
-            "rackable_qty": _ern_rackable_qty(it),
-        } for it in ern.get("items", [])]
+        rackable_map = {}
+        for it in ern.get("items", []):
+            part_no, make = it.get("part_no", ""), it.get("make", "")
+            k = _key(part_no, make)
+            entry = rackable_map.setdefault(k, {"part_no": part_no, "make": make, "rackable_qty": 0})
+            entry["rackable_qty"] += _ern_rackable_qty(it)
+        rackable = list(rackable_map.values())
         header = {
             "id": ern["id"], "no": ern["ern_no"], "date": ern["ern_date"],
             "type": "ERN",
@@ -1307,10 +1309,10 @@ async def record_racking_note(rkn_id: str, response: Response, user=Depends(_mod
     if not items:
         raise HTTPException(status_code=400, detail="No items to record")
     for idx, it in enumerate(items, start=1):
-        if not it.get("godown_id") or not it.get("rack_id"):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing — edit racking note before recording")
-        if not it.get("box_id"):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing — edit racking note before recording")
+        if not it.get("godown_id"):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown missing — edit racking note before recording")
+        if it.get("box_id") and not it.get("rack_id"):
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rack required when Box is set — edit racking note before recording")
         if (it.get("quantity") or 0) <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: quantity must be > 0")
 

@@ -4,7 +4,42 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
-const Select = SelectPrimitive.Root
+// Re-picking the option that's already selected should clear the selection
+// (toggle off) instead of being a no-op, for every dropdown in the app that
+// uses this component. Two Radix behaviours are in the way, so both are
+// handled here rather than in any single page:
+//
+// 1. Root's controllable-state hook (@radix-ui/react-use-controllable-state)
+//    compares the incoming value against the current `value` prop and drops
+//    the onValueChange call when they're equal — so a reselect never reaches
+//    userland. SelectItem below therefore detects "clicked the already-
+//    selected item" itself and calls the consumer's setter directly.
+//
+// 2. Callers write `value={x || undefined}`, so clearing to "" would hand
+//    Root an undefined value, flipping it from controlled to *uncontrolled*
+//    mid-flight — at which point it renders its own stale internal value and
+//    the cleared option snaps straight back. Normalising a present-but-empty
+//    `value` prop to "" keeps Root controlled for its whole lifetime; Radix
+//    treats "" as "no selection", which is exactly what shows the placeholder.
+const SelectValueContext = React.createContext({ value: undefined, onValueChange: undefined })
+
+const Select = ({ onValueChange, children, ...props }) => {
+  // Key presence (not just a defined value) is what marks a caller as
+  // controlled — an uncontrolled Select using defaultValue must stay that way.
+  const isControlled = "value" in props
+  const value = isControlled ? (props.value ?? "") : props.value
+  const ctx = React.useMemo(
+    () => ({ value: isControlled ? value : undefined, onValueChange }),
+    [isControlled, value, onValueChange]
+  )
+  return (
+    <SelectValueContext.Provider value={ctx}>
+      <SelectPrimitive.Root {...props} value={value} onValueChange={onValueChange}>
+        {children}
+      </SelectPrimitive.Root>
+    </SelectValueContext.Provider>
+  )
+}
 
 const SelectGroup = SelectPrimitive.Group
 
@@ -79,22 +114,57 @@ const SelectLabel = React.forwardRef(({ className, ...props }, ref) => (
 ))
 SelectLabel.displayName = SelectPrimitive.Label.displayName
 
-const SelectItem = React.forwardRef(({ className, children, ...props }, ref) => (
-  <SelectPrimitive.Item
-    ref={ref}
-    className={cn(
-      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-      className
-    )}
-    {...props}>
-    <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
-      <SelectPrimitive.ItemIndicator>
-        <Check className="h-4 w-4" />
-      </SelectPrimitive.ItemIndicator>
-    </span>
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-  </SelectPrimitive.Item>
-))
+const SelectItem = React.forwardRef(({ className, children, value, onClick, onPointerUp, onPointerDown, onKeyDown, ...props }, ref) => {
+  const ctx = React.useContext(SelectValueContext)
+  // Radix commits a mouse selection on pointerup and unmounts the open content
+  // immediately, so a `click` event is never dispatched for mouse users — the
+  // toggle has to hook pointerup as well. Keyboard (Enter/Space) and non-mouse
+  // pointers go through keydown/click instead, hence all three.
+  const firedRef = React.useRef(false)
+  const toggleOffIfReselected = () => {
+    if (firedRef.current) return
+    if (ctx.onValueChange && ctx.value !== undefined && ctx.value === value) {
+      firedRef.current = true
+      // Radix's own handler runs right after this one, but its call is a no-op:
+      // at that point the `value` prop it compares against is still this item's
+      // value, so it drops the update and only our clear survives.
+      ctx.onValueChange("")
+    }
+  }
+  return (
+    <SelectPrimitive.Item
+      ref={ref}
+      value={value}
+      onPointerDown={(event) => {
+        firedRef.current = false
+        onPointerDown?.(event)
+      }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event)
+        toggleOffIfReselected()
+      }}
+      onClick={(event) => {
+        onClick?.(event)
+        toggleOffIfReselected()
+      }}
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.key === "Enter" || event.key === " ") toggleOffIfReselected()
+      }}
+      className={cn(
+        "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        className
+      )}
+      {...props}>
+      <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
+        <SelectPrimitive.ItemIndicator>
+          <Check className="h-4 w-4" />
+        </SelectPrimitive.ItemIndicator>
+      </span>
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    </SelectPrimitive.Item>
+  )
+})
 SelectItem.displayName = SelectPrimitive.Item.displayName
 
 const SelectSeparator = React.forwardRef(({ className, ...props }, ref) => (

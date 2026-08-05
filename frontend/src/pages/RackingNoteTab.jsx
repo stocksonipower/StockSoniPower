@@ -795,6 +795,46 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     return map;
   }, [items]);
 
+  // Total rackable-but-not-yet-racked qty per (part_no, make), as returned by the
+  // server at prepare-source time. Every row sharing a key carries the same value,
+  // so the first one found is authoritative.
+  const pendingByKey = useMemo(() => {
+    const map = {};
+    items.forEach((r) => {
+      const k = `${r.part_no}||${r.make}`;
+      if (map[k] === undefined && r.pending_qty !== undefined) map[k] = r.pending_qty;
+    });
+    return map;
+  }, [items]);
+
+  // How much of the shared pending pool a given row may still take, given what
+  // every *other* row sharing its (part_no, make) has already claimed. This is
+  // what caps the qty input and drives the live "remaining" hint -- it updates
+  // as soon as any row for the same part is edited, so splitting one part across
+  // several godowns/racks stays within the true total instead of each row being
+  // checked only against the original per-line pending figure.
+  const remainingForRow = (idx) => {
+    const it = items[idx];
+    const k = `${it.part_no}||${it.make}`;
+    const keyPending = pendingByKey[k];
+    if (keyPending === undefined) return undefined;
+    const otherAllocated = items.reduce((sum, r, i) => {
+      if (i === idx) return sum;
+      const rk = `${r.part_no}||${r.make}`;
+      return rk === k ? sum + (parseFloat(r.quantity) || 0) : sum;
+    }, 0);
+    return Math.max(keyPending - otherAllocated, 0);
+  };
+
+  const onQtyChange = (idx, rawVal) => {
+    const cap = remainingForRow(idx);
+    if (cap !== undefined) {
+      const num = parseFloat(rawVal);
+      if (!isNaN(num) && num > cap + 1e-6) rawVal = String(cap);
+    }
+    updateItem(idx, { quantity: rawVal });
+  };
+
   // The edit page only saves rack allocations. Recording Stock In is a separate,
   // deliberate action available exclusively from the main Racking list — this keeps
   // "editing" and "final inventory posting" as two distinct steps rather than one
@@ -808,24 +848,18 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
     // Per-row checks
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it.godown_id || !it.rack_id) {
-        toast.error(`Row ${i + 1}: pick Godown / Rack`); return;
+      if (!it.godown_id) {
+        toast.error(`Row ${i + 1}: pick Godown`); return;
       }
-      if (!it.box_id) {
-        toast.error(`Row ${i + 1}: pick Box`); return;
+      if (it.box_id && !it.rack_id) {
+        toast.error(`Row ${i + 1}: pick Rack (required when Box is set)`); return;
       }
       const q = parseFloat(it.quantity);
       if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: quantity must be > 0`); return; }
     }
     // Cumulative-vs-pending check (client-side; backend re-validates)
-    // Build a map of pending_qty per key from the current rows (any row carries it)
-    const pendingMap = {};
-    items.forEach((r) => {
-      const k = `${r.part_no}||${r.make}`;
-      if (pendingMap[k] === undefined && r.pending_qty !== undefined) pendingMap[k] = r.pending_qty;
-    });
     for (const [k, allocated] of Object.entries(allocatedByKey)) {
-      const pending = pendingMap[k];
+      const pending = pendingByKey[k];
       if (pending !== undefined && allocated > pending + 1e-6) {
         const [p, m] = k.split("||");
         toast.error(`${p} / ${m}: allocated ${allocated} exceeds pending ${pending}`);
@@ -953,9 +987,9 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                 <th>DESCRIPTION 1</th>
                 <th>ITEM CATEGORY</th>
                 <th className="text-center">QTY</th>
-                <th className="min-w-[140px]">GODOWN *</th>
-                <th className="min-w-[120px]">RACK *</th>
-                <th className="min-w-[120px]">BOX *</th>
+                <th className="w-[110px]">GODOWN *</th>
+                <th className="w-[90px]">RACK</th>
+                <th className="w-[90px]">BOX</th>
                 <th>EXISTING LOCATIONS</th>
                 <th className="w-20"></th>
               </tr>
@@ -964,11 +998,15 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
               {items.map((it, idx) => {
                 const racks = racksByGodown[it.godown_id] || [];
                 const boxes = boxesByRack[it.rack_id] || [];
-                const key = `${it.part_no}||${it.make}`;
-                const allocated = allocatedByKey[key] || 0;
-                const pending = it.pending_qty;
                 const received = it.rackable_qty ?? it.received_qty;
-                const overAllocated = pending !== undefined && allocated > pending + 1e-6;
+                // rowCap = the ceiling this row's input may not exceed (shared pool minus
+                // every *other* row of the same part). pendingNow = what's left of that
+                // pool after this row's own current qty is counted too -- so it moves as
+                // soon as you edit either this row or any sibling row for the same part.
+                const rowCap = remainingForRow(idx);
+                const currentQty = parseFloat(it.quantity) || 0;
+                const pendingNow = rowCap !== undefined ? Math.max(rowCap - currentQty, 0) : undefined;
+                const overAllocated = rowCap !== undefined && currentQty > rowCap + 1e-6;
                 return (
                   <tr key={idx} data-testid={`rkn-item-row-${idx}`} className={overAllocated ? "bg-red-50" : ""}>
                                         <td className="font-mono text-slate-500">{idx + 1}</td>
@@ -977,18 +1015,18 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
                     <td className="text-slate-600">{it.item_category || "—"}</td>
                     <td className="text-center">
-                      <Input type="number" min="0.001" step="any" value={it.quantity}
-                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
+                      <Input type="number" min="1" step="1" max={rowCap !== undefined ? rowCap : undefined} value={it.quantity}
+                        onChange={(e) => onQtyChange(idx, e.target.value)}
                         className={`rounded-sm font-mono h-8 text-center w-20 ${overAllocated ? "border-red-400" : ""}`} data-testid={`rkn-qty-${idx}`} />
-                      {pending !== undefined && (
+                      {pendingNow !== undefined && (
                         <div className={`text-[10px] mt-0.5 ${overAllocated ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`rkn-pending-hint-${idx}`}>
-                          {overAllocated ? `Over ${allocated}/${pending}` : `Pending ${pending} of ${received}`}
+                          {overAllocated ? `Over max ${rowCap}` : `Pending ${pendingNow} of ${received}`}
                         </div>
                       )}
                     </td>
                     <td>
                       <Select value={it.godown_id || undefined} onValueChange={(v) => onGodownChange(idx, v)}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-godown-${idx}`}><SelectValue placeholder="Godown" /></SelectTrigger>
+                        <SelectTrigger className="rounded-sm h-8 w-[110px]" title={it.godown_name || ""} data-testid={`rkn-godown-${idx}`}><SelectValue placeholder="Godown" /></SelectTrigger>
                         <SelectContent>
                           {godowns.map((g) => <SelectItem key={g.id} value={g.id}>{g.godown_name}</SelectItem>)}
                         </SelectContent>
@@ -996,7 +1034,7 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     </td>
                     <td>
                       <Select value={it.rack_id || undefined} onValueChange={(v) => onRackChange(idx, v)} disabled={!it.godown_id}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-rack-${idx}`}><SelectValue placeholder="Rack" /></SelectTrigger>
+                        <SelectTrigger className="rounded-sm h-8 w-[90px]" title={it.rack_no || ""} data-testid={`rkn-rack-${idx}`}><SelectValue placeholder="Rack" /></SelectTrigger>
                         <SelectContent>
                           {racks.map((r) => <SelectItem key={r.id} value={r.id}>{r.rack_no}</SelectItem>)}
                         </SelectContent>
@@ -1004,8 +1042,11 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                     </td>
                     <td>
                       <Select value={it.box_id || undefined} onValueChange={(v) => onBoxChange(idx, v)} disabled={!it.rack_id || boxes.length === 0}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`rkn-box-${idx}`}>
-                          <SelectValue placeholder={!it.rack_id ? "Box" : (boxes.length === 0 ? "No boxes configured" : "Box")} />
+                        <SelectTrigger
+                          className="rounded-sm h-8 w-[90px]"
+                          title={it.rack_id && boxes.length === 0 ? "No Box" : (it.box_no || "")}
+                          data-testid={`rkn-box-${idx}`}>
+                          <SelectValue placeholder={it.rack_id && boxes.length === 0 ? "No Box" : "Box"} />
                         </SelectTrigger>
                         <SelectContent>
                           {boxes.map((b) => <SelectItem key={b.id} value={b.id}>{b.box_no}</SelectItem>)}

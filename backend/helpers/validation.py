@@ -35,10 +35,11 @@ def _validate_racking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
         if it.quantity is None or it.quantity <= 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
-        if not (it.godown_id or "").strip() or not (it.rack_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
-        if not (it.box_id or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required")
+        gid, rid, bid = (it.godown_id or "").strip(), (it.rack_id or "").strip(), (it.box_id or "").strip()
+        if not gid:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown is required")
+        if bid and not rid:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Rack is required when Box is selected")
 
 
 async def _validate_cumulative_qty(rn_id: str, items, exclude_rkn_id: Optional[str] = None):
