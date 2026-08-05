@@ -33,12 +33,14 @@ function fmtDate(iso) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
+// Location depth is optional below Godown: Godown alone, Godown+Rack, or all three
+// are each a valid racking target. Only a Box without a Rack is incoherent. Mirrors
+// the same rule in save() and in the backend /racking-notes/{id}/record endpoint.
 function hasCompleteRackingLocations(rkn) {
   const items = rkn?.items || [];
   return items.length > 0 && items.every((it) =>
     (it.godown_id || "").trim() &&
-    (it.rack_id || "").trim() &&
-    (it.box_id || "").trim() &&
+    !((it.box_id || "").trim() && !(it.rack_id || "").trim()) &&
     (parseFloat(it.quantity) || 0) > 0
   );
 }
@@ -239,7 +241,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
 
   const handleRecord = async (rkn) => {
     if (!hasCompleteRackingLocations(rkn)) {
-      toast.error("Complete Godown, Rack, Box and Qty before recording Stock In");
+      toast.error("Every row needs a Godown and Qty (and a Rack if a Box is set) before recording Stock In");
       return;
     }
     if (!window.confirm(`Record ${rkn.rkn_no} as Stock In?\n\nThis will add ${rkn.items.length} stock-in transaction(s) and mark the linked Receipt Note (${rkn.receipt_note_no}) as RACKED. This cannot be undone.`)) return;
@@ -371,7 +373,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
               const recordTitle = recorded ? "Already recorded"
                 : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}`
-                  : (!locationsComplete ? "Complete Godown, Rack, Box and Qty before recording" : "Record as Stock In"));
+                  : (!locationsComplete ? "Every row needs a Godown and Qty (Rack required only if a Box is set)" : "Record as Stock In"));
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
