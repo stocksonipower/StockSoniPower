@@ -48,20 +48,38 @@ function timeAgo(iso) {
   return d.toLocaleDateString();
 }
 
+const PAGE_SIZE = 50;
+
 export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const ref = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get("/notifications", { params: { limit: 50 } });
+      const { data } = await api.get("/notifications", { params: { limit: PAGE_SIZE, offset: 0 } });
       setItems(data.items || []);
       setUnread(data.unread_count || 0);
+      setTotal(data.total ?? (data.items || []).length);
     } catch { /* ignore */ }
   }, []);
+
+  const loadMore = async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const { data } = await api.get("/notifications", { params: { limit: PAGE_SIZE, offset: items.length } });
+      setItems((prev) => [...prev, ...(data.items || [])]);
+      setUnread(data.unread_count || 0);
+      setTotal(data.total ?? items.length + (data.items || []).length);
+    } catch { /* ignore */ } finally {
+      setLoadingMore(false);
+    }
+  };
 
   // Poll every 30s + on focus + initial mount
   useEffect(() => {
@@ -202,6 +220,16 @@ export default function NotificationBell() {
                   </button>
                 );
               })
+            )}
+            {items.length > 0 && items.length < total && (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="w-full text-center px-4 py-3 text-xs font-semibold text-blue-700 hover:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                data-testid="notification-load-more"
+              >
+                {loadingMore ? "Loading…" : "Load more"}
+              </button>
             )}
           </div>
         </div>

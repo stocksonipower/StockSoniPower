@@ -8,7 +8,7 @@ from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enf
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_locations_for, _get_balance
 from helpers.stock_helpers import _enrich_with_parent_assignee
-from helpers.note_helpers import current_fy_label, _alloc_serial, _key
+from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key
 from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _transfer_other_src_loc_qty
 from helpers.validation import _validate_transfer_request_items, _validate_transfer_request_qty, _validate_transfer_note_items, _validate_transfer_note_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -65,8 +65,8 @@ async def _next_transfer_note_doc(base: dict, user: dict, assigned_items: list[d
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("stn", fy)
-        stn_no = f"STN/{fy}/{serial:03d}"
+        serial = await _next_serial("transfer_notes")
+        stn_no = f"STN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "stn_no": stn_no,
@@ -152,13 +152,11 @@ async def transfer_lookup_locations(part_no: str, make: str, user=Depends(get_cu
 @router.get("/transfer-requests/next-no")
 async def next_transfer_request_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.transfer_requests.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.transfer_requests.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_str_no": f"STR/{fy}/{next_serial:03d}",
+        "next_str_no": f"STR/{note_date_key(today)}/{next_serial:02d}",
         "str_date": today.date().isoformat(),
     }
 
@@ -172,8 +170,8 @@ async def create_transfer_request(payload: TransferRequestCreate, user=Depends(g
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("str", fy)
-        str_no = f"STR/{fy}/{serial:03d}"
+        serial = await _next_serial("transfer_requests")
+        str_no = f"STR/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "str_no": str_no,
@@ -347,13 +345,11 @@ async def delete_transfer_request(str_id: str, user=Depends(get_current_user)):
 @router.get("/transfer-notes/next-no")
 async def next_transfer_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.transfer_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.transfer_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_stn_no": f"STN/{fy}/{next_serial:03d}",
+        "next_stn_no": f"STN/{note_date_key(today)}/{next_serial:02d}",
         "stn_date": today.date().isoformat(),
     }
 
@@ -527,8 +523,8 @@ async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_cur
         fy = current_fy_label(today)
         last_err = None
         for _ in range(5):
-            serial = await _alloc_serial("stn", fy)
-            stn_no = f"STN/{fy}/{serial:03d}"
+            serial = await _next_serial("transfer_notes")
+            stn_no = f"STN/{note_date_key(today)}/{serial:02d}"
             doc = {
                 "id": str(uuid.uuid4()),
                 "stn_no": stn_no,

@@ -1851,7 +1851,17 @@ const canFinalize = useMemo(() => {
                       <Input
                         value={it.part_no}
                         onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", description_1: "", model: "" })}
-                        onBlur={(e) => lookupMakes(idx, e.target.value)}
+                        onBlur={(e) => { if (!it.partLooked) lookupMakes(idx, e.target.value); }}
+                        onKeyDown={async (e) => {
+                          if (e.key === "Tab" && !e.shiftKey) {
+                            e.preventDefault();
+                            if (!it.partLooked) {
+                              await lookupMakes(idx, it.part_no);
+                            }
+                            const makeTrigger = document.querySelector(`[data-testid="rn-make-${idx}"]`);
+                            if (makeTrigger) makeTrigger.focus();
+                          }
+                        }}
                         placeholder="Enter part no"
                         className="rounded-sm font-mono h-8"
                         data-testid={`rn-part-no-${idx}`}
@@ -1872,13 +1882,6 @@ const canFinalize = useMemo(() => {
   makes={it.makes}
   partLooked={it.partLooked}
   onChange={(v) => handleMakeChange(idx, v)}
-  onKeyDown={(e) => {
-    if (isLastRow && e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      const addBtn = document.querySelector(`[data-testid="rn-add-row-${idx}"]`);
-      if (addBtn) addBtn.focus();
-    }
-  }}
   testid={`rn-make-${idx}`}
 />
                     </td>
@@ -2347,7 +2350,7 @@ function ShortReceivedNoteTab() {
         />
       )}
       {view === "edit" && (
-        <SrnFinalizeForm srn={editing} onCancel={goList} onSaved={goList} />
+        <SrnFinalizeForm srn={editing} onCancel={goList} />
       )}
       <ChildDetailDialog kind="srn" doc={openDetail} onClose={() => setOpenDetail(null)} onOpen={handleOpenChild} />
       <ReceiptNoteDetailDialog rn={openRn} onClose={() => setOpenRn(null)} />
@@ -2470,9 +2473,9 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
 
   const columns = useMemo(() => {
     const cols = [
+      { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
       { key: "doc_date", label: `${noun} DATE`, value: (r) => fmtDate(r[dateField]) },
       { key: "doc_no", label: `${noun} NO`, value: (r) => r[idField] || "" },
-      { key: "stock_in_type", label: "STOCK IN TYPE", value: (r) => stockInTypeLabel(r.parent_stock_in_type) },
       { key: "rn_date", label: "RECEIPT NOTE DATE", value: (r) => fmtDate(r.parent_rn_date) },
       { key: "rn_no", label: "RECEIPT NOTE NO", value: (r) => r.parent_rn_no || "" },
       { key: "status", label: "STATUS", value: (r) => statusMeta(r.status).label },
@@ -2556,6 +2559,14 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
               return (
                 <tr key={r.id} data-testid={`${kind}-row-${r[idField]}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td>
+                    {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
+                            data-testid={`${kind}-stock-in-type-${r[idField]}`}>
+                        {sit.label}
+                      </span>
+                    ); })()}
+                  </td>
                   <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
                   <td>
                     <button
@@ -2565,14 +2576,6 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                     >
                       {r[idField]}
                     </button>
-                  </td>
-                  <td>
-                    {(() => { const sit = stockInTypeMeta(r.parent_stock_in_type); return (
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sit.cls}`}
-                            data-testid={`${kind}-stock-in-type-${r[idField]}`}>
-                        {sit.label}
-                      </span>
-                    ); })()}
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
                   <td>
@@ -2831,7 +2834,7 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
 }
 
 /** SRN finalize/edit form — user enters fulfilled_qty per row + fulfillment_date. */
-function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
+function SrnFinalizeForm({ srn: initialSrn, onCancel }) {
   // Inline-child model: each item has children[]; user clicks (+) to add a row.
   const [parent, setParent] = useState(initialSrn);
   // Per-item draft: { [itemIdx]: { received_qty, not_receivable_qty } } — appears inline as a new row when user clicks +
@@ -2937,26 +2940,22 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
     } finally { setSavingNarration(false); }
   };
 
-  const meta = statusMeta(parent.status);
-
   return (
     <div className="mt-4 space-y-6" data-testid="srn-finalize-view">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="srn-back">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
         </Button>
-        <Button onClick={onSaved} variant="outline"
-          className="rounded-sm border-blue-700 text-blue-700 hover:bg-blue-50" data-testid="srn-done">
-          <CheckCircle size={14} weight="bold" className="mr-2" /> Done
-        </Button>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Detail k="Stock In Type" v={stockInTypeLabel(parent.parent_stock_in_type)} />
         <Detail k="SRN Date" v={fmtDate(parent.srn_date)} />
         <Detail k="SRN No" v={parent.srn_no} />
-        <Detail k="Parent RN" v={`${parent.parent_rn_no || "—"} (${fmtDate(parent.parent_rn_date) || "—"})`} />
+        <Detail k="Receipt Note Date" v={fmtDate(parent.parent_rn_date) || "—"} />
+        <Detail k="Receipt Note No" v={parent.parent_rn_no || "—"} />
+        <Detail k="Invoice Date" v={fmtDate(parent.invoice_date) || "—"} />
         <Detail k="Invoice No" v={parent.invoice_no || "—"} />
-        <Detail k="Status" v={<span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>} />
       </div>
 
       <div className="bg-white border border-slate-200 rounded-sm overflow-hidden">
@@ -2967,16 +2966,18 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
         <table className="data-table w-full">
           <thead>
             <tr>
-              <th className="w-8">#</th>
+              <th className="w-8">SL NO</th>
+              <th className="w-32">MODEL</th>
               <th className="w-44">PART NO</th>
-              <th>DESCRIPTION 1</th>
+              <th>DESCRIPTION</th>
+              <th className="w-32">MAKE</th>
               <th className="w-20 text-center">SHORT QTY</th>
-              <th className="w-24 text-center">TOTAL RCVD</th>
-              <th className="w-24 text-center">TOTAL N/R</th>
-              <th className="w-20 text-center">PENDING</th>
-              <th className="w-28">CHILD NO</th>
+              <th className="w-28">CHILD SRN NO</th>
               <th className="w-32">RECEIVED QTY</th>
               <th className="w-32">NOT RECEIVABLE</th>
+              <th className="w-20 text-center">PENDING</th>
+              <th className="w-24 text-center">TOTAL RECEIVED</th>
+              <th className="w-24 text-center">TOTAL NOT RECEIVABLE</th>
               <th className="w-24 text-right">ACTION</th>
             </tr>
           </thead>
@@ -2989,13 +2990,15 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
               rows.push(
                 <tr key={`h-${idx}`} className="bg-slate-50">
                   <td className="font-mono text-slate-500 font-bold">{idx + 1}</td>
+                  <td className="text-xs text-slate-700 truncate max-w-[140px]" title={it.model}>{it.model || "—"}</td>
                   <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                   <td className="text-xs text-slate-700 truncate max-w-[220px]" title={it.description_1}>{it.description_1 || "—"}</td>
+                  <td className="text-xs text-slate-700 truncate max-w-[140px]" title={it.make}>{it.make || "—"}</td>
                   <td className="text-center font-mono font-bold text-red-700">{(parseFloat(it.short_qty) || 0).toFixed(2)}</td>
+                  <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
+                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
                   <td className="text-center font-mono font-bold text-green-700">{rcv.toFixed(2)}</td>
                   <td className="text-center font-mono text-slate-700">{nrcv.toFixed(2)}</td>
-                  <td className={`text-center font-mono font-bold ${pending > 0.0001 ? "text-amber-700" : "text-green-700"}`}>{pending.toFixed(2)}</td>
-                  <td colSpan={3} className="text-slate-400 italic text-xs text-center">— Click + to add a row —</td>
                   <td className="text-right">
                     {pending > 1e-6 && drafts[idx] === undefined && (
                       <button onClick={() => startAddChild(idx)} disabled={busy}
@@ -3014,7 +3017,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                 rows.push(
                   <tr key={`${idx}-c-${ci}`} className="bg-green-50/30" data-testid={`srn-row-${idx}-${ci}`}>
                     <td className="font-mono text-slate-400 text-[10px]">{idx + 1}.{ci + 1}</td>
-                    <td colSpan={6} className="text-xs text-slate-500 pl-8">
+                    <td colSpan={5} className="text-xs text-slate-500 pl-8">
                       <span className="text-slate-400">└─ </span>
                       <span className="font-mono text-blue-700">{c.child_srn_no}</span>
                       <span className="ml-2 text-[10px] text-slate-500">({fmtDate(c.created_at)})</span>
@@ -3034,6 +3037,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                           className="rounded-sm font-mono h-7 text-center" />
                       ) : <span className="font-mono text-slate-700">{(parseFloat(c.not_receivable_qty) || 0).toFixed(2)}</span>}
                     </td>
+                    <td colSpan={3}></td>
                     <td className="text-right">
                       {isEdit ? (
                         <div className="flex gap-1 justify-end">
@@ -3075,7 +3079,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                 rows.push(
                   <tr key={`${idx}-draft`} className="bg-blue-50" data-testid={`srn-draft-${idx}`}>
                     <td className="font-mono text-blue-600 text-[10px]">+</td>
-                    <td colSpan={6} className="text-xs text-blue-900 pl-8 italic">
+                    <td colSpan={5} className="text-xs text-blue-900 pl-8 italic">
                       <span className="text-slate-400">└─ </span>New row · max {pending.toFixed(2)}
                     </td>
                     <td className="font-mono text-slate-400 italic text-xs">auto…</td>
@@ -3095,6 +3099,7 @@ function SrnFinalizeForm({ srn: initialSrn, onCancel, onSaved }) {
                         className="rounded-sm font-mono h-8 text-center"
                         data-testid={`srn-input-nrcv-${idx}`} />
                     </td>
+                    <td colSpan={3}></td>
                     <td className="text-right">
                       <div className="flex gap-1 justify-end">
                         <button onClick={() => saveNewChild(idx)} disabled={busy}

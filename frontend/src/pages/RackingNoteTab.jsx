@@ -716,6 +716,11 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
       });
       setSelectedSource(data.source || null);
       setItems(data.items || []);
+      if (!isEdit) {
+        api.get("/racking-notes/next-no", { params: { source_type: sourceType, source_id: sourceId } })
+          .then((r) => setRknNo(r.data.next_rkn_no))
+          .catch(() => {});
+      }
       // Eagerly preload racks/boxes for prefilled rows
       (data.items || []).forEach((it) => {
         if (it.godown_id) ensureRacks(it.godown_id);

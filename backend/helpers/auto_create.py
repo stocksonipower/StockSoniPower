@@ -4,7 +4,7 @@ from typing import Optional
 from pymongo.errors import DuplicateKeyError
 from fastapi import HTTPException
 from deps import db, logger, now_iso
-from helpers.note_helpers import current_fy_label, _alloc_serial
+from helpers.note_helpers import current_fy_label, note_date_key_from_iso, _next_serial, _linked_note_no
 from helpers.stock_helpers import _enrich_items
 
 
@@ -47,9 +47,13 @@ async def _auto_create_srn_for_rn(rn: dict, short_rows: list, actor: dict, paren
     session = _session_of(uow)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
+    rn_date_key = note_date_key_from_iso(rn.get("rn_date", ""))
     for _ in range(5):
-        serial = await _alloc_serial("srn", fy, session=session)
-        srn_no = f"SRN/{fy}/{serial:03d}"
+        serial = await _next_serial("short_received_notes", session=session)
+        srn_no = await _linked_note_no(
+            "short_received_notes", "srn_no", "parent_rn_id", rn["id"],
+            "SRN", rn_date_key, rn.get("serial", 0), session=session,
+        )
         # Consolidate duplicates — sum short_qty for the same (part_no, make).
         merged = {}
         for r in short_rows:
@@ -149,9 +153,13 @@ async def _auto_create_ern_for_rn(rn: dict, extra_rows: list, actor: dict, uow=N
     session = _session_of(uow)
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
+    rn_date_key = note_date_key_from_iso(rn.get("rn_date", ""))
     for _ in range(5):
-        serial = await _alloc_serial("ern", fy, session=session)
-        ern_no = f"ERN/{fy}/{serial:03d}"
+        serial = await _next_serial("extra_received_notes", session=session)
+        ern_no = await _linked_note_no(
+            "extra_received_notes", "ern_no", "parent_rn_id", rn["id"],
+            "ERN", rn_date_key, rn.get("serial", 0), session=session,
+        )
         merged = {}
         for r in extra_rows:
             key = (r["part_no"], r["make"])
@@ -311,11 +319,16 @@ async def _auto_create_rkn_for_source(
     ult_rn_id = (ultimate_rn or {}).get("id", "")
     ult_rn_no = (ultimate_rn or {}).get("rn_no", "")
     ult_rn_date = (ultimate_rn or {}).get("rn_date", "")
+    ult_rn_date_key = note_date_key_from_iso(ult_rn_date)
+    ult_rn_serial = (ultimate_rn or {}).get("serial", 0)
 
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("rkn", fy)
-        rkn_no = f"RKN/{fy}/{serial:03d}"
+        serial = await _next_serial("racking_notes")
+        rkn_no = await _linked_note_no(
+            "racking_notes", "rkn_no", "receipt_note_id", ult_rn_id,
+            "RKN", ult_rn_date_key, ult_rn_serial,
+        )
         doc = {
             "id": str(uuid.uuid4()),
             "rkn_no": rkn_no,

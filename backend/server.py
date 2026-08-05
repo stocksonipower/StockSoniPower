@@ -250,37 +250,6 @@ async def startup():
     # ---- Stock Master column settings (admin-editable order/widths) ----
     await db.column_settings.create_index("page", unique=True)
 
-    # ---- Phase 2: counters self-heal ----
-    # `_alloc_serial` reads/writes `db.counters` keyed by "{series}:{fy}". On first deploy after
-    # the switch from `_next_serial`, scan each FY-numbered collection for max(serial) per fy
-    # and seed the counter to that value (so subsequent allocations don't collide with existing
-    # serials). Idempotent and safe to run on every startup.
-    # Note: db.counters uses _id as the key — MongoDB auto-creates a unique index on _id.
-    SERIES_TO_COLL = {
-        "rn":  db.receipt_notes,
-        "rkn": db.racking_notes,
-        "srn": db.short_received_notes,
-        "ern": db.extra_received_notes,
-        "in":  db.issue_notes,
-        "pn":  db.picking_notes,
-        "str": db.transfer_requests,
-        "stn": db.transfer_notes,
-    }
-    for series, coll in SERIES_TO_COLL.items():
-        async for row in coll.aggregate([
-            {"$group": {"_id": "$fy", "max_serial": {"$max": "$serial"}}},
-        ]):
-            fy = row["_id"]
-            if not fy:
-                continue
-            max_serial = int(row.get("max_serial") or 0)
-            counter_id = f"{series}:{fy}"
-            existing = await db.counters.find_one({"_id": counter_id})
-            if existing is None:
-                await db.counters.insert_one({"_id": counter_id, "value": max_serial})
-            elif int(existing.get("value", 0)) < max_serial:
-                await db.counters.update_one({"_id": counter_id}, {"$set": {"value": max_serial}})
-
     # ---- Phase 2: RN stock_in_type backfill ----
     # Older receipt notes have no stock_in_type field. Default existing rows to "INVOICE"
     # (the prior behaviour was always invoice-based).

@@ -8,7 +8,7 @@ from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enf
 from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for, _stock_locations_for
-from helpers.note_helpers import current_fy_label, _alloc_serial, _key
+from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key
 from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -53,8 +53,8 @@ async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("pn", fy)
-        pn_no = f"PN/{fy}/{serial:03d}"
+        serial = await _next_serial("picking_notes")
+        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,
@@ -91,8 +91,8 @@ async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[di
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("pn", fy)
-        pn_no = f"PN/{fy}/{serial:03d}"
+        serial = await _next_serial("picking_notes")
+        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,
@@ -297,13 +297,11 @@ async def issue_lookup_godowns(part_no: str, make: str, user=Depends(get_current
 @router.get("/issue-notes/next-no")
 async def next_issue_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.issue_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.issue_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_in_no": f"IN/{fy}/{next_serial:03d}",
+        "next_in_no": f"IN/{note_date_key(today)}/{next_serial:02d}",
         "in_date": today.date().isoformat(),
     }
 
@@ -323,8 +321,8 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("in", fy)
-        in_no = f"IN/{fy}/{serial:03d}"
+        serial = await _next_serial("issue_notes")
+        in_no = f"IN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "in_no": in_no,
@@ -531,13 +529,11 @@ async def delete_issue_note(in_id: str, user=Depends(get_current_user)):
 @router.get("/picking-notes/next-no")
 async def next_picking_note_no(user=Depends(get_current_user)):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.picking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.picking_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_pn_no": f"PN/{fy}/{next_serial:03d}",
+        "next_pn_no": f"PN/{note_date_key(today)}/{next_serial:02d}",
         "pn_date": today.date().isoformat(),
     }
 
@@ -639,8 +635,8 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("pn", fy)
-        pn_no = f"PN/{fy}/{serial:03d}"
+        serial = await _next_serial("picking_notes")
+        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,

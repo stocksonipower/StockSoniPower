@@ -9,7 +9,7 @@ from deps import db, get_current_user, now_iso, _notify, logger, _resolve_assign
 from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _enrich_with_parent_assignee, _stock_locations_for
-from helpers.note_helpers import current_fy_label, _alloc_serial, _no_future_date, _key, _next_letter_suffix, _qty_diff, _rn_items_have_all_received, _ern_rackable_qty, _srn_rackable_by_key
+from helpers.note_helpers import current_fy_label, note_date_key, note_date_key_from_iso, _next_serial, _linked_note_no, _no_future_date, _key, _next_letter_suffix, _qty_diff, _rn_items_have_all_received, _ern_rackable_qty, _srn_rackable_by_key
 from helpers.auto_create import _auto_create_srn_for_rn, _auto_create_ern_for_rn, _auto_create_rkn_for_source
 from helpers.status_helpers import _recompute_rn_status, _compute_srn_status, _recompute_srn_racking_status, _recompute_ern_racking_status, _is_source_fully_racked, _aggregate_other_rkn_qty_by_source, _recompute_source_status_after_rkn, _stamp_racked_flag
 from helpers.validation import _validate_racking_items, _validate_cumulative_qty, _validate_cumulative_qty_polymorphic, _validate_racking_locations
@@ -316,15 +316,13 @@ async def stock_in(payload: StockInCreate, user=Depends(get_current_user)):
 
 @router.get("/receipt-notes/next-no")
 async def next_receipt_note_no(user=Depends(get_current_user)):
-    """Preview the next receipt-note number for the current FY (max existing serial + 1)."""
+    """Preview the next receipt-note number (max existing serial + 1, embedding today's date)."""
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.receipt_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.receipt_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_rn_no": f"RN/{fy}/{next_serial:03d}",
+        "next_rn_no": f"RN/{note_date_key(today)}/{next_serial:02d}",
         "rn_date": today.date().isoformat(),
     }
 
@@ -357,8 +355,8 @@ async def create_receipt_note(payload: ReceiptNoteCreate, user=Depends(_module_d
 
     last_err = None
     for _ in range(5):
-        serial = await _alloc_serial("rn", fy)
-        rn_no = f"RN/{fy}/{serial:03d}"
+        serial = await _next_serial("receipt_notes")
+        rn_no = f"RN/{note_date_key(today)}/{serial:02d}"
         doc = {
             "id": str(uuid.uuid4()),
             "rn_no": rn_no,
@@ -795,15 +793,31 @@ async def racking_note_existing_locations(part_no: str, make: str, user=Depends(
 
 
 @router.get("/racking-notes/next-no")
-async def next_racking_note_no(user=Depends(get_current_user)):
+async def next_racking_note_no(
+    source_type: Optional[str] = None,
+    source_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """Preview the next racking-note number. Once a source is picked, the RKN
+    mirrors its ultimate parent RN's number (e.g. RN/050826/01 -> RKN/050826/01,
+    or -B/-C if this RN already has an RKN) — same rule create_racking_note
+    applies at save time. Without a source yet, falls back to a generic
+    max-existing-serial+1 placeholder just to show something on load."""
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.racking_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    if source_type and source_id:
+        _, _, _, ultimate_rn = await _resolve_racking_source({"source_type": source_type, "source_id": source_id})
+        ult_rn_id = (ultimate_rn or {}).get("id", "")
+        ult_rn_date_key = note_date_key_from_iso((ultimate_rn or {}).get("rn_date", ""))
+        rkn_no = await _linked_note_no(
+            "racking_notes", "rkn_no", "receipt_note_id", ult_rn_id,
+            "RKN", ult_rn_date_key, (ultimate_rn or {}).get("serial", 0),
+        )
+        return {"next_rkn_no": rkn_no, "rkn_date": today.date().isoformat()}
+    last = await db.racking_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_rkn_no": f"RKN/{fy}/{next_serial:03d}",
+        "next_rkn_no": f"RKN/{note_date_key(today)}/{next_serial:02d}",
         "rkn_date": today.date().isoformat(),
     }
 
@@ -867,10 +881,15 @@ async def create_racking_note(payload: RackingNoteCreate, user=Depends(_module_d
     ult_rn_id = (ultimate_rn or {}).get("id", "")
     ult_rn_no = (ultimate_rn or {}).get("rn_no", "")
     ult_rn_date = (ultimate_rn or {}).get("rn_date", "")
+    ult_rn_date_key = note_date_key_from_iso(ult_rn_date)
+    ult_rn_serial = (ultimate_rn or {}).get("serial", 0)
 
     for _ in range(5):
-        serial = await _alloc_serial("rkn", fy)
-        rkn_no = f"RKN/{fy}/{serial:03d}"
+        serial = await _next_serial("racking_notes")
+        rkn_no = await _linked_note_no(
+            "racking_notes", "rkn_no", "receipt_note_id", ult_rn_id,
+            "RKN", ult_rn_date_key, ult_rn_serial,
+        )
         doc = {
             "id": str(uuid.uuid4()),
             "rkn_no": rkn_no,
@@ -1378,13 +1397,11 @@ async def record_racking_note(rkn_id: str, response: Response, user=Depends(_mod
 @router.get("/short-received-notes/next-no")
 async def next_srn_no(user=Depends(_module_dep("stock_in"))):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.short_received_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.short_received_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_srn_no": f"SRN/{fy}/{next_serial:03d}",
+        "next_srn_no": f"SRN/{note_date_key(today)}/{next_serial:02d}",
         "srn_date": today.date().isoformat(),
     }
 
@@ -1950,13 +1967,11 @@ async def delete_short_received_note(srn_id: str, user=Depends(_module_dep("stoc
 @router.get("/extra-received-notes/next-no")
 async def next_ern_no(user=Depends(_module_dep("stock_in"))):
     today = datetime.now(timezone.utc)
-    fy = current_fy_label(today)
-    last = await db.extra_received_notes.find({"fy": fy}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
+    last = await db.extra_received_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
     return {
-        "fy": fy,
         "next_serial": next_serial,
-        "next_ern_no": f"ERN/{fy}/{next_serial:03d}",
+        "next_ern_no": f"ERN/{note_date_key(today)}/{next_serial:02d}",
         "ern_date": today.date().isoformat(),
     }
 

@@ -1,17 +1,36 @@
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from pymongo import ReturnDocument
 from fastapi import HTTPException
 from deps import db
 
 
 def current_fy_label(d: datetime) -> str:
-    """Indian financial year label, e.g. 2026-04-15 -> '26-27'."""
+    """Indian financial year label, e.g. 2026-04-15 -> '26-27'.
+
+    No longer used to build note numbers (see `note_date_key`) — kept only
+    because every note doc still stores an `fy` field for backward
+    compatibility with the existing (fy, serial) unique indexes.
+    """
     if d.month >= 4:
         start, end = d.year, d.year + 1
     else:
         start, end = d.year - 1, d.year
     return f"{start % 100:02d}-{end % 100:02d}"
+
+
+def note_date_key(d: datetime) -> str:
+    """DDMMYY date component embedded in note numbers, e.g. 2026-08-05 -> '050826'."""
+    return d.strftime("%d%m%y")
+
+
+def note_date_key_from_iso(iso_date: str) -> str:
+    """Same as `note_date_key` but from an already-stored ISO 'YYYY-MM-DD' string,
+    falling back to today (UTC) if the value is missing or unparseable."""
+    try:
+        d = datetime.fromisoformat(iso_date)
+    except Exception:
+        d = datetime.now(timezone.utc)
+    return note_date_key(d)
 
 
 def _no_future_date(value: str, field_label: str):
@@ -33,29 +52,44 @@ def _no_future_date(value: str, field_label: str):
         raise HTTPException(status_code=400, detail=f"{field_label} cannot be in the future")
 
 
-async def _alloc_serial(series: str, fy: str, session=None) -> int:
-    """Atomically allocate the next serial number for a given series + FY.
+async def _next_serial(collection: str, session=None) -> int:
+    """Next serial for a collection, derived from documents that currently
+    exist rather than a persistent ever-incrementing counter: max(serial)
+    among surviving docs, +1 — or 1 when none remain. A deleted note's
+    number becomes available again. The series runs continuously across all
+    time — it no longer resets by financial year — since the note's own
+    date, not its series, is what's embedded in the display number now.
 
-    Uses a `counters` collection where each (series, fy) pair has a single
-    document. `find_one_and_update` with $inc and upsert=True is atomic at the
-    document level — concurrent callers get distinct, monotonically increasing
-    serials with no retry loop and no race window.
-
-    `series` is one of: rn, rkn, srn, ern, in, pn, str, stn
-
-    Pass `session` when the allocation must join a caller's transaction (the
-    Receipt Note edit resync creates notes inside one), so a rolled-back edit
-    also rolls back the serial instead of burning it.
+    Callers must retry on DuplicateKeyError (a concurrent create can claim
+    the same number first) — every call site below already loops for that.
     """
-    key = f"{series}:{fy}"
-    res = await db.counters.find_one_and_update(
-        {"_id": key},
-        {"$inc": {"value": 1}},
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-        session=session,
-    )
-    return int(res["value"])
+    last = await db[collection].find(
+        {}, {"serial": 1, "_id": 0}, session=session
+    ).sort("serial", -1).limit(1).to_list(1)
+    return (last[0]["serial"] if last else 0) + 1
+
+
+async def _linked_note_no(collection: str, no_field: str, link_field: str, link_value: str,
+                           prefix: str, rn_date_key: str, rn_serial: int, session=None) -> str:
+    """Number a document that belongs to a specific RN, mirroring the RN's own
+    number instead of a series of its own: the first SRN/ERN/RKN raised
+    against RN/050826/01 is numbered SRN(or ERN/RKN)/050826/01. A given RN can
+    legitimately produce more than one of these over its lifecycle (a residual
+    SRN chain, a second racking pass), so later ones append -B, -C, ... to stay
+    unique while still reading as belonging to that RN.
+    """
+    base_no = f"{prefix}/{rn_date_key}/{rn_serial:02d}"
+    existing = await db[collection].find(
+        {link_field: link_value}, {no_field: 1, "_id": 0}, session=session
+    ).to_list(1000)
+    if not existing:
+        return base_no
+    used = {"A"}  # the bare number already occupies the implicit first slot
+    for e in existing:
+        tail = (e.get(no_field) or "").rsplit("/", 1)[-1]
+        if "-" in tail:
+            used.add(tail.split("-", 1)[1])
+    return f"{base_no}-{_next_letter_suffix(used)}"
 
 
 def _key(p, m):

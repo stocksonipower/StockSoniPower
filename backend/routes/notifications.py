@@ -53,12 +53,14 @@ async def list_notifications(
     response: Response,
     unread_only: bool = False,
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user=Depends(get_current_user),
 ):
     q = {**_notif_visibility_filter(user), **_not_dismissed_filter(user["id"])}
     if unread_only:
         q = {**q, "read_by": {"$nin": [user["id"]]}}
-    rows = await db.notifications.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    rows = await db.notifications.find(q, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit).to_list(limit)
+    total = await db.notifications.count_documents(q)
     unread = await db.notifications.count_documents({
         **_notif_visibility_filter(user),
         **_not_dismissed_filter(user["id"]),
@@ -66,7 +68,11 @@ async def list_notifications(
     })
     response.headers["X-Unread-Count"] = str(unread)
     response.headers["Access-Control-Expose-Headers"] = "X-Unread-Count"
-    return {"items": [_notif_to_public(r, user["id"]) for r in rows], "unread_count": unread}
+    return {
+        "items": [_notif_to_public(r, user["id"]) for r in rows],
+        "unread_count": unread,
+        "total": total,
+    }
 
 
 @router.get("/notifications/unread-count")
