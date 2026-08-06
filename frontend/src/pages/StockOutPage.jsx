@@ -2175,7 +2175,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
             Use <span className="font-bold">+ Split</span> to take the remainder from another location.
             Requested Qty is what the office asked for; pick more or less as the shelf actually allows.
           </div>
-          <table className="data-table data-table-fixed w-full text-xs min-w-[1360px]">
+          <table className="data-table data-table-fixed w-full text-xs min-w-[1384px]">
             <colgroup>
               <col style={{ width: "56px" }} />
               <col style={{ width: "100px" }} />
@@ -2188,7 +2188,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
               <col style={{ width: "100px" }} />
               <col style={{ width: "142px" }} />
               <col style={{ width: "112px" }} />
-              <col style={{ width: "64px" }} />
+              {/* Two 28px icon buttons (split + delete) plus cell padding — 64px clipped
+                  the delete button on added rows. */}
+              <col style={{ width: "88px" }} />
             </colgroup>
             <thead>
               <tr>
@@ -2304,17 +2306,20 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                       </div>
                     </td>
                     <td className="align-middle">
-                      <div className="flex items-center h-8">
-                        <button type="button" onClick={() => addLocationRow(idx)} title="Split — pick the remainder from another location"
-                          className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700" data-testid={`pn-split-row-${idx}`}>
+                      <div className="flex items-center gap-1 h-8 whitespace-nowrap">
+                        <button type="button" onClick={() => addLocationRow(idx)} title="Add a row for this item at another location"
+                          className="p-1.5 rounded-sm shrink-0 hover:bg-blue-50 text-blue-700" data-testid={`pn-split-row-${idx}`}>
                           <Plus size={14} />
                         </button>
-                        {it.manual && (
-                          <button type="button" onClick={() => removeLocationRow(idx)} title="Remove this split row"
-                            className="p-1.5 rounded-sm hover:bg-red-50 text-red-700" data-testid={`pn-remove-row-${idx}`}>
-                            <Trash size={14} />
-                          </button>
-                        )}
+                        {/* Only rows the picker added here can be deleted — the Issue
+                            Note's own lines have to stay on the note. */}
+                        <button type="button" onClick={() => removeLocationRow(idx)}
+                          disabled={!it.manual}
+                          title={it.manual ? "Delete this added row" : "Issue Note lines cannot be deleted — set Picked Qty to 0 instead"}
+                          className={`p-1.5 rounded-sm shrink-0 ${it.manual ? "hover:bg-red-50 text-red-700" : "text-slate-300 cursor-not-allowed"}`}
+                          data-testid={`pn-remove-row-${idx}`}>
+                          <Trash size={14} />
+                        </button>
                       </div>
                     </td>
                   </tr>
