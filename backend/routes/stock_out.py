@@ -833,8 +833,10 @@ async def list_picking_notes(
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
-    if not issue_note_id and not status and not not_status and not search:
-        query["status"] = {"$in": ["PENDING", "DRAFT", "RECORDING"]}
+    # No implicit status filter: a recorded Picking Note is the record of what physically
+    # left the shelf and must stay visible in the list (it used to disappear the moment it
+    # was recorded). Callers that want only open work — e.g. the dashboard counter — pass
+    # status explicitly.
     total = await db.picking_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.picking_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)

@@ -1710,7 +1710,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           clipped or abbreviated. The page scrolls normally; only the horizontal
           overflow is handled here. */}
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto" data-testid="pn-scroller">
-        <table className="data-table data-table-fixed w-full min-w-[1400px]">
+        <table className="data-table data-table-fixed w-full min-w-[1450px]">
           <colgroup>
             <col style={{ width: "70px" }} />
             <col style={{ width: "176px" }} />
@@ -1721,8 +1721,10 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             <col style={{ width: "84px" }} />
             <col style={{ width: "110px" }} />
             <col style={{ width: "94px" }} />
-            <col style={{ width: "94px" }} />
-            <col style={{ width: "132px" }} />
+            {/* Wide enough for the "Completed" pill plus its padding, and for the
+                "Recording…" button label at its longest. */}
+            <col style={{ width: "116px" }} />
+            <col style={{ width: "156px" }} />
           </colgroup>
           <thead>
             <tr>
@@ -1774,7 +1776,9 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{totalQty || "—"}</td>
                   <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{pickedQty}</td>
                   <td>
-                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`pn-status-${r.pn_no}`}>
+                    {/* inline-block + nowrap keeps the pill a solid, self-contained block
+                        so it can never bleed into the neighbouring cell. */}
+                    <span className={`inline-block whitespace-nowrap text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`pn-status-${r.pn_no}`}>
                       {recorded ? "Completed" : (pending ? "Pending" : "Draft")}
                     </span>
                   </td>
@@ -1799,7 +1803,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending picking notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No picking notes yet — they are created automatically when an Issue Note is saved." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
