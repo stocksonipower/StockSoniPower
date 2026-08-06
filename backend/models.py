@@ -388,7 +388,11 @@ class RackingNote(BaseModel):
 class IssueNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float
+    # None = "open quantity": the office user could not predict how much a godown
+    # package actually holds, so the store incharge fills it in on the Picking Note.
+    # An open line is uncapped (bounded only by real stock) and is resolved as soon
+    # as any quantity is picked/rejected against it.
+    quantity: Optional[float] = None
     # Optional office-selected godown preference — narrows which locations
     # allocated_locations may be drawn from.
     selected_godown_id: Optional[str] = None
@@ -405,7 +409,30 @@ class IssueNoteItem(BaseModel):
     allocated_locations: Optional[List[dict]] = Field(default_factory=list)
 
 
+class StockOutTypeCreate(BaseModel):
+    """User-maintained Issue Note classification (Sale / Transfer / Return / …).
+
+    Kept as a master list rather than free text so the same classification is spelled
+    identically on every Issue Note — new values are created once, then reused.
+    """
+    name: str
+
+
+class StockOutType(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    created_by: str = ""
+
+
 class IssueNoteCreate(BaseModel):
+    # Name of a stock_out_types entry. Free-form on the wire so the UI can create and
+    # use a new type in one step; normalized/registered server-side.
+    stock_out_type: Optional[str] = ""
+    # Optional pointer to whatever paper/ERP document triggered this issue.
+    reference_doc_name: Optional[str] = ""
+    reference_doc_date: Optional[str] = ""     # ISO "YYYY-MM-DD"
+    reference_doc_no: Optional[str] = ""
     items: List[IssueNoteItem] = []
     assigned_to_user_id: Optional[str] = None
     narration: Optional[str] = ""
@@ -421,6 +448,10 @@ class IssueNote(BaseModel):
     in_date: str
     fy: str
     serial: int
+    stock_out_type: Optional[str] = ""
+    reference_doc_name: Optional[str] = ""
+    reference_doc_date: Optional[str] = ""
+    reference_doc_no: Optional[str] = ""
     items: List[IssueNoteItem] = []
     # DRAFT is an internal pre-finalize marker only (gates /finalize; no Picking Note
     # exists yet; always shown as "Pending" in the UI). Once finalized (or created

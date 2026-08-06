@@ -47,6 +47,13 @@ function pickingKey(it) {
   return `${it.part_no || ""}||${it.make || ""}`;
 }
 
+// A blank Quantity on an Issue Note line is deliberate ("open"): the office user often
+// cannot know how many pieces a godown package holds, so the store incharge fills the
+// number in on the Picking Note. Open lines are never checked against stock up front.
+function isOpenQty(it) {
+  return String(it?.quantity ?? "").trim() === "";
+}
+
 // Issue Note uses the standard 3-status set (Pending / In Process / Complete);
 // legacy values are recognized defensively in case a cached row predates migration.
 function issueStatusLabel(status) {
@@ -189,7 +196,7 @@ function printIssueNote(inn, pickingHistory = []) {
       showItem ? htmlEscape(it.description_1 || "") : "",
       showItem ? htmlEscape(it.make || "—") : "",
       godownCell, rackCell, boxCell,
-      showItem ? `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>` : "",
+      showItem ? `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "Open")}</span>` : "",
       showItem ? `<span style="text-align:right;display:block">${htmlEscape(p.picked || "—")}</span>` : "",
       showItem ? `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>` : "",
       showItem ? htmlEscape([...p.reasons].join(", ") || "—") : "",
@@ -207,14 +214,17 @@ function printIssueNote(inn, pickingHistory = []) {
     docNo: inn.in_no,
     statusLabel: issueStatusLabel(inn.status),
     fieldsLeft: [
+      ["Stock Out Type", inn.stock_out_type || "—"],
       ["Issue No", inn.in_no],
       ["Issue Date", fmtDate(inn.in_date)],
       ["Status", issueStatusLabel(inn.status)],
     ],
     fieldsRight: [
+      ["Reference Doc", inn.reference_doc_name || "—"],
+      ["Reference Doc No", inn.reference_doc_no || "—"],
+      ["Reference Doc Date", inn.reference_doc_date ? fmtDate(inn.reference_doc_date) : "—"],
       ["Assigned To", inn.assigned_to_name || inn.assigned_to_email || "—"],
       ["Created By", inn.created_by || "—"],
-      ["Created At", inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"],
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
@@ -232,21 +242,25 @@ function printIssueNote(inn, pickingHistory = []) {
 function buildPickingEditItems(editing, preparedItems) {
   const preparedByLocKey = {};
   const availableByItemKey = {};
+  const openByItemKey = {};
   (preparedItems || []).forEach((p) => {
     preparedByLocKey[pickingLocKey(p)] = p;
     const k = pickingKey(p);
     if (!availableByItemKey[k]) availableByItemKey[k] = p.available_locations || [];
+    if (p.open_quantity) openByItemKey[k] = true;
   });
   const existing = editing?.items || [];
   if (existing.length) {
     return existing.map((it) => {
       const p = preparedByLocKey[pickingLocKey(it)] || {};
       const k = pickingKey(it);
+      const open = !!openByItemKey[k];
       return {
       ...it,
       row_status: editing?.status === "RECORDED" ? "Picked" : "Draft Pick",
-      pending_qty: p.pending_qty ?? it.pending_qty ?? 0,
-      requested_qty: p.requested_qty ?? it.requested_qty ?? 0,
+      open_quantity: open,
+      pending_qty: open ? null : (p.pending_qty ?? it.pending_qty ?? 0),
+      requested_qty: open ? null : (p.requested_qty ?? it.requested_qty ?? 0),
       allocated_qty: p.allocated_qty ?? it.allocated_qty ?? it.quantity ?? 0,
       suggested: p.suggested ?? it.suggested ?? false,
       available_locations: availableByItemKey[k] || it.available_locations || [],
@@ -355,11 +369,12 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   const statusLabel = (r) => issueStatusLabel(r.status);
 
   const columns = useMemo(() => [
+    { key: "stock_out_type", label: "STOCK OUT TYPE", value: (r) => r.stock_out_type || "" },
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.in_date) },
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.in_no || "" },
-    { key: "assigned_to_name", label: "ASSIGNED TO", value: (r) => r.assigned_to_name || "" },
-     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "TOTAL QUANTITY", value: (r) => (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0)},
+    { key: "reference_doc_name", label: "REFERENCE DOCUMENT NAME", value: (r) => r.reference_doc_name || "" },
+    { key: "reference_doc_date", label: "REFERENCE DOCUMENT DATE", value: (r) => (r.reference_doc_date ? fmtDate(r.reference_doc_date) : "") },
+    { key: "reference_doc_no", label: "REFERENCE DOCUMENT NO", value: (r) => r.reference_doc_no || "" },
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -446,7 +461,6 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = (r.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
               // Editable only until the first quantity is picked/rejected — matches the
               // backend rule (a picking note with processed qty flips status off Pending).
               const hasPicking = issueHasProcessed(r.status);
@@ -461,15 +475,16 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               return (
                 <tr key={r.id} data-testid={`in-row-${r.in_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
+                  <td className="text-slate-700" data-testid={`in-type-${r.in_no}`}>{r.stock_out_type || "—"}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.in_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`in-open-${r.in_no}`}>
                       {r.in_no}
                     </button>
                   </td>
-                  <td className="text-slate-700">{r.assigned_to_name || "—"}</td>
-                                    <td className="font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="font-mono font-bold text-slate-900">{totalQty}</td>
+                  <td className="text-slate-700 max-w-[220px] truncate" title={r.reference_doc_name || ""}>{r.reference_doc_name || "—"}</td>
+                  <td className="font-mono text-slate-700">{r.reference_doc_date ? fmtDate(r.reference_doc_date) : "—"}</td>
+                  <td className="font-mono text-slate-700">{r.reference_doc_no || "—"}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`in-status-${r.in_no}`}>{label}</span>
                   </td>
@@ -491,7 +506,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No issue notes. Click 'Create New Issue Note' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No issue notes. Click 'Create New Issue Note' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -523,8 +538,12 @@ function IssueNoteDetailDialog({ inn, onClose }) {
             </div>
             <div className="grid grid-cols-2 gap-6 text-sm pt-3 pb-4 border-b border-slate-200">
               <div className="space-y-2">
+                <Detail k="STOCK OUT TYPE" v={inn.stock_out_type || "—"} />
                 <Detail k="ISSUE NOTE DATE" v={fmtDate(inn.in_date)} />
                 <Detail k="ISSUE NOTE NO" v={inn.in_no} />
+                <Detail k="REFERENCE DOCUMENT NAME" v={inn.reference_doc_name || "—"} />
+                <Detail k="REFERENCE DOCUMENT DATE" v={inn.reference_doc_date ? fmtDate(inn.reference_doc_date) : "—"} />
+                <Detail k="REFERENCE DOCUMENT NO" v={inn.reference_doc_no || "—"} />
                 <Detail k="STATUS" v={
                   <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${issueStatusClass(inn.status)}`}>
                     {issueStatusLabel(inn.status)}
@@ -568,8 +587,12 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                             <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                             <td>{it.make}</td>
                             <td className="text-slate-700">{it.description_1 || "—"}</td>
-                            <td colSpan={3} className="text-slate-400 italic">No stock currently available</td>
-                            <td className="text-center font-mono font-bold">{it.quantity}</td>
+                            <td colSpan={3} className="text-slate-400 italic">
+                              {it.quantity == null ? "Quantity & location decided at picking" : "No stock currently available"}
+                            </td>
+                            <td className="text-center font-mono font-bold">
+                              {it.quantity == null ? <span className="text-blue-700">Open</span> : it.quantity}
+                            </td>
                           </tr>
                         )];
                       }
@@ -654,17 +677,54 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const isFinalEdit = isEdit && !isDraftEdit;
   const [inNo, setInNo] = useState("");
   const [inDate, setInDate] = useState("");
+  const [stockOutType, setStockOutType] = useState("");
+  const [stockOutTypes, setStockOutTypes] = useState([]);
+  const [newTypeOpen, setNewTypeOpen] = useState(false);
+  const [newTypeName, setNewTypeName] = useState("");
+  const [creatingType, setCreatingType] = useState(false);
+  const [refDocName, setRefDocName] = useState("");
+  const [refDocDate, setRefDocDate] = useState("");
+  const [refDocNo, setRefDocNo] = useState("");
   const [items, setItems] = useState([emptyIssueItem()]);
   const [narration, setNarration] = useState("");
+  const [addCount, setAddCount] = useState("");
   const [savingDraft, setSavingDraft] = useState(false);
   const [savingFinal, setSavingFinal] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
   const fileInputRef = useRef(null);
 
+  const loadStockOutTypes = useCallback(async () => {
+    try {
+      const { data } = await api.get("/stock-out-types");
+      setStockOutTypes(data || []);
+    } catch { /* dropdown just stays empty */ }
+  }, []);
+  useEffect(() => { loadStockOutTypes(); }, [loadStockOutTypes]);
+
+  const createStockOutType = async () => {
+    const name = newTypeName.trim();
+    if (!name) { toast.error("Enter a type name"); return; }
+    setCreatingType(true);
+    try {
+      const { data } = await api.post("/stock-out-types", { name });
+      await loadStockOutTypes();
+      setStockOutType(data.name);
+      setNewTypeName("");
+      setNewTypeOpen(false);
+      toast.success(`Stock Out Type '${data.name}' created`);
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not create type");
+    } finally { setCreatingType(false); }
+  };
+
   useEffect(() => {
     if (isEdit) {
       setInNo(editing.in_no || "");
       setInDate(editing.in_date || "");
+      setStockOutType(editing.stock_out_type || "");
+      setRefDocName(editing.reference_doc_name || "");
+      setRefDocDate(editing.reference_doc_date || "");
+      setRefDocNo(editing.reference_doc_no || "");
       setAssignedToUserId(editing.assigned_to_user_id || "");
       setNarration(editing.narration || "");
       const initial = (editing.items || []).map((it) => ({
@@ -704,9 +764,21 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEdit, editing]);
 
+  // Same semantics as Receipt Note's Add Row: the count box means "I want N rows in
+  // total from here", so one row already on screen counts toward N.
   const addItems = () => {
-    setItems((p) => [...p, emptyIssueItem()]);
+    let n = Math.max(1, Math.min(500, parseInt(addCount, 10) || 1));
+    if (addCount && parseInt(addCount, 10) > 0) {
+      n = Math.max(1, n - 1);
+    }
+    setItems((p) => [...p, ...Array.from({ length: n }, emptyIssueItem)]);
+    setAddCount("");
   };
+  const insertItemAfter = (i) => setItems((p) => {
+    const next = [...p];
+    next.splice(i + 1, 0, emptyIssueItem());
+    return next;
+  });
   const removeItem = (i) => setItems((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)));
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
@@ -772,9 +844,14 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     }
     const row = items[i];
     const found = (row.godowns || []).find((g) => g.godown_id === gid);
+    // Narrowing to a godown can shrink the pool below what's already typed — pull the
+    // quantity down with it rather than leaving an unsavable number on screen.
+    const cap = found?.available_qty ?? 0;
+    const typed = parseInt(row.quantity);
     updateItem(i, {
       selected_godown_id: found?.godown_id || null,
       selected_godown_name: found?.godown_name || null,
+      ...(found && !isNaN(typed) && typed > cap ? { quantity: String(cap) } : {}),
     });
   };
 
@@ -783,7 +860,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const requestedByKey = useMemo(() => {
     const m = {};
     items.forEach((r) => {
-      if (!r.part_no || !r.make) return;
+      if (!r.part_no || !r.make || isOpenQty(r)) return;
       const k = `${r.part_no}||${r.make}`;
       m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
@@ -793,12 +870,38 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const requestedByGodownKey = useMemo(() => {
     const m = {};
     items.forEach((r) => {
-      if (!r.part_no || !r.make || !r.selected_godown_id) return;
+      if (!r.part_no || !r.make || !r.selected_godown_id || isOpenQty(r)) return;
       const k = `${r.part_no}||${r.make}||${r.selected_godown_id}`;
       m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0);
     });
     return m;
   }, [items]);
+
+  // Hard ceiling for a row's Quantity: live stock for that part/make — narrowed to the
+  // selected godown when one is chosen — minus whatever the other rows already claim
+  // from the same pool. Mirrors the backend's aggregate check, applied as you type so
+  // an impossible number can never be entered in the first place.
+  const maxQtyForRow = (idx) => {
+    const row = items[idx];
+    if (!row?.part_no || !row?.make) return 0;
+    const selected = (row.godowns || []).find((g) => g.godown_id === row.selected_godown_id);
+    const pool = row.selected_godown_id && selected ? (selected.available_qty || 0) : (row.available_qty || 0);
+    const claimedByOthers = items.reduce((sum, r, i) => {
+      if (i === idx || r.part_no !== row.part_no || r.make !== row.make) return sum;
+      // A row scoped to a godown only competes with other rows on that same godown.
+      if (row.selected_godown_id && r.selected_godown_id !== row.selected_godown_id) return sum;
+      return sum + (parseInt(r.quantity) || 0);
+    }, 0);
+    return Math.max(0, pool - claimedByOthers);
+  };
+
+  const onQtyChange = (idx, raw) => {
+    if (raw === "") { updateItem(idx, { quantity: "" }); return; }   // blank = open line
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 0) return;
+    const cap = maxQtyForRow(idx);
+    updateItem(idx, { quantity: String(Math.min(n, cap)) });
+  };
 
   const validateRows = () => {
     if (items.length === 0) { toast.error("Add at least one item"); return false; }
@@ -806,8 +909,10 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       const it = items[i];
       if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return false; }
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return false; }
+      // Quantity is optional — a blank means "store incharge decides at picking time".
+      if (isOpenQty(it)) continue;
       const q = parseInt(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return false; }
+      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity must be > 0, or leave it blank for the store incharge`); return false; }
       if (q > (it.available_qty || 0) + 1e-6) {
         toast.error(`Row ${i + 1}: ${it.part_no}/${it.make} — only ${it.available_qty} in stock, cannot issue ${q}`);
         return false;
@@ -842,14 +947,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     return true;
   };
 
+  // Mirrors Receipt Note: Final Save needs an identified item on every row; Quantity is
+  // explicitly not part of this — a blank quantity is a valid, intentional state.
+  const canFinalize = items.length > 0 && items.every((it) => it.part_no.trim() && it.make.trim());
+
   const buildPayload = (asDraft) => ({
+    stock_out_type: stockOutType || "",
+    reference_doc_name: refDocName.trim(),
+    reference_doc_date: refDocDate || "",
+    reference_doc_no: refDocNo.trim(),
     assigned_to_user_id: assignedToUserId || null,
     narration: narration.trim(),
     save_as_draft: asDraft,
     items: items.map((it) => ({
       part_no: it.part_no.trim(),
       make: it.make.trim(),
-      quantity: parseInt(it.quantity),
+      // null (not 0) marks an open quantity for the store incharge to fill in.
+      quantity: isOpenQty(it) ? null : parseInt(it.quantity),
       description_1: it.description_1 || "",
       selected_godown_id: it.selected_godown_id || null,
       selected_godown_name: it.selected_godown_name || null,
@@ -901,6 +1015,8 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
     const ws = XLSX.utils.aoa_to_sheet([
       ["Part No", "Make", "Quantity", "Godown Preference"],
       ["EXAMPLE-001", "ACME", 5, ""],
+      // Blank Quantity is valid — imports as an open line for the store incharge.
+      ["EXAMPLE-002", "ACME", "", ""],
       ["", "", "", ""],
     ]);
     ws["!cols"] = [{ wch: 18 }, { wch: 16 }, { wch: 12 }, { wch: 20 }];
@@ -936,8 +1052,10 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
         const godownPref = String(pickCol(row, ["godown preference", "godown", "godown_preference"]) || "").trim();
         if (!part_no && (qtyRaw === "" || qtyRaw == null)) continue;
         if (!part_no) { toast.error("Skipped row — Part No missing"); continue; }
-        const qty = parseInt(qtyRaw);
-        if (isNaN(qty) || qty <= 0) { toast.error(`Row for ${part_no} skipped — Quantity must be > 0`); continue; }
+        // Blank Quantity is imported as an open line (store incharge fills it in).
+        const blankQty = qtyRaw === "" || qtyRaw == null;
+        const qty = blankQty ? "" : parseInt(qtyRaw);
+        if (!blankQty && (isNaN(qty) || qty <= 0)) { toast.error(`Row for ${part_no} skipped — Quantity must be > 0 or blank`); continue; }
         newRows.push({
           ...emptyIssueItem(),
           part_no, make, quantity: qty, _godownPrefName: godownPref,
@@ -964,10 +1082,15 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
               const matched = row.make ? list.find((m) => m.make === row.make) : (list.length === 1 ? list[0] : null);
               setItems((prev) => prev.map((r) => {
                 if (r._importId !== importId) return r;
+                const avail = matched ? matched.available_qty : 0;
+                const typed = parseInt(r.quantity);
                 return {
                   ...r, makes: list, partLooked: true,
                   make: matched ? matched.make : row.make,
-                  available_qty: matched ? matched.available_qty : 0,
+                  available_qty: avail,
+                  // A spreadsheet can ask for more than exists — cap it on arrival so the
+                  // grid never holds a quantity the user could not have typed by hand.
+                  quantity: !isNaN(typed) && typed > avail ? String(avail) : r.quantity,
                   description_1: matched ? (matched.description_1 || "") : "",
                   model: matched ? (matched.model || "") : "",
                 };
@@ -1013,14 +1136,75 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
       <div className="bg-white border border-slate-200 rounded-sm p-6 grid grid-cols-2 lg:grid-cols-3 gap-4">
         <div>
+          <Label className="label-sm">Stock Out Type</Label>
+          <div className="flex items-center gap-2 mt-2">
+            <Select value={stockOutType || undefined} onValueChange={setStockOutType}>
+              <SelectTrigger className="rounded-sm min-w-0 flex-1" data-testid="in-stock-out-type">
+                <SelectValue placeholder={stockOutTypes.length === 0 ? "No types yet — create one" : "Select type"} />
+              </SelectTrigger>
+              <SelectContent>
+                {stockOutTypes.map((t) => (
+                  <SelectItem key={t.id} value={t.name} data-testid={`in-stock-out-type-option-${t.name}`}>{t.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="outline"
+              className="rounded-sm border-slate-300 shrink-0 px-2"
+              onClick={() => setNewTypeOpen(true)}
+              title="Create a new Stock Out Type"
+              data-testid="in-stock-out-type-new"
+            >
+              <Plus size={14} weight="bold" />
+            </Button>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-1">Shared list · reused on every Issue Note</div>
+        </div>
+        <div>
           <Label className="label-sm">Issue Note Date</Label>
           <Input value={inDate} disabled className="mt-2 rounded-sm font-mono bg-slate-50" data-testid="in-date-input" />
+          <div className="text-[11px] text-slate-500 mt-1">Auto · today's date</div>
         </div>
         <div>
           <Label className="label-sm">Issue Note No</Label>
           <Input value={inNo} disabled className="mt-2 rounded-sm font-mono font-semibold bg-blue-50 text-blue-900" data-testid="in-no-input" />
+          <div className="text-[11px] text-slate-500 mt-1">Auto · resets each FY</div>
         </div>
-        <div className="col-span-2">
+        <div>
+          <Label className="label-sm">Reference Document Name</Label>
+          <Input
+            value={refDocName}
+            onChange={(e) => setRefDocName(e.target.value)}
+            placeholder="e.g. Sales Order"
+            className="mt-2 rounded-sm font-mono"
+            data-testid="in-ref-doc-name"
+          />
+          <div className="text-[11px] text-slate-500 mt-1">Optional</div>
+        </div>
+        <div>
+          <Label className="label-sm">Reference Document Date</Label>
+          <Input
+            type="date"
+            value={refDocDate}
+            onChange={(e) => setRefDocDate(e.target.value)}
+            className="mt-2 rounded-sm font-mono"
+            data-testid="in-ref-doc-date"
+          />
+          <div className="text-[11px] text-slate-500 mt-1">Optional</div>
+        </div>
+        <div>
+          <Label className="label-sm">Reference Document No</Label>
+          <Input
+            value={refDocNo}
+            onChange={(e) => setRefDocNo(e.target.value)}
+            placeholder="e.g. SO-1024"
+            className="mt-2 rounded-sm font-mono"
+            data-testid="in-ref-doc-no"
+          />
+          <div className="text-[11px] text-slate-500 mt-1">Optional</div>
+        </div>
+        <div className="col-span-2 lg:col-span-3">
           <AssigneeSelect
             value={assignedToUserId}
             onChange={setAssignedToUserId}
@@ -1029,6 +1213,41 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           />
         </div>
       </div>
+
+      {/* CREATE STOCK OUT TYPE */}
+      <Dialog open={newTypeOpen} onOpenChange={(o) => { if (!o) { setNewTypeOpen(false); setNewTypeName(""); } }}>
+        <DialogContent className="max-w-md rounded-sm" data-testid="in-new-type-dialog">
+          <div className="text-lg font-black tracking-tight text-slate-900">New Stock Out Type</div>
+          <div className="text-xs text-slate-500 -mt-2">
+            Created once and reused everywhere, so the same classification is always spelled the same way.
+          </div>
+          <div className="mt-2">
+            <Label className="label-sm">Type Name</Label>
+            <Input
+              autoFocus
+              value={newTypeName}
+              onChange={(e) => setNewTypeName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); createStockOutType(); } }}
+              placeholder="e.g. Sample, Warranty Replacement"
+              className="mt-2 rounded-sm font-mono"
+              data-testid="in-new-type-name"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-4">
+            <Button variant="outline" className="rounded-sm" onClick={() => { setNewTypeOpen(false); setNewTypeName(""); }}>
+              Cancel
+            </Button>
+            <Button
+              className="rounded-sm bg-blue-700 hover:bg-blue-800"
+              onClick={createStockOutType}
+              disabled={creatingType}
+              data-testid="in-new-type-save"
+            >
+              {creatingType ? "Creating…" : "Create Type"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-center justify-between p-4 border-b border-slate-200">
@@ -1063,31 +1282,60 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             >
               <UploadSimple size={16} weight="bold" className="mr-2" /> Import Excel
             </Button>
+            <Input
+              type="number"
+              min="1"
+              max="500"
+              value={addCount}
+              onChange={(e) => setAddCount(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItems(); } }}
+              placeholder="Qty"
+              className="rounded-sm font-mono h-9 w-24 text-center"
+              data-testid="in-add-row-count"
+              title="Number of rows to add at once (default 1)"
+            />
             <Button onClick={addItems} variant="outline" className="rounded-sm border-slate-300" data-testid="in-add-row-button">
-              <Plus size={16} weight="bold" className="mr-2" /> Add Row
+              <Plus size={16} weight="bold" className="mr-2" /> Add Row{addCount && parseInt(addCount, 10) > 1 ? "s" : ""}
             </Button>
           </div>
         </div>
 
-        <table className="data-table w-full">
+        {/* Fixed column widths (table-layout:fixed + colgroup): every control keeps the
+            same footprint whether or not it holds a value, so rows never reflow as the
+            user types. Description takes whatever width is left over. */}
+        <div className="overflow-x-auto">
+        <table className="data-table data-table-fixed w-full min-w-[1100px]">
+          <colgroup>
+            <col style={{ width: "56px" }} />
+            <col style={{ width: "120px" }} />
+            <col style={{ width: "180px" }} />
+            <col />
+            <col style={{ width: "160px" }} />
+            <col style={{ width: "130px" }} />
+            <col style={{ width: "180px" }} />
+            <col style={{ width: "84px" }} />
+          </colgroup>
           <thead>
-            <tr><th className="w-14">SL</th><th className="w-32">MODEL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th>QUANTITY</th><th>GODOWN PREFERENCE</th><th className="w-14"></th></tr>
+            <tr><th>SL NO</th><th>MODEL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th className="!text-center">QUANTITY</th><th>GODOWN PREFERENCE</th><th></th></tr>
           </thead>
           <tbody>
             {items.map((it, idx) => {
-              const overStock = it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
+              const openQty = isOpenQty(it);
+              const overStock = !openQty && it.available_qty !== undefined && (parseInt(it.quantity) || 0) > (it.available_qty || 0) + 1e-6;
               const selectedGodown = (it.godowns || []).find((g) => g.godown_id === it.selected_godown_id);
-              const overGodown = !!it.selected_godown_id && selectedGodown && (parseInt(it.quantity) || 0) > (selectedGodown.available_qty || 0) + 1e-6;
+              const overGodown = !openQty && !!it.selected_godown_id && selectedGodown && (parseInt(it.quantity) || 0) > (selectedGodown.available_qty || 0) + 1e-6;
+              const rowCap = maxQtyForRow(idx);
+              const atCap = !openQty && rowCap > 0 && (parseInt(it.quantity) || 0) === rowCap;
               return (
               <tr key={idx} data-testid={`in-item-row-${idx}`} className={(overStock || overGodown) ? "bg-red-50" : ""}>
-                <td className="font-mono text-slate-500">{idx + 1}</td>
-                <td>
+                <td className="font-mono text-slate-500 align-middle">{idx + 1}</td>
+                <td className="align-middle">
                   <div
-                    className="text-xs text-slate-700 px-2 py-1 bg-slate-50 rounded-sm border border-slate-200 truncate"
+                    className="h-8 flex items-center text-xs text-slate-700 px-2 bg-slate-50 rounded-sm border border-slate-200 overflow-hidden whitespace-nowrap text-ellipsis"
                     title={it.model || "—"}
                     data-testid={`in-model-${idx}`}
                   >
-                    {it.model || <span className="text-slate-400 italic">(auto from master)</span>}
+                    <span className="truncate">{it.model || <span className="text-slate-400 italic">(auto)</span>}</span>
                   </div>
                 </td>
                 <td>
@@ -1103,17 +1351,31 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                       selected_godown_name: null,
                     })}
                     onBlur={(e) => lookupMakes(idx, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Tab" || e.shiftKey) return;
+                      // The Make dropdown is disabled until the lookup resolves, so a
+                      // plain Tab would land nowhere. Hold focus, run the lookup, then
+                      // hand focus to Make once its options exist.
+                      e.preventDefault();
+                      const val = e.target.value;
+                      lookupMakes(idx, val).then(() => {
+                        setTimeout(() => document.querySelector(`[data-testid="in-make-${idx}"]`)?.focus(), 0);
+                      });
+                    }}
                     placeholder="Enter part no"
-                    className="rounded-sm font-mono h-8" data-testid={`in-part-no-${idx}`} />
+                    className="rounded-sm font-mono font-semibold text-sm h-8 w-full px-2 text-slate-900"
+                    data-testid={`in-part-no-${idx}`} />
                 </td>
-                <td className="text-slate-600 text-xs max-w-[220px] truncate" title={it.description_1 || ""} data-testid={`in-description-${idx}`}>
-                  {it.description_1 || "—"}
+                <td className="align-middle" data-testid={`in-description-${idx}`}>
+                  <div className="h-8 flex items-center text-xs text-slate-600 overflow-hidden" title={it.description_1 || ""}>
+                    <span className="truncate">{it.description_1 || "—"}</span>
+                  </div>
                 </td>
-                <td className="w-64">
+                <td className="align-middle">
                   <Select disabled={!it.partLooked || it.makes.length === 0}
                     value={it.make || undefined} onValueChange={(v) => onMakeChange(idx, v)}>
-                    <SelectTrigger className="rounded-sm h-8" data-testid={`in-make-${idx}`}>
-                      <SelectValue placeholder={!it.partLooked ? "Enter Part No first" : (it.makes.length === 0 ? "No stock available" : "Select make")} />
+                    <SelectTrigger className="rounded-sm h-8 w-full text-xs [&>span]:truncate" data-testid={`in-make-${idx}`}>
+                      <SelectValue placeholder={!it.partLooked ? "Part No first" : (it.makes.length === 0 ? "No stock" : "Select make")} />
                     </SelectTrigger>
                     <SelectContent>
                       {it.makes.map((m) => (
@@ -1125,27 +1387,40 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                     </SelectContent>
                   </Select>
                 </td>
-                <td className="w-32">
-                  <Input type="number" min="1" step="1" value={it.quantity}
+                <td className="align-middle">
+                  <Input type="number" min="1" step="1" max={rowCap || undefined} value={it.quantity}
                     disabled={!it.make}
-                    onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                    placeholder="0"
-                    className={`rounded-sm font-mono h-8 text-center ${overStock || overGodown ? "border-red-400" : ""}`}
+                    onChange={(e) => onQtyChange(idx, e.target.value)}
+                    placeholder="Optional"
+                    title={it.make
+                      ? `Up to ${rowCap} available. Leave blank to let the store incharge decide.`
+                      : "Leave blank to let the store incharge decide the quantity while picking"}
+                    className={`rounded-sm font-mono h-8 w-full text-center px-1 ${overStock || overGodown ? "border-red-400" : ""}`}
                     data-testid={`in-qty-${idx}`} />
-                  {it.make && (
-                    <div className={`text-[10px] mt-0.5 ${overStock || overGodown ? "text-red-600 font-bold" : "text-slate-500"}`}
-                      data-testid={`in-avail-hint-${idx}`}>
-                      {overGodown ? `Over godown ${it.quantity}/${selectedGodown?.available_qty || 0}` : (overStock ? `Over ${it.quantity}/${it.available_qty}` : `Available ${it.available_qty}`)}
-                    </div>
-                  )}
+                  {/* Always rendered (invisible when there's nothing to say) so the row
+                      height never changes as makes/quantities are filled in. */}
+                  <div
+                    className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-center overflow-hidden whitespace-nowrap text-ellipsis ${
+                      !it.make ? "invisible"
+                        : (overStock || overGodown ? "text-red-600 font-bold"
+                          : (atCap ? "text-amber-600 font-bold" : "text-slate-500"))
+                    }`}
+                    title={it.make && openQty ? `Open — the store incharge decides (available ${it.available_qty})` : undefined}
+                    data-testid={`in-avail-hint-${idx}`}
+                  >
+                    {openQty ? `Open · avail ${rowCap}`
+                      : (overGodown ? `Over ${it.quantity}/${selectedGodown?.available_qty || 0}`
+                        : (overStock ? `Over ${it.quantity}/${it.available_qty}`
+                          : (atCap ? `Max ${rowCap}` : `Avail ${rowCap}`)))}
+                  </div>
                 </td>
-                <td className="w-64">
+                <td className="align-middle">
                   <Select
                     disabled={!it.make || (it.godowns || []).length === 0}
                     value={it.selected_godown_id || NO_GODOWN}
                     onValueChange={(v) => onIssueGodownChange(idx, v)}
                   >
-                    <SelectTrigger className="rounded-sm h-8" data-testid={`in-godown-${idx}`}>
+                    <SelectTrigger className="rounded-sm h-8 w-full text-xs [&>span]:truncate" data-testid={`in-godown-${idx}`}>
                       <SelectValue placeholder={!it.make ? "Select make first" : "No godown preference"} />
                     </SelectTrigger>
                     <SelectContent>
@@ -1159,16 +1434,29 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                     </SelectContent>
                   </Select>
                 </td>
-                <td>
-                  <button onClick={() => removeItem(idx)} disabled={items.length === 1}
-                    className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                    data-testid={`in-remove-row-${idx}`}><Trash size={14} /></button>
+                <td className="align-middle">
+                  <div className="flex items-center gap-1 h-8">
+                    <button onClick={() => insertItemAfter(idx)}
+                      className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700"
+                      title="Add row below"
+                      data-testid={`in-add-row-${idx}`}><Plus size={14} /></button>
+                    <button onClick={() => removeItem(idx)} disabled={items.length === 1}
+                      onKeyDown={(e) => {
+                        if (e.key === "Tab" && !e.shiftKey && idx === items.length - 1 && items.length > 1) {
+                          e.preventDefault();
+                          document.querySelector('[data-testid="in-narration"]')?.focus();
+                        }
+                      }}
+                      className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
+                      data-testid={`in-remove-row-${idx}`}><Trash size={14} /></button>
+                  </div>
                 </td>
               </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
 
         {/* SAVE BAR — narration on left, action buttons on right */}
         <div className="flex items-start justify-between gap-4 p-4 border-t border-slate-200 bg-slate-50">
@@ -1177,6 +1465,17 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             <textarea
               value={narration}
               onChange={(e) => setNarration(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Tab" && !e.shiftKey) {
+                  e.preventDefault();
+                  const draftBtn = document.querySelector('[data-testid="in-save-draft-button"]');
+                  if (draftBtn && !draftBtn.disabled) {
+                    draftBtn.focus();
+                  } else {
+                    document.querySelector('[data-testid="in-save-final-button"]')?.focus();
+                  }
+                }
+              }}
               placeholder="Optional narration…"
               rows={2}
               className="w-full rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -1198,12 +1497,14 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             )}
             <Button
               onClick={saveFinal}
-              disabled={savingDraft || savingFinal}
+              disabled={savingDraft || savingFinal || (!canFinalize && !isFinalEdit)}
               className="rounded-sm bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
               data-testid="in-save-final-button"
-              title={isFinalEdit ? "Update Issue Note" : "Final Save — releases for picking"}
+              title={!canFinalize && !isFinalEdit
+                ? "Fill Part No and Make on every row to enable Final Save (Quantity may be left blank)"
+                : (isFinalEdit ? "Update Issue Note" : "Final Save — releases for picking")}
             >
-              <FloppyDisk size={14} weight="bold" className="mr-2" />
+              <CheckCircle size={14} weight="bold" className="mr-2" />
               {savingFinal ? "Saving…" : (isFinalEdit ? "Update Issue Note" : "Save Final")}
             </Button>
           </div>
@@ -1587,11 +1888,13 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   // Cumulative (picked + rejected) per part/make across every row, and what was
   // actually requested — mirrors the backend's aggregate check so the picker sees the
   // same constraint before submitting, regardless of how many locations they split across.
+  // `null` = open line (the Issue Note left the quantity to the store incharge) — no
+  // ceiling beyond real stock, which `availableAtRow` already enforces.
   const requestedByItemKey = useMemo(() => {
     const m = {};
     items.forEach((r) => {
       const k = pickingKey(r);
-      if (!(k in m)) m[k] = r.requested_qty || 0;
+      if (!(k in m)) m[k] = r.open_quantity ? null : (r.requested_qty || 0);
     });
     return m;
   }, [items]);
@@ -1637,7 +1940,8 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       }
     }
     for (const [k, total] of Object.entries(processedByItemKey)) {
-      const requested = requestedByItemKey[k] || 0;
+      const requested = requestedByItemKey[k];
+      if (requested == null) continue;  // open line — bounded by stock only
       if (total > requested + 1e-6) {
         const [p, m] = k.split("||");
         toast.error(`${p}/${m}: Picked + Rejected (${total}) exceeds requested (${requested})`);
@@ -1739,9 +2043,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
             <tbody>
               {items.map((it, idx) => {
                 const k = pickingKey(it);
-                const requested = requestedByItemKey[k] || 0;
+                const requested = requestedByItemKey[k];
                 const processed = processedByItemKey[k] || 0;
-                const overRequested = processed > requested + 1e-6;
+                const overRequested = requested != null && processed > requested + 1e-6;
                 const noStockAtAll = (it.available_locations || []).length === 0;
                 const availHere = availableAtRow(it, idx);
                 const q = parseInt(it.quantity) || 0;
@@ -1787,6 +2091,11 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                       {overRequested && (
                         <div className="text-[10px] mt-0.5 text-red-600 font-bold" data-testid={`pn-pending-hint-${idx}`}>
                           Over {processed}/{requested}
+                        </div>
+                      )}
+                      {!overRequested && it.open_quantity && (
+                        <div className="text-[10px] mt-0.5 text-blue-700 font-bold" data-testid={`pn-open-qty-${idx}`}>
+                          Open — your call
                         </div>
                       )}
                     </td>

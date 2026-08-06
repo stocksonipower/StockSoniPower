@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from datetime import datetime, timezone
 from typing import Optional
+import re
 import uuid
 from pymongo.errors import DuplicateKeyError
 
@@ -16,6 +17,31 @@ from services.locking import location_locks
 from helpers.audit import _write_audit_log
 
 router = APIRouter()
+
+
+DEFAULT_STOCK_OUT_TYPES = ["Sale", "Transfer", "Return"]
+
+
+async def _register_stock_out_type(name: str, user: dict) -> str:
+    """Return the canonical stored spelling of a stock-out type, creating the master
+    entry on first use. Matching is case-insensitive so "sale"/"Sale" never split into
+    two types — the whole point of keeping this as a master list."""
+    clean = (name or "").strip()
+    if not clean:
+        return ""
+    existing = await db.stock_out_types.find_one(
+        {"name": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}}, {"_id": 0}
+    )
+    if existing:
+        return existing["name"]
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": clean,
+        "created_at": now_iso(),
+        "created_by": user.get("email", ""),
+    }
+    await db.stock_out_types.insert_one(doc)
+    return clean
 
 
 async def _issue_items_for_storage(items):
@@ -38,9 +64,14 @@ async def _issue_items_for_storage(items):
         else:
             row["selected_godown_id"] = None
             row["selected_godown_name"] = None
-        row["allocated_locations"] = await _allocate_locations_for(
-            row["part_no"], row["make"], row["quantity"], row.get("selected_godown_id")
-        )
+        if row.get("quantity") is None:
+            # Open line — there is no quantity to pre-allocate; the Picking Note offers
+            # every stock location for this part/make instead (see prepare_picking_note).
+            row["allocated_locations"] = []
+        else:
+            row["allocated_locations"] = await _allocate_locations_for(
+                row["part_no"], row["make"], row["quantity"], row.get("selected_godown_id")
+            )
         out.append(row)
     return out
 
@@ -156,11 +187,18 @@ def _stock_out_lock_key(it: dict) -> str:
 
 def _issue_qty_signature(items: list[dict]) -> dict:
     """Per (part,make) requested-qty map — used to detect whether an Issue Note edit
-    actually changed anything that would invalidate an in-progress Picking Note draft."""
+    actually changed anything that would invalidate an in-progress Picking Note draft.
+
+    An open (blank) quantity is signed as "OPEN" rather than 0, so switching a line
+    between open and 0-ish still registers as a change."""
     sig = {}
     for it in items or []:
         k = _key(it.get("part_no"), it.get("make"))
-        sig[k] = sig.get(k, 0) + float(it.get("quantity") or 0)
+        if it.get("quantity") is None:
+            sig[k] = "OPEN"
+            continue
+        prev = sig.get(k)
+        sig[k] = ("OPEN" if prev == "OPEN" else (prev or 0) + float(it.get("quantity") or 0))
     return sig
 
 
@@ -178,8 +216,14 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
     remaining = []
     for it in assigned_items or []:
         row = dict(it)
-        assigned_qty = float(row.get("quantity") or 0)
         k = _key(row.get("part_no"), row.get("make"))
+        if row.get("quantity") is None:
+            # Open line: the store incharge's picked quantity IS the quantity, so any
+            # pick resolves it. Untouched open lines carry over still open.
+            if picked.get(k, 0) <= 1e-6:
+                remaining.append(row)
+            continue
+        assigned_qty = float(row.get("quantity") or 0)
         rem = max(0, assigned_qty - picked.get(k, 0))
         if rem > 1e-6:
             row["quantity"] = rem
@@ -235,6 +279,62 @@ async def stock_out(payload: StockOutCreate, user=Depends(get_current_user)):
         return doc
     finally:
         await db.stock_out_locks.delete_one({"_id": lock_key, "direct_stock_out": True})
+
+
+@router.get("/stock-out-types")
+async def list_stock_out_types(user=Depends(get_current_user)):
+    """Master list of Issue Note classifications. Seeded once with the common defaults
+    (Sale / Transfer / Return); users add their own from the Issue Note form."""
+    rows = await db.stock_out_types.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    if not rows:
+        seed = [
+            {"id": str(uuid.uuid4()), "name": n, "created_at": now_iso(), "created_by": "system"}
+            for n in DEFAULT_STOCK_OUT_TYPES
+        ]
+        try:
+            await db.stock_out_types.insert_many(seed)
+        except DuplicateKeyError:
+            pass  # another request seeded first — just re-read below
+        rows = await db.stock_out_types.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    return rows
+
+
+@router.post("/stock-out-types", response_model=StockOutType)
+async def create_stock_out_type(payload: StockOutTypeCreate, user=Depends(get_current_user)):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Type name is required")
+    existing = await db.stock_out_types.find_one(
+        {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}, {"_id": 0}
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail=f"'{existing['name']}' already exists")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "created_at": now_iso(),
+        "created_by": user.get("email", ""),
+    }
+    await db.stock_out_types.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.delete("/stock-out-types/{type_id}")
+async def delete_stock_out_type(type_id: str, user=Depends(get_current_user)):
+    existing = await db.stock_out_types.find_one({"id": type_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Stock out type not found")
+    # Deleting a type that notes already reference would leave those notes pointing at
+    # a value nobody can pick again — exactly the inconsistency this master list avoids.
+    in_use = await db.issue_notes.find_one({"stock_out_type": existing["name"]}, {"_id": 0, "in_no": 1})
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete '{existing['name']}' — it is used by {in_use.get('in_no')} and possibly others",
+        )
+    await db.stock_out_types.delete_one({"id": type_id})
+    return {"ok": True}
 
 
 @router.get("/issue-notes/lookup/{part_no}")
@@ -315,6 +415,7 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
     _validate_issue_items(payload.items)
     await _validate_issue_qty_against_stock(payload.items)
     stored_items = await _issue_items_for_storage(payload.items)
+    stock_out_type = await _register_stock_out_type(payload.stock_out_type, user)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     is_draft = bool(payload.save_as_draft)
     today = datetime.now(timezone.utc)
@@ -329,6 +430,10 @@ async def create_issue_note(payload: IssueNoteCreate, user=Depends(get_current_u
             "in_date": today.date().isoformat(),
             "fy": fy,
             "serial": serial,
+            "stock_out_type": stock_out_type,
+            "reference_doc_name": (payload.reference_doc_name or "").strip(),
+            "reference_doc_date": (payload.reference_doc_date or "").strip(),
+            "reference_doc_no": (payload.reference_doc_no or "").strip(),
             "items": stored_items,
             "status": "DRAFT" if is_draft else "PENDING",
             "narration": (payload.narration or "").strip(),
@@ -479,6 +584,10 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     items_changed = _issue_qty_signature(existing.get("items", [])) != _issue_qty_signature(stored_items)
     assignee = await _resolve_assignee(payload.assigned_to_user_id, "stock_out")
     update = {
+        "stock_out_type": await _register_stock_out_type(payload.stock_out_type, user),
+        "reference_doc_name": (payload.reference_doc_name or "").strip(),
+        "reference_doc_date": (payload.reference_doc_date or "").strip(),
+        "reference_doc_no": (payload.reference_doc_no or "").strip(),
         "items": stored_items,
         "narration": (payload.narration or "").strip(),
         "updated_at": now_iso(),
@@ -565,18 +674,22 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
     for it in base_items:
         part_no = it.get("part_no", "")
         make = it.get("make", "")
-        pending = it.get("quantity", 0) or 0
+        is_open = it.get("quantity") is None
+        pending = 0 if is_open else (it.get("quantity", 0) or 0)
         selected_godown_id = it.get("selected_godown_id") or ""
-        if pending <= 0:
+        if not is_open and pending <= 0:
             continue
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         available_locations = await _stock_locations_for(part_no, make)
-        allocation = await _allocate_locations_for(part_no, make, pending, selected_godown_id)
+        # An open line has no quantity to allocate — the picker chooses the location and
+        # the amount, bounded only by what is actually on the shelf.
+        allocation = [] if is_open else await _allocate_locations_for(part_no, make, pending, selected_godown_id)
         allocated_qty = sum(a["quantity"] for a in allocation)
         common = {
             "part_no": part_no, "make": make,
-            "requested_qty": pending,
-            "pending_qty": pending,
+            "open_quantity": is_open,
+            "requested_qty": None if is_open else pending,
+            "pending_qty": None if is_open else pending,
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -595,7 +708,21 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
                 "rack_id": a["rack_id"], "rack_no": a["rack_no"],
                 "box_id": a["box_id"], "box_no": a["box_no"], "box_category": a.get("box_category", ""),
             })
-        if allocated_qty + 1e-6 < pending:
+        if is_open:
+            # One blank row, pre-pointed at the godown preference if the office set one
+            # (and it still holds stock) — quantity and final location are the picker's.
+            preferred = next(
+                (L for L in available_locations if selected_godown_id and L.get("godown_id") == selected_godown_id),
+                None,
+            )
+            items_out.append({
+                **common, "quantity": "", "allocated_qty": 0, "suggested": False,
+                "godown_id": (preferred or {}).get("godown_id", ""), "godown_name": (preferred or {}).get("godown_name", ""),
+                "rack_id": (preferred or {}).get("rack_id", ""), "rack_no": (preferred or {}).get("rack_no", ""),
+                "box_id": (preferred or {}).get("box_id", ""), "box_no": (preferred or {}).get("box_no", ""),
+                "box_category": (preferred or {}).get("box_category", ""),
+            })
+        elif allocated_qty + 1e-6 < pending:
             # Stock fell short of the greedily-suggested quantity since the Issue Note
             # was created/edited (e.g. concurrent consumption elsewhere) — surface the
             # gap as an unfilled row; the picker can reject it or pick it from another

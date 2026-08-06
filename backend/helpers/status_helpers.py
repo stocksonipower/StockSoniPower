@@ -227,8 +227,15 @@ async def _recompute_in_status(in_id: str):
     if inn.get("status") == "DRAFT":
         return
     requested = {}
+    open_keys = set()
     for it in inn.get("items", []):
         k = _key(it.get("part_no"), it.get("make"))
+        if it.get("quantity") is None:
+            # Open line (quantity left to the store incharge) — no target number to
+            # reach, so it counts as resolved once anything is picked/rejected for it.
+            open_keys.add(k)
+            requested.setdefault(k, 0)
+            continue
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
     processed = {}
     async for pn in db.picking_notes.find({"issue_note_id": in_id}, {"_id": 0, "items": 1, "status": 1}):
@@ -238,9 +245,11 @@ async def _recompute_in_status(in_id: str):
                 k = _key(it.get("part_no"), it.get("make"))
                 processed[k] = processed.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
     has_processed = any(v > 1e-6 for v in processed.values())
+    quantified_done = all(processed.get(k, 0) + 1e-6 >= q for k, q in requested.items() if k not in open_keys and q > 0)
+    open_done = all(processed.get(k, 0) > 1e-6 for k in open_keys)
     if not requested:
         new_status = "PENDING"
-    elif has_processed and all(processed.get(k, 0) + 1e-6 >= q for k, q in requested.items() if q > 0):
+    elif has_processed and quantified_done and open_done:
         new_status = "COMPLETE"
     elif has_processed:
         new_status = "IN_PROCESS"

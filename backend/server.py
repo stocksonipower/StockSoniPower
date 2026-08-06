@@ -150,6 +150,12 @@ async def startup():
     await db.issue_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
     await db.issue_notes.create_index("created_at")
     await db.issue_notes.create_index("status")
+    await db.stock_out_types.create_index("id", unique=True)
+    # Case-insensitive unique name: the master list exists so "Sale" and "sale" can
+    # never become two different types.
+    await db.stock_out_types.create_index(
+        "name", unique=True, collation={"locale": "en", "strength": 2},
+    )
     await db.picking_notes.create_index("id", unique=True)
     await db.picking_notes.create_index([("fy", 1), ("serial", 1)], unique=True)
     await db.picking_notes.create_index("created_at")

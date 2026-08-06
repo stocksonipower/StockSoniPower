@@ -213,8 +213,15 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
+    open_keys = set()
     for it in (assigned_items if assigned_items is not None else inn.get("items", [])):
         k = _key(it.get("part_no"), it.get("make"))
+        if it.get("quantity") is None:
+            # Open line — quantity is the store incharge's call, so the only ceiling is
+            # real stock availability (checked per-location below).
+            open_keys.add(k)
+            requested.setdefault(k, 0)
+            continue
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
     other_sums = {} if assigned_items is not None else await _pick_aggregate_other(in_id, exclude_pn_id)
 
@@ -231,6 +238,8 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
     # 1. cumulative qty — picked + rejected together cannot exceed what was requested
     for k, new_q in new_sums.items():
+        if k in open_keys:
+            continue
         recv = requested.get(k, 0)
         used = other_sums.get(k, 0)
         if used + new_q > recv + 1e-6:
@@ -260,6 +269,9 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
 
 
 def _validate_issue_items(items):
+    """Quantity is optional on an Issue Note: the office user often cannot predict how
+    much a godown package holds, so a blank ("open") quantity is allowed and gets filled
+    in by the store incharge on the Picking Note. A stated quantity must still be > 0."""
     if not items:
         raise HTTPException(status_code=400, detail="At least one item is required")
     for idx, it in enumerate(items, start=1):
@@ -267,8 +279,8 @@ def _validate_issue_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
+        if it.quantity is not None and it.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0 (leave it blank to let the store incharge decide)")
 
 
 async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] = None):
@@ -278,6 +290,10 @@ async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] 
     req = {}
     req_by_godown = {}
     for it in items:
+        # Open (blank) quantities claim nothing up front — there is no number to check
+        # against stock yet; the real check happens per-location at picking time.
+        if it.quantity is None:
+            continue
         k = _key(it.part_no, it.make)
         req[k] = req.get(k, 0) + (it.quantity or 0)
         gid = (getattr(it, "selected_godown_id", None) or "").strip()
