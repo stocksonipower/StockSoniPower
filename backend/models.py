@@ -388,6 +388,11 @@ class RackingNote(BaseModel):
 class IssueNoteItem(BaseModel):
     part_no: str
     make: str
+    # 1-based position of this line on the note, assigned at save time. The same
+    # part/make may legitimately appear on several lines (e.g. 15 for one purpose and 5
+    # for another), so part+make alone cannot identify a line — picking rows carry this
+    # through to stay mapped to the exact line they were raised against.
+    line_no: Optional[int] = None
     # None = "open quantity": the office user could not predict how much a godown
     # package actually holds, so the store incharge fills it in on the Picking Note.
     # An open line is uncapped (bounded only by real stock) and is resolved as soon
@@ -473,7 +478,10 @@ class IssueNote(BaseModel):
 class PickingNoteItem(BaseModel):
     part_no: str
     make: str
-    quantity: float  # picked qty (physically issued)
+    # Which Issue Note line this row picks against (see IssueNoteItem.line_no). Kept so
+    # two lines of the same part/make never merge into one picking row.
+    line_no: Optional[int] = None
+    quantity: float  # picked qty (physically issued); 0 = this line was left unpicked
     model: Optional[str] = ""
     old_part_no: Optional[str] = ""
     make_part_no: Optional[str] = ""
@@ -489,8 +497,9 @@ class PickingNoteItem(BaseModel):
     box_id: Optional[str] = ""
     box_no: Optional[str] = ""
     box_category: Optional[str] = ""
-    # Partial-picking-with-rejection (does not move stock; resolves the request
-    # without a follow-up pick). quantity + rejected_qty <= requested qty.
+    # Legacy: rejection is no longer captured on the Picking Note (the picker simply
+    # picks what is actually there). Kept so historical notes still deserialize and
+    # their recorded values keep showing in read-only views.
     rejected_qty: Optional[float] = 0
     rejection_reason: Optional[str] = ""
 

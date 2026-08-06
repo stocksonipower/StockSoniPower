@@ -23,11 +23,21 @@ import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
-import { buildStandardPrintHtml, openPrintWindow, formatLocationText } from "../lib/printDocument";
+import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
 const NO_GODOWN = "__NO_GODOWN__";
-const REJECTION_REASONS = ["Not Available", "Damaged", "Expired", "Wrong Specification", "Other"];
+// Stock can legitimately sit in a godown with no rack and/or no box (racking is not
+// mandatory everywhere). Radix rejects an empty SelectItem value, so those levels get a
+// sentinel key. `rack_sel`/`box_sel` on a row hold the chosen key, which is what tells
+// "(no rack) was chosen" apart from "nothing chosen yet" — both have rack_id === "".
+const NO_RACK = "__NO_RACK__";
+const NO_BOX = "__NO_BOX__";
+
+function locSelKeys(row) {
+  if (!row.godown_id) return { rack_sel: "", box_sel: "" };
+  return { rack_sel: row.rack_id || NO_RACK, box_sel: row.box_id || NO_BOX };
+}
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -84,11 +94,12 @@ function pickingNoteStatusLabel(status) {
   return "Draft";
 }
 
-// Location-aware key (part+make+godown+rack+box) — a part/make can legitimately have
-// multiple picking rows now (one per authorized location), so matching saved rows back
-// to freshly-prepared ones needs the full location, not just part/make.
+// Row identity for matching saved picking rows back to freshly-prepared ones: the Issue
+// Note LINE plus the full location. Line first, because the same part/make can appear on
+// several lines (15 for one purpose, 5 for another) at the very same location — keying on
+// part/make/location alone would merge them into one row and lose a line.
 function pickingLocKey(it) {
-  return `${it.part_no || ""}||${it.make || ""}||${it.godown_id || ""}||${it.rack_id || ""}||${it.box_id || ""}`;
+  return `${it.line_no ?? ""}||${it.part_no || ""}||${it.make || ""}||${it.godown_id || ""}||${it.rack_id || ""}||${it.box_id || ""}`;
 }
 
 // Location-only key (no part/make) — `available_locations` entries are already
@@ -102,16 +113,57 @@ function pickingAssignedItems(pn) {
   return (pn.assigned_items || []).length ? (pn.assigned_items || []) : (pn.requested_items || []);
 }
 
+// Where stock was ACTUALLY picked from, per part/make, out of the completed Picking
+// Notes. The Issue Note only ever held a suggested allocation; once the store incharge
+// resolves the real godown/rack/box, that supersedes the suggestion everywhere the
+// Issue Note is shown or printed.
+function issueActualLocations(pickingHistory = []) {
+  const m = {};
+  (pickingHistory || []).forEach((pn) => {
+    if (!(pn.status === "COMPLETED" || pn.status === "RECORDED")) return;
+    (pn.items || []).forEach((it) => {
+      const qty = parseFloat(it.quantity) || 0;
+      if (qty <= 0) return;
+      const k = pickingKey(it);
+      (m[k] = m[k] || []).push({
+        godown_name: it.godown_name || "", rack_no: it.rack_no || "",
+        box_no: it.box_no || "", quantity: qty,
+      });
+    });
+  });
+  return m;
+}
+
+// Requested qty for a picking row, from the Issue Note assignment carried on the Picking
+// Note. Resolved per LINE so two lines of the same part/make keep their own numbers;
+// rows saved before line numbers existed fall back to the part/make total. `null` = the
+// office left the quantity open, which every view renders as blank rather than 0.
+function pickingRequestedLookup(pn) {
+  const byLine = {};
+  const byKey = {};
+  // Notes saved before line numbers existed get them by position — the same fallback
+  // `prepare_picking_note` applies, so both sides agree on which line is which.
+  pickingAssignedItems(pn).forEach((it, i) => {
+    const line = it.line_no ?? (i + 1);
+    const k = pickingKey(it);
+    if (it.quantity == null) {
+      byLine[line] = null;
+      if (!(k in byKey)) byKey[k] = null;
+      return;
+    }
+    const q = parseFloat(it.quantity) || 0;
+    byLine[line] = (byLine[line] || 0) + q;
+    byKey[k] = (byKey[k] || 0) + q;
+  });
+  return (row) => (row?.line_no != null && row.line_no in byLine ? byLine[row.line_no] : byKey[pickingKey(row)]);
+}
+
 function pickingAssignedQty(pn) {
   return pickingAssignedItems(pn).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
 }
 
 function pickingPickedQty(pn) {
   return (pn.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
-}
-
-function pickingRejectedQty(pn) {
-  return (pn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
 }
 
 function pickingDisplayItems(pn) {
@@ -129,8 +181,9 @@ function pickingDisplayCount(pn) {
   return pickingDisplayItems(pn).length || pn.requested_items_count || (pn.requested_items || []).length || 0;
 }
 
-// Picking Note print columns: Sr, Part No, Item, Rack, Picked Qty, Rejected Qty, Picker, Remarks
+// Picking Note print columns: Sr, Part No, Item, Godown, Rack, Box, Requested Qty, Picked Qty, Picker
 function printPickingNote(pn) {
+  const requestedFor = pickingRequestedLookup(pn);
   const rows = pickingDisplayItems(pn).map((it, idx) => [
     String(idx + 1),
     htmlEscape(it.part_no),
@@ -138,10 +191,9 @@ function printPickingNote(pn) {
     htmlEscape(it.godown_name || "—"),
     htmlEscape(it.rack_no || "—"),
     htmlEscape(it.box_no || "—"),
+    `<span style="text-align:right;display:block">${htmlEscape(requestedFor(it) ?? "")}</span>`,
     `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
-    `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(it.rejected_qty || "—")}</span>`,
     htmlEscape(pn.created_by || "—"),
-    htmlEscape(it.rejection_reason || "—"),
   ]);
   const html = buildStandardPrintHtml({
     docTitle: "Picking Note",
@@ -157,14 +209,14 @@ function printPickingNote(pn) {
     fieldsRight: [
       ["Assigned To", pn.parent_assigned_to_name || pn.parent_assigned_to_email || "—"],
       ["Picker", pn.created_by || "—"],
+      ["Requested Qty", pickingAssignedQty(pn) || "—"],
       ["Picked Qty", pickingPickedQty(pn)],
-      ["Rejected Qty", pickingRejectedQty(pn)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part No" }, { label: "Item" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
-      { label: "Picked Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
-      { label: "Picker" }, { label: "Remarks" },
+      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" },
+      { label: "Picker" },
     ],
     rows,
     printedBy: pn.created_by,
@@ -172,24 +224,26 @@ function printPickingNote(pn) {
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
-// Issue Note print columns: Sr, Part Number, Item Name, Make, Requested Qty, Picked Qty, Rejected Qty, Unit, Remarks
+// Issue Note print columns: Sr, Part Number, Item Name, Make, Godown, Rack, Box, Requested Qty, Picked Qty
 function printIssueNote(inn, pickingHistory = []) {
+  // Picked quantity is derived live from the completed Picking Notes, so a corrected
+  // pick is reflected here the next time the note is printed — nothing is snapshotted.
   const processedByKey = {};
   pickingHistory.forEach((pn) => {
     if (!(pn.status === "COMPLETED" || pn.status === "RECORDED")) return;
     (pn.items || []).forEach((it) => {
       const k = pickingKey(it);
-      const cur = processedByKey[k] || { picked: 0, rejected: 0, reasons: new Set() };
+      const cur = processedByKey[k] || { picked: 0 };
       cur.picked += parseFloat(it.quantity) || 0;
-      cur.rejected += parseFloat(it.rejected_qty) || 0;
-      if (it.rejection_reason) cur.reasons.add(it.rejection_reason);
       processedByKey[k] = cur;
     });
   });
+  const actualLocs = issueActualLocations(pickingHistory);
   const rows = [];
   (inn.items || []).forEach((it, idx) => {
-    const p = processedByKey[pickingKey(it)] || { picked: 0, rejected: 0, reasons: new Set() };
-    const locs = it.allocated_locations || [];
+    const p = processedByKey[pickingKey(it)] || { picked: 0 };
+    // Actual pick locations win over the planned allocation once picking has happened.
+    const locs = actualLocs[pickingKey(it)] || it.allocated_locations || [];
     const base = (showItem, godownCell, rackCell, boxCell) => [
       String(idx + 1),
       showItem ? htmlEscape(it.part_no) : "",
@@ -198,8 +252,6 @@ function printIssueNote(inn, pickingHistory = []) {
       godownCell, rackCell, boxCell,
       showItem ? `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "Open")}</span>` : "",
       showItem ? `<span style="text-align:right;display:block">${htmlEscape(p.picked || "—")}</span>` : "",
-      showItem ? `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>` : "",
-      showItem ? htmlEscape([...p.reasons].join(", ") || "—") : "",
     ];
     if (locs.length === 0) {
       rows.push(base(true, "—", "—", "—"));
@@ -229,8 +281,7 @@ function printIssueNote(inn, pickingHistory = []) {
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
-      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
-      { label: "Remarks" },
+      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" },
     ],
     rows,
     narration: inn.narration || "",
@@ -257,6 +308,7 @@ function buildPickingEditItems(editing, preparedItems) {
       const open = !!openByItemKey[k];
       return {
       ...it,
+      ...locSelKeys(it),
       row_status: editing?.status === "RECORDED" ? "Picked" : "Draft Pick",
       open_quantity: open,
       pending_qty: open ? null : (p.pending_qty ?? it.pending_qty ?? 0),
@@ -267,7 +319,7 @@ function buildPickingEditItems(editing, preparedItems) {
       };
     });
   }
-  return (preparedItems || []).map((it) => ({ ...it, row_status: "Assigned" }));
+  return (preparedItems || []).map((it) => ({ ...it, ...locSelKeys(it), row_status: "Assigned" }));
 }
 
 /* ==============================================================
@@ -517,6 +569,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
 
 function IssueNoteDetailDialog({ inn, onClose }) {
   const [history, setHistory] = useState([]);
+  const actualLocs = useMemo(() => issueActualLocations(history), [history]);
 
   useEffect(() => {
     if (!inn?.id) {
@@ -578,7 +631,9 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                   </thead>
                   <tbody>
                     {(inn.items || []).flatMap((it, idx) => {
-                      const locs = it.allocated_locations || [];
+                      // Same rule as the print: show where stock was actually picked
+                      // from once picking is done, else the planned allocation.
+                      const locs = actualLocs[pickingKey(it)] || it.allocated_locations || [];
                       if (locs.length === 0) {
                         return [(
                           <tr key={`${idx}-none`}>
@@ -618,7 +673,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
               <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Picking History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">ASSIGNED</th><th className="text-center">PICKED</th><th className="text-center">REJECTED</th><th>STATUS</th></tr>
+                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">REQUESTED</th><th className="text-center">PICKED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.serial || 0) - (b.serial || 0)).map((pn) => {
@@ -628,9 +683,8 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                       <tr key={pn.id}>
                         <td className="font-mono font-semibold">{pn.pn_no}</td>
                         <td className="font-mono">{parent?.pn_no || "—"}</td>
-                        <td className="text-center font-mono font-bold">{pickingAssignedQty(pn)}</td>
+                        <td className="text-center font-mono font-bold">{pickingAssignedQty(pn) || "—"}</td>
                         <td className="text-center font-mono font-bold">{pickingPickedQty(pn)}</td>
-                        <td className="text-center font-mono font-bold text-red-700">{pickingRejectedQty(pn) || "—"}</td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${label === "Completed" ? "bg-green-100 text-green-800" : (label === "Pending" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
                             {label}
@@ -640,7 +694,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                     );
                   })}
                   {history.length === 0 && (
-                    <tr><td colSpan={6} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
+                    <tr><td colSpan={5} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1579,16 +1633,17 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     finally { setRecordingId(null); }
   };
 
+  // Header labels stay in full form — the column widths below are sized to fit them on
+  // one line rather than the labels being shortened to fit the columns.
   const columns = useMemo(() => [
     { key: "pn_date", label: "PICKING NOTE DATE", value: (r) => fmtDate(r.pn_date) },
     { key: "pn_no", label: "PICKING NOTE NO", value: (r) => r.pn_no || "" },
     { key: "in_date", label: "ISSUE NOTE DATE", value: (r) => fmtDate(r.issue_note_date) },
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
     { key: "parent_assigned_to_name", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || "" },
-    { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r),},
-    { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r)},
-    { key: "picked_qty", label: "PICKED", value: (r) => pickingPickedQty(r)},
-    { key: "rejected_qty", label: "REJECTED", value: (r) => pickingRejectedQty(r)},
+    { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r), isQty: true, isNumeric: true },
+    { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r), isQty: true, isNumeric: true },
+    { key: "picked_qty", label: "PICKED", value: (r) => pickingPickedQty(r), isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: (r) => pickingNoteStatusLabel(r.status) },
   ], []);
   const {
@@ -1651,13 +1706,29 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
   </div>
 </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
-        <table className="data-table w-full">
+      {/* Column widths are cut to fit each full header label on one line — nothing is
+          clipped or abbreviated. The page scrolls normally; only the horizontal
+          overflow is handled here. */}
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto" data-testid="pn-scroller">
+        <table className="data-table data-table-fixed w-full min-w-[1400px]">
+          <colgroup>
+            <col style={{ width: "70px" }} />
+            <col style={{ width: "176px" }} />
+            <col style={{ width: "160px" }} />
+            <col style={{ width: "160px" }} />
+            <col style={{ width: "144px" }} />
+            <col />
+            <col style={{ width: "84px" }} />
+            <col style={{ width: "110px" }} />
+            <col style={{ width: "94px" }} />
+            <col style={{ width: "94px" }} />
+            <col style={{ width: "132px" }} />
+          </colgroup>
           <thead>
             <tr>
-              <th className="w-16 whitespace-nowrap">SL NO</th>
+              <th>SL NO</th>
               {columns.map((c) => (
-                <th key={c.key} className={c.isQty ? "text-center" : ""}>
+                <th key={c.key} className={c.isQty ? "!text-center" : ""}>
                   <ExcelColumnFilter
                     label={c.label}
                     values={uniqueValues[c.key] || []}
@@ -1677,7 +1748,6 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             {filteredRows.map((r, idx) => {
               const totalQty = pickingAssignedQty(r);
               const pickedQty = pickingPickedQty(r);
-              const rejectedQty = pickingRejectedQty(r);
               const recorded = r.status === "RECORDED" || r.status === "COMPLETED";
               const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
@@ -1691,7 +1761,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                 : (pending ? "Open Picking and save a draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out"));
               const recordDisabled = lock || pending || recordingId === r.id;
               return (
-                <tr key={r.id} data-testid={`pn-row-${r.pn_no}`}>
+                <tr key={r.id} data-testid={`pn-row-${r.pn_no}`} className="transition-colors duration-100">
                   <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
                   <td>
@@ -1699,36 +1769,37 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   </td>
                   <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
                   <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
-                  <td className="text-slate-700">{r.parent_assigned_to_name || "—"}</td>
-                  <td className="font-mono text-slate-600">{pickingDisplayCount(r)}</td>
-                  <td className="font-mono font-bold text-slate-900">{totalQty}</td>
-                  <td className="font-mono font-bold text-slate-900">{pickedQty}</td>
-                  <td className="font-mono font-bold text-red-700">{rejectedQty || "—"}</td>
+                  <td className="text-slate-700 truncate" title={r.parent_assigned_to_name || ""}>{r.parent_assigned_to_name || "—"}</td>
+                  <td className="font-mono text-slate-600 tabular-nums text-center">{pickingDisplayCount(r)}</td>
+                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{totalQty || "—"}</td>
+                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{pickedQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`pn-status-${r.pn_no}`}>
                       {recorded ? "Completed" : (pending ? "Pending" : "Draft")}
                     </span>
                   </td>
-                  <td className="text-left whitespace-nowrap">
-                    <button onClick={() => onEdit(r)} disabled={lock}
-                      title={editTitle}
-                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
-                      data-testid={`pn-edit-${r.pn_no}`}>
-                      <Pencil size={14} />
-                    </button>
-                    <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
-                      title={recordTitle}
-                      className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
-                      data-testid={`pn-record-${r.pn_no}`}>
-                      <CheckCircle size={12} weight="bold" className="mr-1" />
-                      {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record Stock Out")}
-                    </Button>
+                  <td>
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => onEdit(r)} disabled={lock}
+                        title={editTitle}
+                        className={`p-1.5 rounded-sm shrink-0 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                        data-testid={`pn-edit-${r.pn_no}`}>
+                        <Pencil size={14} />
+                      </button>
+                      <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
+                        title={recordTitle}
+                        className={`rounded-sm h-7 text-[11px] px-2 shrink-0 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                        data-testid={`pn-record-${r.pn_no}`}>
+                        <CheckCircle size={12} weight="bold" className="mr-1" />
+                        {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record")}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={12} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending picking notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending picking notes." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -1738,6 +1809,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
 }
 
 function PickingNoteDetailDialog({ pn, onClose }) {
+  const requestedFor = pn ? pickingRequestedLookup(pn) : () => null;
   return (
     <Dialog open={!!pn} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="pn-detail-dialog">
@@ -1770,7 +1842,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
               <div className="label-sm mb-2">Items ({pickingDisplayItems(pn).length})</div>
               <div className="overflow-x-auto">
                 <table className="data-table w-full text-xs">
-                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">PICKED QTY</th><th className="text-center">REJECTED QTY</th><th>REASON</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
+                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">REQUESTED QTY</th><th className="text-center">PICKED QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
                   <tbody>
                     {pickingDisplayItems(pn).map((it, idx) => (
                       <tr key={idx}>
@@ -1779,9 +1851,8 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                         <td>{it.make}</td>
                         <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                         <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
+                        <td className="text-center font-mono font-bold text-slate-600">{requestedFor(it) ?? ""}</td>
                         <td className="text-center font-mono font-bold">{it.quantity}</td>
-                        <td className="text-center font-mono font-bold text-red-700">{it.rejected_qty || "—"}</td>
-                        <td className="font-mono text-slate-600">{it.rejection_reason || "—"}</td>
                         <td className="font-mono">{it.godown_name || "—"}</td>
                         <td className="font-mono">{it.rack_no || "—"}</td>
                         <td className="font-mono">{it.box_no || "—"}</td>
@@ -1824,7 +1895,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
         .then((r) => {
           setItems(buildPickingEditItems(editing, r.data.items || []));
         }).catch(() => setItems((editing.items || []).map((it) => ({
-          ...it, pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0,
+          ...it, ...locSelKeys(it), pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0,
           // Prepare failed — fall back to a single-option location list so the
           // dropdown/qty editing still works using the row's already-stored location.
           available_locations: it.godown_id ? [{
@@ -1848,25 +1919,109 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     setAssignedToName(inn?.assigned_to_name || "");
     try {
       const { data } = await api.get(`/picking-notes/prepare/${id}`);
-      setItems((data.items || []).map((it) => ({ ...it, row_status: "Assigned" })));
+      setItems((data.items || []).map((it) => ({ ...it, ...locSelKeys(it), row_status: "Assigned" })));
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not prepare items"); }
   };
 
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
 
-  // A row's location is a SUGGESTION, not a lock: switching the dropdown re-points
-  // this row at any other location currently holding stock for the same part/make.
-  const onLocationSelect = (i, locKeyValue) => {
-    const row = items[i];
-    const loc = (row.available_locations || []).find((L) => locOnlyKey(L) === locKeyValue);
-    if (!loc) return;
-    updateItem(i, {
-      godown_id: loc.godown_id || "", godown_name: loc.godown_name || "",
-      rack_id: loc.rack_id || "", rack_no: loc.rack_no || "",
-      box_id: loc.box_id || "", box_no: loc.box_no || "",
-      box_category: loc.box_category || "",
+  // The Issue Note's godown preference is a SUGGESTION, not a lock: the picker resolves
+  // the real location here, one level at a time, from whatever currently holds stock for
+  // this part/make. Whatever is chosen is what gets recorded, printed and previewed.
+  const godownOptions = (row) => {
+    const seen = new Set();
+    return (row.available_locations || []).filter((L) => {
+      const id = L.godown_id || "";
+      if (!id || seen.has(id)) return false;   // stock with no godown can't be picked
+      seen.add(id);
+      return true;
     });
   };
+  const rackOptions = (row) => {
+    const seen = new Set();
+    return (row.available_locations || [])
+      .filter((L) => (L.godown_id || "") === (row.godown_id || ""))
+      .filter((L) => {
+        const id = L.rack_id || "";
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+  };
+  const boxOptions = (row) => (row.available_locations || []).filter(
+    (L) => (L.godown_id || "") === (row.godown_id || "") && (L.rack_id || "") === (row.rack_id || ""),
+  );
+
+  // There is nothing to choose when the only thing on offer is "none" — a godown with no
+  // racking, or a rack with no boxes. Those cells render as a plain "—" instead of a
+  // dropdown that demands an answer the warehouse cannot give.
+  const rackChoiceExists = (row) => {
+    const opts = rackOptions(row);
+    return opts.length > 1 || opts.some((L) => L.rack_id);
+  };
+  const boxChoiceExists = (row) => {
+    const opts = boxOptions(row);
+    return opts.length > 1 || opts.some((L) => L.box_id);
+  };
+
+  // Picking a level clears everything below it, then auto-resolves any level that has
+  // only one possible answer — so a single-rack/single-box godown needs just one click.
+  const onGodownSelect = (i, godownId) => {
+    const row = items[i];
+    const patch = {
+      godown_id: godownId,
+      godown_name: (row.available_locations || []).find((L) => L.godown_id === godownId)?.godown_name || "",
+      rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "",
+      rack_sel: "", box_sel: "", quantity: "",
+    };
+    const racks = rackOptions({ ...row, godown_id: godownId });
+    if (racks.length === 1) {
+      patch.rack_id = racks[0].rack_id || "";
+      patch.rack_no = racks[0].rack_no || "";
+      patch.rack_sel = racks[0].rack_id || NO_RACK;
+      const boxes = boxOptions({ ...row, godown_id: godownId, rack_id: racks[0].rack_id });
+      if (boxes.length === 1) {
+        patch.box_id = boxes[0].box_id || "";
+        patch.box_no = boxes[0].box_no || "";
+        patch.box_category = boxes[0].box_category || "";
+        patch.box_sel = boxes[0].box_id || NO_BOX;
+      }
+    }
+    updateItem(i, patch);
+  };
+  const onRackSelect = (i, rackKey) => {
+    const row = items[i];
+    const rack = rackOptions(row).find((L) => (L.rack_id || NO_RACK) === rackKey);
+    if (!rack) return;
+    const patch = {
+      rack_id: rack.rack_id || "", rack_no: rack.rack_no || "", rack_sel: rackKey,
+      box_id: "", box_no: "", box_category: "", box_sel: "", quantity: "",
+    };
+    const boxes = boxOptions({ ...row, rack_id: rack.rack_id || "" });
+    if (boxes.length === 1) {
+      patch.box_id = boxes[0].box_id || "";
+      patch.box_no = boxes[0].box_no || "";
+      patch.box_category = boxes[0].box_category || "";
+      patch.box_sel = boxes[0].box_id || NO_BOX;
+    }
+    updateItem(i, patch);
+  };
+  const onBoxSelect = (i, boxKey) => {
+    const row = items[i];
+    const box = boxOptions(row).find((L) => (L.box_id || NO_BOX) === boxKey);
+    if (!box) return;
+    updateItem(i, {
+      box_id: box.box_id || "", box_no: box.box_no || "",
+      box_category: box.box_category || "", box_sel: boxKey,
+    });
+  };
+
+  // A row is pickable only once all three levels have been chosen AND they resolve to a
+  // real stock location.
+  const locationResolved = (row) => (
+    !!row.godown_id && !!row.rack_sel && !!row.box_sel
+    && (row.available_locations || []).some((L) => locOnlyKey(L) === locOnlyKey(row))
+  );
 
   // Split an item across another location: append a fresh row for the same part/make
   // (qty starts blank) so the picker can partially pick the suggestion and take the
@@ -1876,8 +2031,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     setItems((prev) => {
       const copy = [...prev];
       copy.splice(i + 1, 0, {
-        ...row, quantity: "", rejected_qty: "", rejection_reason: "",
+        ...row, quantity: "",
         godown_id: "", godown_name: "", rack_id: "", rack_no: "", box_id: "", box_no: "", box_category: "",
+        rack_sel: "", box_sel: "",
         row_status: "Assigned", allocated_qty: 0, suggested: false, manual: true,
       });
       return copy;
@@ -1885,27 +2041,11 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   };
   const removeLocationRow = (i) => setItems((prev) => prev.filter((_, idx) => idx !== i));
 
-  // Cumulative (picked + rejected) per part/make across every row, and what was
-  // actually requested — mirrors the backend's aggregate check so the picker sees the
-  // same constraint before submitting, regardless of how many locations they split across.
-  // `null` = open line (the Issue Note left the quantity to the store incharge) — no
-  // ceiling beyond real stock, which `availableAtRow` already enforces.
-  const requestedByItemKey = useMemo(() => {
-    const m = {};
-    items.forEach((r) => {
-      const k = pickingKey(r);
-      if (!(k in m)) m[k] = r.open_quantity ? null : (r.requested_qty || 0);
-    });
-    return m;
-  }, [items]);
-  const processedByItemKey = useMemo(() => {
-    const m = {};
-    items.forEach((r) => {
-      const k = pickingKey(r);
-      m[k] = (m[k] || 0) + (parseInt(r.quantity) || 0) + (parseInt(r.rejected_qty) || 0);
-    });
-    return m;
-  }, [items]);
+  // What the Issue Note asked for on THIS row's line — reference only, and per line so
+  // two lines of the same part keep their own 15 and 5 instead of sharing one number. It
+  // is a target, not a limit: the picker may take more or less. `null` = open line (the
+  // office left the quantity to the store incharge), displayed blank.
+  const rowRequested = (row) => (row.open_quantity ? null : (row.requested_qty ?? null));
   // Live "available here" per row, netting out what other rows in this same form
   // already claim at the identical location (server does the authoritative check).
   const availableAtRow = (row, idx) => {
@@ -1918,33 +2058,41 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     return Math.max(0, (loc.current_qty || 0) - claimedElsewhere);
   };
 
+  // Picked Qty is clamped to what is physically at the chosen location — the picker may
+  // freely go above or below the requested quantity, but never above real stock.
+  const onPickedQtyChange = (idx, raw) => {
+    if (raw === "") { updateItem(idx, { quantity: "" }); return; }
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 0) return;
+    const cap = availableAtRow(items[idx], idx);
+    updateItem(idx, { quantity: String(Math.min(n, cap)) });
+  };
+
   const save = async () => {
     if (!selectedInId) { toast.error("Select an Issue Note"); return; }
     if (items.length === 0) { toast.error("No items to pick"); return; }
-    const pickRows = items.filter((it) => (parseInt(it.quantity) || 0) > 0 || (parseInt(it.rejected_qty) || 0) > 0);
-    if (pickRows.length === 0) { toast.error("Confirm at least one Picked Qty or Rejected Qty"); return; }
+    // Every Issue Note line is sent, including any picked as 0 — a 0 is a real answer
+    // ("this line was covered elsewhere / not taken") and the row must survive the save
+    // instead of collapsing away. Only empty manual split rows are dropped as noise.
+    const pickRows = items.filter((it) => (parseInt(it.quantity) || 0) > 0 || !it.manual);
+    if (!items.some((it) => (parseInt(it.quantity) || 0) > 0)) { toast.error("Enter at least one Picked Qty"); return; }
     for (let i = 0; i < pickRows.length; i++) {
       const rowNo = items.indexOf(pickRows[i]) + 1;
       const it = pickRows[i];
       const q = parseInt(it.quantity) || 0;
-      const rejected = parseInt(it.rejected_qty) || 0;
-      if (q < 0 || rejected < 0) { toast.error(`Row ${rowNo}: quantities cannot be negative`); return; }
-      if (rejected > 0 && !(it.rejection_reason || "").trim()) { toast.error(`Row ${rowNo}: select a Rejection Reason`); return; }
-      if (q > 0 && !it.godown_id) { toast.error(`Row ${rowNo}: choose a pick location, or use Rejected Qty instead`); return; }
-      if (q > 0) {
-        const availHere = availableAtRow(it, items.indexOf(it));
-        if (q > availHere + 1e-6) {
-          toast.error(`Row ${rowNo}: only ${availHere} available at ${it.godown_name || "—"}/${it.rack_no || "—"}/${it.box_no || "—"}`);
-          return;
-        }
-      }
-    }
-    for (const [k, total] of Object.entries(processedByItemKey)) {
-      const requested = requestedByItemKey[k];
-      if (requested == null) continue;  // open line — bounded by stock only
-      if (total > requested + 1e-6) {
-        const [p, m] = k.split("||");
-        toast.error(`${p}/${m}: Picked + Rejected (${total}) exceeds requested (${requested})`);
+      if (q < 0) { toast.error(`Row ${rowNo}: quantity cannot be negative`); return; }
+      if (q === 0) continue;   // nothing leaves the shelf — no location needed
+      // All three levels must be settled, but "settled" means chosen from what actually
+      // exists: a godown with no racking settles its rack/box as "none", which is a valid
+      // answer — hence the *_sel keys rather than the raw ids.
+      if (!it.godown_id) { toast.error(`Row ${rowNo}: Godown is required`); return; }
+      if (!it.rack_sel) { toast.error(`Row ${rowNo}: Rack is required`); return; }
+      if (!it.box_sel) { toast.error(`Row ${rowNo}: Box is required`); return; }
+      if (!locationResolved(it)) { toast.error(`Row ${rowNo}: choose a location that holds stock`); return; }
+      // Real stock is the only ceiling — picking more or less than requested is fine.
+      const availHere = availableAtRow(it, items.indexOf(it));
+      if (q > availHere + 1e-6) {
+        toast.error(`Row ${rowNo}: only ${availHere} available at ${it.godown_name || "—"}/${it.rack_no || "—"}/${it.box_no || "—"}`);
         return;
       }
     }
@@ -1954,7 +2102,8 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       const payload = {
         issue_note_id: selectedInId,
           items: pickRows.map((it) => ({
-          part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity) || 0,
+          part_no: it.part_no, make: it.make, line_no: it.line_no ?? null,
+          quantity: parseInt(it.quantity) || 0,
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -1962,8 +2111,6 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
           godown_id: it.godown_id || "", godown_name: it.godown_name || "",
           rack_id: it.rack_id || "", rack_no: it.rack_no || "",
           box_id: it.box_id || "", box_no: it.box_no || "", box_category: it.box_category || "",
-          rejected_qty: parseInt(it.rejected_qty) || 0,
-          rejection_reason: it.rejection_reason || "",
         })),
       };
       const { data } = isEdit
@@ -2019,115 +2166,152 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
           <div className="px-4 pt-3 text-xs text-slate-500">
-            The Location column is pre-filled with the Issue Note's suggested pick location (marked <span className="font-bold text-blue-700">Suggested</span>) —
-            accept it, pick partially and use <span className="font-bold">+ Split</span> to take the remainder from
-            another location, or switch the dropdown to any other location currently holding stock.
+            Godown, Rack and Box are pre-filled with the Issue Note's suggested location (marked <span className="font-bold text-blue-700">Suggested</span>) —
+            all three are required, and all three can be changed to any location currently holding stock.
+            Use <span className="font-bold">+ Split</span> to take the remainder from another location.
+            Requested Qty is what the office asked for; pick more or less as the shelf actually allows.
           </div>
-          <table className="data-table w-full text-xs">
+          <table className="data-table data-table-fixed w-full text-xs min-w-[1360px]">
+            <colgroup>
+              <col style={{ width: "56px" }} />
+              <col style={{ width: "100px" }} />
+              <col style={{ width: "118px" }} />
+              <col style={{ width: "92px" }} />
+              <col />
+              <col style={{ width: "112px" }} />
+              <col style={{ width: "130px" }} />
+              <col style={{ width: "100px" }} />
+              <col style={{ width: "100px" }} />
+              <col style={{ width: "142px" }} />
+              <col style={{ width: "112px" }} />
+              <col style={{ width: "64px" }} />
+            </colgroup>
             <thead>
               <tr>
-                <th className="w-10">SL</th>
+                <th>SL NO</th>
+                <th>MODEL</th>
                 <th>PART NO</th>
                 <th>MAKE</th>
-                <th>MODEL</th>
                 <th>DESCRIPTION</th>
                 <th>CATEGORY</th>
-                <th className="min-w-[220px]">LOCATION</th>
-                <th className="text-center">AVAILABLE HERE</th>
-                <th className="text-center">PICKED QTY</th>
-                <th className="text-center min-w-[90px]">REJECTED QTY</th>
-                <th className="min-w-[140px]">REASON</th>
-                <th className="w-10"></th>
+                <th>GODOWN</th>
+                <th>RACK</th>
+                <th>BOX</th>
+                <th className="!text-center">REQUESTED QTY</th>
+                <th className="!text-center">PICKED QTY</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const k = pickingKey(it);
-                const requested = requestedByItemKey[k];
-                const processed = processedByItemKey[k] || 0;
-                const overRequested = requested != null && processed > requested + 1e-6;
+                const requested = rowRequested(it);
                 const noStockAtAll = (it.available_locations || []).length === 0;
+                const resolved = locationResolved(it);
                 const availHere = availableAtRow(it, idx);
                 const q = parseInt(it.quantity) || 0;
                 return (
-                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={overRequested ? "bg-red-50" : (noStockAtAll ? "bg-amber-50" : "")}>
-                    <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                    <td>{it.make}</td>
-                    <td className="font-mono text-slate-600">{it.model || "—"}</td>
-                    <td className="text-slate-700 max-w-[200px] truncate" title={it.description_1}>{it.description_1 || "—"}</td>
-                    <td className="text-slate-600">{it.item_category || "—"}</td>
-                    <td>
+                  <tr key={idx} data-testid={`pn-item-row-${idx}`} className={noStockAtAll ? "bg-amber-50" : ""}>
+                    <td className="font-mono text-slate-500 align-middle">{idx + 1}</td>
+                    <td className="font-mono text-slate-600 align-middle truncate" title={it.model || ""}>{it.model || "—"}</td>
+                    <td className="align-middle"><PartNoLink partNo={it.part_no} make={it.make} /></td>
+                    <td className="align-middle truncate" title={it.make}>{it.make}</td>
+                    <td className="text-slate-700 align-middle truncate" title={it.description_1}>{it.description_1 || "—"}</td>
+                    <td className="text-slate-600 align-middle truncate" title={it.item_category || ""}>{it.item_category || "—"}</td>
+                    <td className="align-middle">
                       {noStockAtAll ? (
                         <span className="text-[11px] text-amber-700 italic">
-                          No stock currently available{it.unallocated_shortfall ? ` (short ${it.unallocated_shortfall})` : ""} — reject this line
+                          No stock{it.unallocated_shortfall ? ` (short ${it.unallocated_shortfall})` : ""}
                         </span>
                       ) : (
                         <>
-                          <Select value={it.godown_id ? locOnlyKey(it) : undefined} onValueChange={(v) => onLocationSelect(idx, v)}>
-                            <SelectTrigger className="rounded-sm h-8" data-testid={`pn-location-${idx}`}>
-                              <SelectValue placeholder="Choose location" />
+                          <Select value={it.godown_id || undefined} onValueChange={(v) => onGodownSelect(idx, v)}>
+                            <SelectTrigger className="rounded-sm h-8 w-full text-xs [&>span]:truncate" data-testid={`pn-godown-${idx}`}>
+                              <SelectValue placeholder="Godown *" />
                             </SelectTrigger>
                             <SelectContent>
-                              {(it.available_locations || []).map((L) => (
-                                <SelectItem key={locOnlyKey(L)} value={locOnlyKey(L)} data-testid={`pn-location-${idx}-option-${locOnlyKey(L)}`}>
-                                  <span className="font-mono">{formatLocationText(L)}</span>
-                                  <span className="ml-2 text-xs text-slate-500">avail {L.current_qty}</span>
+                              {godownOptions(it).map((L) => (
+                                <SelectItem key={L.godown_id} value={L.godown_id} data-testid={`pn-godown-${idx}-option-${L.godown_id}`}>
+                                  <span className="font-mono">{L.godown_name}</span>
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
-                          {it.suggested && <div className="text-[10px] font-bold text-blue-700 mt-0.5">Suggested</div>}
+                          {it.suggested && <div className="text-[10px] font-bold text-blue-700 mt-0.5 leading-tight">Suggested</div>}
                         </>
                       )}
                     </td>
-                    <td className="text-center font-mono font-bold text-slate-700">{noStockAtAll ? "—" : availHere}</td>
-                    <td className="text-center">
-                      <Input type="number" min="0" step="1" value={it.quantity}
-                        disabled={noStockAtAll}
-                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        className={`rounded-sm font-mono h-8 text-center w-20 ${overRequested || q > availHere + 1e-6 ? "border-red-400" : ""}`}
+                    <td className="align-middle">
+                      {!noStockAtAll && it.godown_id && !rackChoiceExists(it) ? (
+                        <span className="text-slate-400 font-mono" title="This godown has no racking" data-testid={`pn-rack-${idx}-none`}>—</span>
+                      ) : !noStockAtAll && (
+                        <Select value={it.rack_sel || undefined} disabled={!it.godown_id}
+                          onValueChange={(v) => onRackSelect(idx, v)}>
+                          <SelectTrigger className="rounded-sm h-8 w-full text-xs [&>span]:truncate" data-testid={`pn-rack-${idx}`}>
+                            <SelectValue placeholder={it.godown_id ? "Rack *" : "—"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {rackOptions(it).map((L) => (
+                              <SelectItem key={L.rack_id || NO_RACK} value={L.rack_id || NO_RACK} data-testid={`pn-rack-${idx}-option-${L.rack_id || NO_RACK}`}>
+                                <span className="font-mono">{L.rack_no || "(no rack)"}</span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </td>
+                    <td className="align-middle">
+                      {!noStockAtAll && it.rack_sel && !boxChoiceExists(it) ? (
+                        <span className="text-slate-400 font-mono" title="This location has no boxes" data-testid={`pn-box-${idx}-none`}>—</span>
+                      ) : !noStockAtAll && (
+                        <Select value={it.box_sel || undefined}
+                          disabled={!it.rack_sel}
+                          onValueChange={(v) => onBoxSelect(idx, v)}>
+                          <SelectTrigger className="rounded-sm h-8 w-full text-xs [&>span]:truncate" data-testid={`pn-box-${idx}`}>
+                            <SelectValue placeholder={it.rack_sel ? "Box *" : "—"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {boxOptions(it).map((L) => (
+                              <SelectItem key={L.box_id || NO_BOX} value={L.box_id || NO_BOX} data-testid={`pn-box-${idx}-option-${L.box_id || NO_BOX}`}>
+                                <span className="font-mono">{L.box_no || "(no box)"}</span>
+                                <span className="ml-2 text-xs text-slate-500">avail {L.current_qty}</span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </td>
+                    {/* Requested is reference only — blank when the office left it open. */}
+                    <td className="text-center font-mono font-bold text-slate-700 align-middle" data-testid={`pn-requested-${idx}`}>
+                      {requested == null || requested === 0 ? "" : requested}
+                    </td>
+                    <td className="align-middle">
+                      <Input type="number" min="0" step="1" max={availHere || undefined} value={it.quantity}
+                        disabled={noStockAtAll || !resolved}
+                        onChange={(e) => onPickedQtyChange(idx, e.target.value)}
+                        title={noStockAtAll ? "Nothing on the shelf for this item"
+                          : (!resolved ? "Select Godown, Rack and Box first" : `Up to ${availHere} available at this location`)}
+                        className="rounded-sm font-mono h-8 text-center w-full px-1"
                         data-testid={`pn-qty-${idx}`} />
-                      {overRequested && (
-                        <div className="text-[10px] mt-0.5 text-red-600 font-bold" data-testid={`pn-pending-hint-${idx}`}>
-                          Over {processed}/{requested}
-                        </div>
-                      )}
-                      {!overRequested && it.open_quantity && (
-                        <div className="text-[10px] mt-0.5 text-blue-700 font-bold" data-testid={`pn-open-qty-${idx}`}>
-                          Open — your call
-                        </div>
-                      )}
+                      {/* Fixed-height hint so rows never change height as quantities change. */}
+                      <div className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-center overflow-hidden whitespace-nowrap text-ellipsis ${
+                        noStockAtAll ? "invisible" : (!resolved ? "text-slate-400" : (q === availHere && availHere > 0 ? "text-amber-600 font-bold" : "text-slate-500"))
+                      }`} data-testid={`pn-avail-hint-${idx}`}>
+                        {!resolved ? "Pick location" : (q === availHere && availHere > 0 ? `Max ${availHere}` : `Avail ${availHere}`)}
+                      </div>
                     </td>
-                    <td className="text-center">
-                      <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
-                        onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
-                        placeholder="0"
-                        className={`rounded-sm font-mono h-8 text-center w-20 ${overRequested ? "border-red-400" : ""}`}
-                        data-testid={`pn-rejected-qty-${idx}`} />
-                    </td>
-                    <td>
-                      <Select value={it.rejection_reason || undefined} onValueChange={(v) => updateItem(idx, { rejection_reason: v })}
-                        disabled={!(parseInt(it.rejected_qty) > 0)}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`pn-reject-reason-${idx}`}>
-                          <SelectValue placeholder={parseInt(it.rejected_qty) > 0 ? "Select reason" : "—"} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {REJECTION_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </td>
-                    <td className="whitespace-nowrap">
-                      <button type="button" onClick={() => addLocationRow(idx)} title="Split — pick the remainder from another location"
-                        className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700" data-testid={`pn-split-row-${idx}`}>
-                        <Plus size={14} />
-                      </button>
-                      {it.manual && (
-                        <button type="button" onClick={() => removeLocationRow(idx)} title="Remove this split row"
-                          className="p-1.5 rounded-sm hover:bg-red-50 text-red-700" data-testid={`pn-remove-row-${idx}`}>
-                          <Trash size={14} />
+                    <td className="align-middle">
+                      <div className="flex items-center h-8">
+                        <button type="button" onClick={() => addLocationRow(idx)} title="Split — pick the remainder from another location"
+                          className="p-1.5 rounded-sm hover:bg-blue-50 text-blue-700" data-testid={`pn-split-row-${idx}`}>
+                          <Plus size={14} />
                         </button>
-                      )}
+                        {it.manual && (
+                          <button type="button" onClick={() => removeLocationRow(idx)} title="Remove this split row"
+                            className="p-1.5 rounded-sm hover:bg-red-50 text-red-700" data-testid={`pn-remove-row-${idx}`}>
+                            <Trash size={14} />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

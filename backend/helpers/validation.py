@@ -5,7 +5,6 @@ from helpers.note_helpers import _key, _ern_rackable_qty
 from helpers.status_helpers import (
     _aggregate_other_rkn_qty,
     _aggregate_other_rkn_qty_by_source,
-    _pick_aggregate_other,
     _transfer_other_qty,
     _transfer_other_src_loc_qty,
 )
@@ -191,65 +190,53 @@ def _validate_picking_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Picked Qty cannot be negative")
         if rejected < 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Rejected Qty cannot be negative")
-        if qty <= 0 and rejected <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Picked Qty or Rejected Qty must be > 0")
+        # A 0 row is meaningful and must survive: it records that this specific Issue Note
+        # line was deliberately left unpicked (e.g. its quantity was taken on another
+        # line of the same part). It moves no stock and needs no location. The note as a
+        # whole still has to pick something — checked once after the loop.
         if rejected > 0 and not (getattr(it, "rejection_reason", "") or "").strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Rejection reason is required when Rejected Qty > 0")
-        # A location is only required for the physically-picked portion — a
-        # fully-rejected row (qty=0, e.g. "Not Available") may have no location.
-        if qty > 0 and (not (it.godown_id or "").strip() or not (it.rack_id or "").strip()):
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown and Rack are required")
+        # Godown is always required for the physically-picked portion. Rack and box are
+        # NOT demanded here: stock can legitimately sit in a godown that has no racking,
+        # in which case rack_id/box_id are empty on the very transactions the pick draws
+        # from. `_validate_picking_constraints` is the real guard — it requires the exact
+        # godown/rack/box triple to match a location that currently holds stock.
+        if qty > 0 and not (it.godown_id or "").strip():
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Godown is required")
+    if not any((it.quantity or 0) > 0 or (getattr(it, "rejected_qty", 0) or 0) > 0 for it in items):
+        raise HTTPException(status_code=400, detail="Enter a Picked Qty on at least one row")
 
 
 async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Optional[str] = None, assigned_items: Optional[list] = None):
     """Picking locations are a suggestion, not a lock: the Issue Note's Godown
     Preference and greedy `allocated_locations` only decide what's pre-filled on the
     Picking Note (see `prepare_picking_note`). The store user may accept the
-    suggestion, pick partially from it, or choose any other valid stock location —
-    enforced below only on (1) cumulative qty vs what was requested and (2) real
-    stock availability at whichever location was actually picked."""
+    suggestion, pick partially from it, or choose any other valid stock location.
+
+    The requested quantity is a target, not a ceiling either — the store incharge may
+    pick more or less than the office asked for (a package rarely breaks down exactly
+    the way the office assumed). The one hard limit is real stock: nothing may be
+    picked that isn't physically on the shelf."""
     from helpers.stock_helpers import _stock_locations_for
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
-    open_keys = set()
     for it in (assigned_items if assigned_items is not None else inn.get("items", [])):
         k = _key(it.get("part_no"), it.get("make"))
-        if it.get("quantity") is None:
-            # Open line — quantity is the store incharge's call, so the only ceiling is
-            # real stock availability (checked per-location below).
-            open_keys.add(k)
-            requested.setdefault(k, 0)
-            continue
-        requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    other_sums = {} if assigned_items is not None else await _pick_aggregate_other(in_id, exclude_pn_id)
+        requested.setdefault(k, 0)
+        if it.get("quantity") is not None:
+            requested[k] += it.get("quantity") or 0
 
-    new_sums = {}
     new_loc_sums = {}
     for it in items:
         k = _key(it.part_no, it.make)
-        rejected = getattr(it, "rejected_qty", 0) or 0
-        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0) + rejected
         if (it.quantity or 0) > 0:
             loc_key = f"{it.part_no}||{it.make}||{it.godown_id or ''}||{it.rack_id or ''}||{it.box_id or ''}"
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
-    # 1. cumulative qty — picked + rejected together cannot exceed what was requested
-    for k, new_q in new_sums.items():
-        if k in open_keys:
-            continue
-        recv = requested.get(k, 0)
-        used = other_sums.get(k, 0)
-        if used + new_q > recv + 1e-6:
-            part, make = k.split("||", 1)
-            raise HTTPException(status_code=400, detail=(
-                f"Picked + Rejected exceeds issue note for {part} / {make}: "
-                f"requested {recv}, already accounted for elsewhere {used}, this note {new_q} "
-                f"(total {used + new_q} > {recv})"
-            ))
-    # 2. per-location stock availability. Draft picking does not reserve stock.
+    # Per-location stock availability. Draft picking does not reserve stock.
     # Group by part||make to fetch locations once
     loc_cache = {}
     for k_full, new_q in new_loc_sums.items():

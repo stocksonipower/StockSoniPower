@@ -10,7 +10,7 @@ from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for, _stock_locations_for
 from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key
-from helpers.status_helpers import _recompute_in_status, _pick_aggregate_other
+from helpers.status_helpers import _recompute_in_status
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
 from services.locking import location_locks
@@ -56,6 +56,9 @@ async def _issue_items_for_storage(items):
     out = []
     for idx, it in enumerate(items, start=1):
         row = it.model_dump()
+        # Stable per-line identity — two lines of the same part/make must stay distinct
+        # all the way through picking (see IssueNoteItem.line_no).
+        row["line_no"] = idx
         gid = (row.get("selected_godown_id") or "").strip()
         if gid:
             godown = await db.godowns.find_one({"id": gid}, {"_id": 0})
@@ -212,7 +215,15 @@ def _sum_issue_like_items(items: list[dict]) -> dict:
 
 
 def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dict]) -> list[dict]:
-    picked = _sum_issue_like_items(picked_items)
+    """What still needs picking, line by line.
+
+    The picked quantity is a single pool per (part, make) — the picker records where
+    stock came off the shelf, not which of several identical lines it was for. So the
+    pool is CONSUMED line by line in order: 15 picked against lines of 15 and 5 leaves
+    the second line's 5 outstanding, rather than both lines seeing the full 15 and the
+    remainder silently vanishing.
+    """
+    pool = _sum_issue_like_items(picked_items)
     remaining = []
     for it in assigned_items or []:
         row = dict(it)
@@ -220,11 +231,13 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
         if row.get("quantity") is None:
             # Open line: the store incharge's picked quantity IS the quantity, so any
             # pick resolves it. Untouched open lines carry over still open.
-            if picked.get(k, 0) <= 1e-6:
+            if pool.get(k, 0) <= 1e-6:
                 remaining.append(row)
             continue
         assigned_qty = float(row.get("quantity") or 0)
-        rem = max(0, assigned_qty - picked.get(k, 0))
+        used = min(pool.get(k, 0), assigned_qty)
+        pool[k] = pool.get(k, 0) - used
+        rem = assigned_qty - used
         if rem > 1e-6:
             row["quantity"] = rem
             remaining.append(row)
@@ -671,9 +684,10 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
 
     items_out = []
     base_items = (pn_scope or {}).get("assigned_items") or inn.get("items", [])
-    for it in base_items:
+    for base_idx, it in enumerate(base_items, start=1):
         part_no = it.get("part_no", "")
         make = it.get("make", "")
+        line_no = it.get("line_no") or base_idx
         is_open = it.get("quantity") is None
         pending = 0 if is_open else (it.get("quantity", 0) or 0)
         selected_godown_id = it.get("selected_godown_id") or ""
@@ -687,6 +701,7 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
         allocated_qty = sum(a["quantity"] for a in allocation)
         common = {
             "part_no": part_no, "make": make,
+            "line_no": line_no,
             "open_quantity": is_open,
             "requested_qty": None if is_open else pending,
             "pending_qty": None if is_open else pending,
@@ -754,7 +769,8 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
         raise HTTPException(status_code=409, detail="This issue note is already fully picked")
     _validate_picking_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
-        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
+        # Only meaningful when a rack was actually chosen — godown-only stock has no rack.
+        if (it.rack_id or "").strip() and not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
     await _validate_picking_constraints(inn["id"], payload.items, exclude_pn_id=None, assigned_items=inn.get("items", []))
 
@@ -855,7 +871,8 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
     _enforce_assignee(in_parent, user, "edit this picking note")
     _validate_picking_items(payload.items)
     for idx, it in enumerate(payload.items, start=1):
-        if not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
+        # Only meaningful when a rack was actually chosen — godown-only stock has no rack.
+        if (it.rack_id or "").strip() and not (it.box_id or "").strip() and await _box_id_required_for_rack(it.rack_id):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Box is required for this rack")
     assigned_items = existing.get("assigned_items") or in_parent.get("items", [])
     await _validate_picking_constraints(existing.get("issue_note_id"), payload.items, exclude_pn_id=pn_id, assigned_items=assigned_items)
@@ -932,9 +949,12 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
                 for idx, it in enumerate(items, start=1):
                     if (it.get("quantity") or 0) <= 0:
                         continue
-                    if not it.get("godown_id") or not it.get("rack_id"):
-                        raise HTTPException(status_code=400, detail=f"Row {idx}: Godown/Rack missing")
-                    if not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
+                    # Rack/box are not demanded outright — a godown with no racking holds
+                    # its stock at rack_id/box_id "", and the balance query below is keyed
+                    # on the exact triple, so a wrong location simply finds no stock.
+                    if not it.get("godown_id"):
+                        raise HTTPException(status_code=400, detail=f"Row {idx}: Godown missing")
+                    if it.get("rack_id") and not it.get("box_id") and await _box_id_required_for_rack(it["rack_id"]):
                         raise HTTPException(status_code=400, detail=f"Row {idx}: Box missing")
                     bal = await uow.transactions.aggregate([
                         {"$match": {
