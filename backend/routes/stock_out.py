@@ -9,7 +9,10 @@ from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enf
 from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for, _stock_locations_for
-from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key, note_qty_totals
+from helpers.note_helpers import (
+    current_fy_label, note_date_key, note_date_key_from_iso, _next_serial, _key,
+    _linked_note_no, note_qty_totals,
+)
 from helpers.status_helpers import _recompute_in_status
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -42,6 +45,25 @@ async def _register_stock_out_type(name: str, user: dict) -> str:
     }
     await db.stock_out_types.insert_one(doc)
     return clean
+
+
+async def _picking_note_no(inn: dict) -> str:
+    """Number a Picking Note after the Issue Note it belongs to.
+
+    A Picking Note is not a document in its own series — it is the execution of one
+    Issue Note, so it carries that note's date and suffix: IN/080826/01 is picked
+    on PN/080826/01. Reading either number tells you the other, which is the whole
+    point; the old independent PN counter meant PN/080826/07 could belong to
+    IN/080826/02 and nothing on the page said so.
+
+    A second Picking Note against the same Issue Note (the continuation raised for
+    a partial pick) appends -B, -C, … — the same chain-suffix rule Stock In uses
+    for a repeat SRN/ERN/RKN against one Receipt Note (see `_linked_note_no`).
+    """
+    return await _linked_note_no(
+        "picking_notes", "pn_no", "issue_note_id", inn["id"],
+        "PN", note_date_key_from_iso(inn.get("in_date", "")), inn.get("serial", 0),
+    )
 
 
 async def _issue_items_for_storage(items):
@@ -95,8 +117,11 @@ async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
+        # `serial` stays an independent counter purely to satisfy the (fy, serial)
+        # unique index; the number the user sees comes from the Issue Note. Same
+        # split Stock In uses for SRN/ERN/RKN.
         serial = await _next_serial("picking_notes")
-        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
+        pn_no = await _picking_note_no(inn)
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,
@@ -149,12 +174,17 @@ async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[di
     existing = await db.picking_notes.find_one({"parent_picking_note_id": parent_pn["id"]}, {"_id": 0})
     if existing:
         return existing
+    # The continuation belongs to the same Issue Note, so it is numbered from that
+    # note too and lands on the next chain suffix (-B, -C, …).
+    inn = await db.issue_notes.find_one({"id": parent_pn["issue_note_id"]}, {"_id": 0}) or {
+        "id": parent_pn["issue_note_id"], "in_date": parent_pn.get("issue_note_date", ""), "serial": 0,
+    }
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
         serial = await _next_serial("picking_notes")
-        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
+        pn_no = await _picking_note_no(inn)
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,
@@ -792,13 +822,29 @@ async def delete_issue_note(in_id: str, user=Depends(get_current_user)):
 # -------------------- PICKING NOTES --------------------
 
 @router.get("/picking-notes/next-no")
-async def next_picking_note_no(user=Depends(get_current_user)):
+async def next_picking_note_no(issue_note_id: Optional[str] = None, user=Depends(get_current_user)):
+    """Preview the number a new Picking Note would get.
+
+    Pass `issue_note_id` for the real answer — a Picking Note is numbered after
+    its Issue Note (see `_picking_note_no`), so without knowing the parent the
+    best that can be offered is a placeholder for the form to show until one is
+    chosen.
+    """
     today = datetime.now(timezone.utc)
     last = await db.picking_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
+    if issue_note_id:
+        inn = await db.issue_notes.find_one({"id": issue_note_id}, {"_id": 0})
+        if not inn:
+            raise HTTPException(status_code=404, detail="Issue note not found")
+        return {
+            "next_serial": next_serial,
+            "next_pn_no": await _picking_note_no(inn),
+            "pn_date": today.date().isoformat(),
+        }
     return {
         "next_serial": next_serial,
-        "next_pn_no": f"PN/{note_date_key(today)}/{next_serial:02d}",
+        "next_pn_no": "",
         "pn_date": today.date().isoformat(),
     }
 
@@ -932,7 +978,7 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
     last_err = None
     for _ in range(5):
         serial = await _next_serial("picking_notes")
-        pn_no = f"PN/{note_date_key(today)}/{serial:02d}"
+        pn_no = await _picking_note_no(inn)
         doc = {
             "id": str(uuid.uuid4()),
             "pn_no": pn_no,

@@ -2341,7 +2341,9 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
           }] : [],
         }))));
     } else {
-      api.get("/picking-notes/next-no").then((r) => { setPnNo(r.data.next_pn_no); setPnDate(r.data.pn_date); })
+      // No number to show yet: a Picking Note is numbered after its Issue Note,
+      // so the real number only exists once one is selected (see handleInChange).
+      api.get("/picking-notes/next-no").then((r) => { setPnDate(r.data.pn_date); })
         .catch(() => toast.error("Could not preview picking-note number"));
       api.get("/issue-notes", { params: { not_status: "COMPLETE", page_size: 100 } })
         .then((r) => setPendingIns(r.data || []));
@@ -2351,9 +2353,14 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
 
   const handleInChange = async (id) => {
     setSelectedInId(id);
-    if (!id) { setItems([]); setAssignedToName(""); return; }
+    if (!id) { setItems([]); setAssignedToName(""); setPnNo(""); return; }
     const inn = pendingIns.find((x) => x.id === id);
     setAssignedToName(inn?.assigned_to_name || "");
+    // The Picking Note number follows the Issue Note's, so it can only be
+    // previewed once that note is known.
+    api.get("/picking-notes/next-no", { params: { issue_note_id: id } })
+      .then((r) => setPnNo(r.data.next_pn_no || ""))
+      .catch(() => setPnNo(""));
     try {
       const { data } = await api.get(`/picking-notes/prepare/${id}`);
       setItems((data.items || []).map((it) => ({ ...it, ...locSelKeys(it), rejected_qty: 0, row_status: "Assigned" })));

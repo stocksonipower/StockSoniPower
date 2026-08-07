@@ -8,7 +8,10 @@ from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enf
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_locations_for, _get_balance, _stock_total_for
 from helpers.stock_helpers import _enrich_with_parent_assignee
-from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key, note_qty_totals
+from helpers.note_helpers import (
+    current_fy_label, note_date_key, note_date_key_from_iso, _next_serial, _key,
+    _linked_note_no, note_qty_totals,
+)
 from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _transfer_other_src_loc_qty
 from helpers.validation import _validate_transfer_request_items, _validate_transfer_request_qty, _validate_transfer_note_items, _validate_transfer_note_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -160,20 +163,49 @@ def _remaining_assigned_items(assigned_items: list[dict], transferred_items: lis
     return remaining
 
 
+async def _transfer_note_no(str_doc: dict) -> str:
+    """Number a Transfer Note after the Transfer Request it belongs to.
+
+    A Transfer Note is not a document in its own series — it is the execution of
+    one Transfer Request, so it carries that request's date and suffix:
+    STR/080826/01 is executed on STN/080826/01. Reading either number tells you
+    the other.
+
+    A second Transfer Note against the same request (the continuation raised for a
+    partial transfer) appends -B, -C, … — the same chain-suffix rule Stock In uses
+    for a repeat note against one Receipt Note (see `_linked_note_no`).
+    """
+    return await _linked_note_no(
+        "transfer_notes", "stn_no", "transfer_request_id", str_doc["id"],
+        "STN", note_date_key_from_iso(str_doc.get("str_date", "")), str_doc.get("serial", 0),
+    )
+
+
 async def _next_transfer_note_doc(base: dict, user: dict, assigned_items: list[dict], parent_transfer_note_id=None, execution_attempt=1):
+    # `base` is either the Transfer Request itself (root note) or a parent
+    # Transfer Note (continuation). Numbering always comes from the REQUEST, so
+    # resolve it either way.
+    str_id = base["id"] if "str_no" in base else base["transfer_request_id"]
+    str_doc = base if "str_no" in base else (
+        await db.transfer_requests.find_one({"id": str_id}, {"_id": 0}) or {
+            "id": str_id, "str_date": base.get("transfer_request_date", ""), "serial": 0,
+        }
+    )
     today = datetime.now(timezone.utc)
     fy = current_fy_label(today)
     last_err = None
     for _ in range(5):
+        # `serial` stays an independent counter purely to satisfy the (fy, serial)
+        # unique index; the number the user sees comes from the request.
         serial = await _next_serial("transfer_notes")
-        stn_no = f"STN/{note_date_key(today)}/{serial:02d}"
+        stn_no = await _transfer_note_no(str_doc)
         doc = {
             "id": str(uuid.uuid4()),
             "stn_no": stn_no,
             "stn_date": today.date().isoformat(),
             "fy": fy,
             "serial": serial,
-            "transfer_request_id": base["id"] if "str_no" in base else base["transfer_request_id"],
+            "transfer_request_id": str_id,
             "transfer_request_no": base.get("str_no") or base.get("transfer_request_no", ""),
             "transfer_request_date": base.get("str_date") or base.get("transfer_request_date", ""),
             "parent_transfer_note_id": parent_transfer_note_id,
@@ -441,13 +473,28 @@ async def delete_transfer_request(str_id: str, user=Depends(get_current_user)):
 
 # ---------- Transfer Note ----------
 @router.get("/transfer-notes/next-no")
-async def next_transfer_note_no(user=Depends(get_current_user)):
+async def next_transfer_note_no(transfer_request_id: Optional[str] = None, user=Depends(get_current_user)):
+    """Preview the number a new Transfer Note would get.
+
+    Pass `transfer_request_id` for the real answer — a Transfer Note is numbered
+    after its Transfer Request (see `_transfer_note_no`), so without knowing the
+    parent there is nothing meaningful to predict.
+    """
     today = datetime.now(timezone.utc)
     last = await db.transfer_notes.find({}, {"serial": 1, "_id": 0}).sort("serial", -1).limit(1).to_list(1)
     next_serial = (last[0]["serial"] if last else 0) + 1
+    if transfer_request_id:
+        s = await db.transfer_requests.find_one({"id": transfer_request_id}, {"_id": 0})
+        if not s:
+            raise HTTPException(status_code=404, detail="Transfer request not found")
+        return {
+            "next_serial": next_serial,
+            "next_stn_no": await _transfer_note_no(s),
+            "stn_date": today.date().isoformat(),
+        }
     return {
         "next_serial": next_serial,
-        "next_stn_no": f"STN/{note_date_key(today)}/{next_serial:02d}",
+        "next_stn_no": "",
         "stn_date": today.date().isoformat(),
     }
 
@@ -627,7 +674,7 @@ async def create_transfer_note(payload: TransferNoteCreate, user=Depends(get_cur
         last_err = None
         for _ in range(5):
             serial = await _next_serial("transfer_notes")
-            stn_no = f"STN/{note_date_key(today)}/{serial:02d}"
+            stn_no = await _transfer_note_no(s)
             doc = {
                 "id": str(uuid.uuid4()),
                 "stn_no": stn_no,

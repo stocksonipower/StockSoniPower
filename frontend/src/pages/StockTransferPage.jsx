@@ -1785,7 +1785,9 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
           }));
         }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, available_locations: [], pending_qty: 0, requested_qty: 0, available_qty: 0 }))));
     } else {
-      api.get("/transfer-notes/next-no").then((r) => { setStnNo(r.data.next_stn_no); setStnDate(r.data.stn_date); })
+      // No number to show yet: a Transfer Note is numbered after its Transfer
+      // Request, so the real number only exists once one is selected.
+      api.get("/transfer-notes/next-no").then((r) => { setStnDate(r.data.stn_date); })
         .catch(() => toast.error("Could not preview transfer-note number"));
       api.get("/transfer-requests", { params: { not_status: "COMPLETE", page_size: 100 } })
         .then((r) => setPendingStrs(r.data || []));
@@ -1816,7 +1818,12 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
 
   const handleStrChange = async (id) => {
     setSelectedStrId(id);
-    if (!id) { setItems([]); return; }
+    if (!id) { setItems([]); setStnNo(""); return; }
+    // The Transfer Note number follows the request's, so it can only be
+    // previewed once that request is known.
+    api.get("/transfer-notes/next-no", { params: { transfer_request_id: id } })
+      .then((r) => setStnNo(r.data.next_stn_no || ""))
+      .catch(() => setStnNo(""));
     try {
       const { data } = await api.get(`/transfer-notes/prepare/${id}`);
       setItems(data.items || []);
