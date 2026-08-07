@@ -9,6 +9,7 @@ import { useStockInNav } from "../lib/stockInNav";
 import { toast } from "sonner";
 import { buildStandardPrintHtml, openPrintWindow, formatLocationText } from "../lib/printDocument";
 import { varianceLabel, varianceClass, varianceTitle } from "../lib/noteQtys";
+import { assigneeLabel, actorLabel } from "../lib/assignee";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -87,7 +88,7 @@ async function printRackingNote(d) {
     ],
     fieldsRight: [
       ["Total Qty Being Racked (This Note)", rackedQty || "—"],
-      ["Created By", d.created_by || "—"],
+      ["Created By", actorLabel(null, d.created_by)],
       ["Created At", d.created_at ? new Date(d.created_at).toLocaleString() : "—"],
     ],
     columns: [
@@ -96,7 +97,7 @@ async function printRackingNote(d) {
       { label: "Existing Qty", align: "right" }, { label: "Qty This Note", align: "right" },
     ],
     rows,
-    printedBy: d.created_by,
+    printedBy: actorLabel(null, d.created_by),
     sectionTitle: "Current Existing Stock Locations",
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
@@ -297,7 +298,7 @@ function RackingBody({ d }) {
             {complete ? "Complete" : "In Process"}
           </span>
         } />
-        <Detail k="Created By" v={d.created_by || "—"} />
+        <Detail k="Created By" v={actorLabel(null, d.created_by)} />
         <Detail k="Created At" v={d.created_at ? new Date(d.created_at).toLocaleString() : "—"} />
       </div>
       <div className="label-sm mb-2">
@@ -362,9 +363,9 @@ function PickingBody({ d }) {
         <Detail k="Picking Date" v={fmtDate(d.pn_date)} />
         <Detail k="Issue Note No" v={d.issue_note_no || "—"} />
         <Detail k="Issue Note Date" v={fmtDate(d.issue_note_date)} />
-        <Detail k="Assigned To" v={d.parent_assigned_to_name || "—"} />
+        <Detail k="Assigned To" v={assigneeLabel(d.parent_assigned_to_name, d.parent_assigned_to_email)} />
         <Detail k="Status" v={d.status} />
-        <Detail k="Created By" v={d.created_by || "—"} />
+        <Detail k="Created By" v={actorLabel(null, d.created_by)} />
       </div>
       {/* The note's five quantities, taken straight from the server's own roll-up
           (`_enrich_picking_requested_items`) rather than recomputed here — this dialog is
@@ -416,7 +417,7 @@ function TransferBody({ d }) {
         <Detail k="Request No" v={d.transfer_request_no || "—"} />
         <Detail k="Request Date" v={fmtDate(d.transfer_request_date)} />
         <Detail k="Status" v={d.status} />
-        <Detail k="Created By" v={d.created_by || "—"} />
+        <Detail k="Created By" v={actorLabel(null, d.created_by)} />
         <Detail k="Created At" v={new Date(d.created_at).toLocaleString()} />
       </div>
       <div className="overflow-x-auto">

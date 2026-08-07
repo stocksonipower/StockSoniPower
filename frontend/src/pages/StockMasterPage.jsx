@@ -21,6 +21,7 @@ import AuthImage from "../components/AuthImage";
 import PartNoLink from "../components/PartNoLink";
 import ImageViewerDialog from "../components/ImageViewerDialog";
 import { useAuth } from "../lib/auth";
+import ImportProgressDialog from "../components/ImportProgressDialog";
 
 const DEFAULT_COLUMNS = [
   { key: "model",          label: "MODEL",          width: 140, order: 1,  isNumeric: false, isImage: false },
@@ -63,6 +64,29 @@ function ImportPreviewDialog({ open, onClose, preview, file, onConfirm, importin
     { label: "New Items", value: new_items, icon: <CheckCircle size={18} weight="bold" className="text-emerald-600" />, color: "text-emerald-700" },
     { label: "Duplicate Items", value: duplicate_items, icon: <Warning size={18} weight="bold" className="text-amber-500" />, color: "text-amber-700" },
   ];
+
+  // While the import is running the dialog becomes a blocking progress panel
+  // rather than a form with a busy button. A large file keeps the server busy for
+  // a long time with no intermediate feedback, so the one thing the screen must
+  // do is say plainly that work is in progress and that the tab has to stay open
+  // — a half-finished import leaves rows already written.
+  if (importing) {
+    return (
+      <ImportProgressDialog
+        open={open}
+        fileName={file_name}
+        detail={
+          <>
+            Writing <span className="font-mono font-semibold text-slate-900">{total_items}</span> item(s)
+            from <span className="font-semibold text-slate-800">{file_name}</span> to Stock Master.
+          </>
+        }
+        // Indeterminate by omission of `total`: the endpoint returns only once
+        // the whole file is written, so there is no honest percentage to show.
+        note="Large files can take several minutes. Please keep this tab open — closing it now would leave the import part-finished."
+      />
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v && !importing) onClose(); }}>
@@ -160,7 +184,7 @@ export default function StockMasterPage() {
   const [loading, setLoading] = useState(false);
   const [colFilters, setColFilters] = useState({});
   const [sort, setSort] = useState({ key: null, dir: null });
-  const PAGE_SIZE = 250;
+  const PAGE_SIZE = 50;
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const excelInput = useRef(null);
@@ -1077,19 +1101,15 @@ export default function StockMasterPage() {
         </DialogContent>
       </Dialog>
 
-      {previewing && previewOpen && !preview && (
-        <Dialog open={true}>
-          <DialogContent className="max-w-lg rounded-sm">
-            <DialogHeader>
-              <DialogTitle className="text-xl font-black">Analysing File…</DialogTitle>
-            </DialogHeader>
-            <div className="flex items-center gap-3 py-6 text-slate-500 text-sm">
-              <ArrowsClockwise size={20} weight="bold" className="animate-spin text-blue-600 shrink-0" />
-              Checking items against existing stock master records…
-            </div>
-          </DialogContent>
-        </Dialog>
-      )}
+      {/* Same overlay as the import itself, so the two stages of one action read
+          as one flow rather than two differently-styled dialogs. */}
+      <ImportProgressDialog
+        open={previewing && previewOpen && !preview}
+        title="Analysing File…"
+        fileName={pendingFile?.name}
+        detail="Checking items against existing stock master records…"
+        testid="import-analysing-dialog"
+      />
 
       {preview && (
         <ImportPreviewDialog

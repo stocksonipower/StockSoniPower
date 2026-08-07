@@ -22,9 +22,10 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import { ReceiptNoteDetailDialog } from "./StockInPage";
 import { useStockInNav } from "../lib/stockInNav";
 import { exportToExcel } from "../lib/exportExcel";
+import { assigneeLabel, actorLabel } from "../lib/assignee";
 import { formatLocationText, buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 
 function fmtDate(iso) {
   if (!iso) return "—";
@@ -132,7 +133,7 @@ async function exportRackingNote(rkn) {
     fieldsRight: [
       ["Racked Against", `${rkn.source_type || "RN"} · ${rkn.source_no || rkn.receipt_note_no || "—"}`],
       ["Receipt Note No", rkn.receipt_note_no || "—"],
-      ["Created By", rkn.created_by || "—"],
+      ["Created By", actorLabel(null, rkn.created_by)],
     ],
     columns: [
       { label: "Sl" }, { label: "Model" }, { label: "Part No" }, { label: "Description" }, { label: "Make" },
@@ -141,7 +142,7 @@ async function exportRackingNote(rkn) {
       { label: "New Godown" }, { label: "New Rack" }, { label: "New Box" },
     ],
     rows,
-    printedBy: rkn.created_by,
+    printedBy: actorLabel(null, rkn.created_by),
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
@@ -370,14 +371,14 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
               const locationsComplete = hasCompleteRackingLocations(r);
               const recordDisabled = lock || !locationsComplete || recordingId === r.id;
               const editTitle = recorded ? "Cannot edit — already recorded"
-                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}` : "Edit");
+                : (isLockedToOther ? `Locked — assigned to ${assigneeLabel(assigneeName, assigneeEmail)}` : "Edit");
               const recordTitle = recorded ? "Already recorded"
-                : (isLockedToOther ? `Locked — assigned to ${assigneeName || assigneeEmail}`
+                : (isLockedToOther ? `Locked — assigned to ${assigneeLabel(assigneeName, assigneeEmail)}`
                   : (!locationsComplete ? "Every row needs a Godown and Qty (Rack required only if a Box is set)" : "Record as Stock In"));
               return (
                 <tr key={r.id} data-testid={`rkn-row-${r.rkn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.rkn_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.rkn_date)}</td>
                   <td>
                     <button
                       onClick={() => onOpen(r)}
@@ -387,7 +388,7 @@ function RackingNoteList({ reloadKey, onCreate, onEdit, onOpen, onOpenRn, onReco
                       {r.rkn_no}
                     </button>
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.receipt_note_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.receipt_note_date)}</td>
                   <td>
                     {r.receipt_note_no ? (
                       <button
@@ -525,7 +526,7 @@ function RackingNoteDetailDialog({ rkn: rknProp, onClose }) {
                     <span>{rkn.source_no || rkn.receipt_note_no || "—"}</span>
                   </div>
                 </div>
-                <Detail k="CREATED BY" v={rkn.created_by || "—"} />
+                <Detail k="CREATED BY" v={actorLabel(null, rkn.created_by)} />
                 <Detail k="CREATED AT" v={rkn.created_at ? new Date(rkn.created_at).toLocaleString() : "—"} />
                 <div>
                   <div className="label-sm">ASSIGNED TO</div>
@@ -952,8 +953,8 @@ function RackingNoteForm({ editing, onCancel, onSaved }) {
                           <SourceTypeBadge type={s.source_type} />
                           <span className="font-mono font-semibold">{s.source_no}</span>
                           <span className="text-slate-400 text-[11px]">{fmtDate(s.source_date)}</span>
-                          {s.assigned_to_name ? (
-                            <span className="text-[10px] text-slate-500 ml-1">· {s.assigned_to_name}</span>
+                          {(s.assigned_to_name || s.assigned_to_email) ? (
+                            <span className="text-[10px] text-slate-500 ml-1">· {assigneeLabel(s.assigned_to_name, s.assigned_to_email)}</span>
                           ) : null}
                         </span>
                       </SelectItem>

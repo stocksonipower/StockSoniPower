@@ -20,6 +20,8 @@ import {
 } from "@phosphor-icons/react";
 import RackingNoteTab from "./RackingNoteTab";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { assigneeLabel, actorLabel } from "../lib/assignee";
+import ImportProgressDialog from "../components/ImportProgressDialog";
 import PartNoLink from "../components/PartNoLink";
 import DocumentDetailDialog, { isChildEditable, isRknEditable } from "../components/DocumentDetailDialog";
 import { useAuth } from "../lib/auth";
@@ -266,7 +268,7 @@ function ReceiptNoteTab() {
 /* --------------------------------------------------------------
    List view — Receipt Notes
    -------------------------------------------------------------- */
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 
 function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
   const { user: me, isAdmin } = useAuth();
@@ -427,10 +429,10 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
               const lockEdit = hasRacking || isAssignedToOther;
               const editTitle = hasRacking
                 ? "Cannot edit — racking notes exist for this receipt"
-                : (isAssignedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
+                : (isAssignedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Edit");
               const deleteTitle = hasRacking
                 ? "Cannot delete — racking notes exist for this receipt"
-                : (isAssignedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
+                : (isAssignedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Delete");
               const sm = statusMeta(r.status);
               return (
                 <tr key={r.id} data-testid={`rn-row-${r.rn_no}`}>
@@ -443,7 +445,7 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     </span>
   ); })()}
 </td>
-<td className="font-mono text-slate-700">{fmtDate(r.rn_date)}</td>
+<td className="font-mono text-slate-700 date-cell">{fmtDate(r.rn_date)}</td>
 <td>
   <button
     onClick={() => onOpen(r)}
@@ -453,9 +455,9 @@ function ReceiptNoteList({ reloadKey, onCreate, onOpen, onEdit }) {
     {r.rn_no}
   </button>
 </td>
-<td className="font-mono text-slate-700">{fmtDate(r.invoice_date)}</td>
+<td className="font-mono text-slate-700 date-cell">{fmtDate(r.invoice_date)}</td>
 <td className="font-mono text-slate-700">{r.invoice_no || "—"}</td>
-<td className="font-mono text-slate-700">{fmtDate(r.goods_received_date)}</td>
+<td className="font-mono text-slate-700 date-cell">{fmtDate(r.goods_received_date)}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${sm.cls}`}
                       data-testid={`rn-status-${r.rn_no}`}>
@@ -609,7 +611,7 @@ export function ReceiptNoteDetailDialog({ rn, onClose }) {
               </div>
               {/* Right */}
               <div className="space-y-2">
-                <Detail k="CREATED BY" v={rn.created_by || "—"} />
+                <Detail k="CREATED BY" v={actorLabel(null, rn.created_by)} />
                 <Detail k="CREATED AT" v={rn.created_at ? new Date(rn.created_at).toLocaleString() : "—"} />
                 <div>
                   <div className="label-sm">ASSIGNED TO</div>
@@ -982,9 +984,9 @@ function printReceiptNote(rn, srns = [], erns = [], rkns = [], masterData = {}, 
       ${pField("Status", sm.label)}
     </div>
     <div>
-      ${pField("Created By", rn.created_by || "—")}
+      ${pField("Created By", actorLabel(null, rn.created_by))}
       ${pField("Created At", rn.created_at ? new Date(rn.created_at).toLocaleString() : "—")}
-      ${pField("Assigned To", rn.assigned_to_name || rn.assigned_to_email || "—")}
+      ${pField("Assigned To", assigneeLabel(rn.assigned_to_name, rn.assigned_to_email))}
     </div>
   </div>
 
@@ -1124,8 +1126,8 @@ function printChildDoc(doc, kind) {
       ${isSrn ? pField("Pending Quantity", fmtQty(sumSrnQty(doc))) : pField("Extra Quantity", fmtQty(sumErnQty(doc)))}
       ${isSrn ? pField("Received Quantity", fmtQty(sumSrnReceived(doc))) : pField("Decided By", doc.decided_by || "—")}
       ${isSrn ? pField("Remaining Quantity", fmtQty(Math.max(0, sumSrnQty(doc) - sumSrnReceived(doc) - sumSrnNotReceivable(doc)))) : pField("Decided At", fmtDate(doc.decided_at) || "—")}
-      ${pField("Created By", doc.created_by || "—")}
-      ${pField("Assigned To", doc.assigned_to_name || doc.assigned_to_email || "—")}
+      ${pField("Created By", actorLabel(null, doc.created_by))}
+      ${pField("Assigned To", assigneeLabel(doc.assigned_to_name, doc.assigned_to_email))}
     </div>
   </div>
 
@@ -1190,6 +1192,9 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   const [assignedToUserId, setAssignedToUserId] = useState("");
 
   const [masterDialog, setMasterDialog] = useState(null);
+  // { done, total, fileName } while an Excel import is being read and its rows
+  // resolved against Stock Master; null when idle. See handleExcelImport.
+  const [importProgress, setImportProgress] = useState(null);
   const fileInputRef = useRef(null);
   const draftBtnRef = useRef(null);
   const finalBtnRef = useRef(null);
@@ -1351,12 +1356,17 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
   /* ---- Excel import ---- */
   const handleExcelImport = async (file) => {
     if (!file) return;
+    // Parsing is quick, but each imported row then costs a make lookup against
+    // Stock Master (and a description fetch behind it), so the grid stays visibly
+    // half-resolved for a while. The overlay reports how far along that is and
+    // stops the user editing rows an in-flight lookup is about to overwrite.
+    setImportProgress({ done: 0, total: 0, fileName: file.name });
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
-      if (!rows.length) { toast.error("Excel file has no rows"); return; }
+      if (!rows.length) { toast.error("Excel file has no rows"); setImportProgress(null); return; }
       const norm = (s) => String(s || "").toLowerCase().replace(/[\s_-]+/g, "");
       const pickCol = (row, names) => {
         const map = {};
@@ -1393,11 +1403,23 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
           partLooked: false,
         });
       }
-      if (!newRows.length) { toast.error("No valid rows found in file"); return; }
+      if (!newRows.length) { toast.error("No valid rows found in file"); setImportProgress(null); return; }
       setItems((prev) => {
         const onlyEmpty = prev.length === 1 && !prev[0].part_no && !prev[0].invoice_qty && !prev[0].received_qty;
         return onlyEmpty ? newRows : [...prev, ...newRows];
       });
+      // A row counts as done once its make lookup settles — that is what decides
+      // `partLooked`/`masterMissing` and therefore whether the row is usable. The
+      // description fetch chained behind it is cosmetic enrichment and is not
+      // waited on, so the overlay clears when the grid is actually editable.
+      setImportProgress({ done: 0, total: newRows.length, fileName: file.name });
+      let settled = 0;
+      const finishOne = () => {
+        settled += 1;
+        setImportProgress((p) => (
+          settled >= newRows.length ? null : (p ? { ...p, done: settled } : p)
+        ));
+      };
       newRows.forEach((row) => {
         setTimeout(() => {
           api.get("/stock-master/lookup/makes", { params: { part_no: row.part_no } })
@@ -1430,12 +1452,13 @@ function ReceiptNoteCreate({ editing, onCancel, onSaved }) {
             }).catch(() => {
               // Lookup itself failed — flag the row as master-missing so user is prompted.
               setItems((prev) => prev.map((r) => r.part_no === row.part_no ? { ...r, partLooked: true, masterMissing: true } : r));
-            });
+            }).finally(finishOne);
         }, 0);
       });
       toast.success(`Imported ${newRows.length} row${newRows.length > 1 ? "s" : ""} from Excel`);
     } catch (err) {
       toast.error("Could not read Excel file");
+      setImportProgress(null);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
@@ -1627,6 +1650,16 @@ const canFinalize = useMemo(() => {
 
   return (
     <div className="mt-4 space-y-6" data-testid="rn-create-view">
+      <ImportProgressDialog
+        open={!!importProgress}
+        fileName={importProgress?.fileName}
+        done={importProgress?.done}
+        total={importProgress?.total}
+        detail={importProgress?.total > 0 ? (
+          <>Matching items against Stock Master — <span className="font-mono font-semibold text-slate-900">{importProgress.done}</span> of <span className="font-mono font-semibold text-slate-900">{importProgress.total}</span></>
+        ) : null}
+        testid="rn-import-progress-dialog"
+      />
       <div className="flex items-center justify-between flex-wrap gap-2">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="rn-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
@@ -2567,7 +2600,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                       </span>
                     ); })()}
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r[dateField])}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r[dateField])}</td>
                   <td>
                     <button
                       onClick={() => onOpen(r)}
@@ -2577,7 +2610,7 @@ function ChildList({ kind, reloadKey, onOpen, onOpenRn, onEdit, onChanged }) {
                       {r[idField]}
                     </button>
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.parent_rn_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.parent_rn_date)}</td>
                   <td>
                     {r.parent_rn_no ? (
                       <button
@@ -2721,8 +2754,8 @@ function ChildDetailDialog({ kind, doc: docProp, onClose, onOpen }) {
             <Detail k="INVOICE NO" v={doc.invoice_no || "—"} />
             <Detail k="INVOICE DATE" v={fmtDate(doc.invoice_date)} />
             {isSrn && <Detail k="FULFILMENT DATE" v={fmtDate(doc.fulfillment_date)} />}
-            <Detail k="ASSIGNED TO" v={doc.assigned_to_name || doc.assigned_to_email || "—"} />
-            <Detail k="CREATED BY" v={doc.created_by || "—"} />
+            <Detail k="ASSIGNED TO" v={assigneeLabel(doc.assigned_to_name, doc.assigned_to_email)} />
+            <Detail k="CREATED BY" v={actorLabel(null, doc.created_by)} />
             {doc.parent_srn_no && <Detail k="PARENT SRN" v={doc.parent_srn_no} />}
             {doc.parent_ern_no && <Detail k="PARENT ERN" v={doc.parent_ern_no} />}
           </div>

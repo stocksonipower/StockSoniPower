@@ -10,6 +10,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import re
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -152,6 +153,25 @@ async def _notify(
 
 
 # -------------------- ASSIGNMENT HELPERS (Phase 3) --------------------
+def _display_name(u: dict) -> str:
+    """How a user is NAMED on a document — never their email address.
+
+    An address is an account identifier, not a name, and an assignment ends up on
+    screen, in previews and on printed sheets that leave the building. When a user
+    has no name set, one is derived from the address' local part
+    ("john.doe@corp.com" -> "John Doe") rather than printing the address itself.
+
+    Mirrored in frontend/src/lib/assignee.js, which applies the same rule at
+    display time so records written before this existed also read as names.
+    """
+    name = (u.get("name") or "").strip()
+    if name and "@" not in name:
+        return name
+    local = (u.get("email") or name or "").split("@")[0]
+    words = [w for w in re.split(r"[._\-+]+", local) if w]
+    return " ".join(w[:1].upper() + w[1:] for w in words) or local
+
+
 async def _resolve_assignee(user_id: Optional[str], module: str) -> dict:
     """Validate and resolve an assignee user_id into name/email fields. Returns {} if user_id is empty."""
     if not user_id:
@@ -167,7 +187,9 @@ async def _resolve_assignee(user_id: Optional[str], module: str) -> dict:
             raise HTTPException(status_code=400, detail=f"User does not have access to '{module}' module")
     return {
         "assigned_to_user_id": u["id"],
-        "assigned_to_name": u.get("name") or u.get("email", ""),
+        "assigned_to_name": _display_name(u),
+        # Kept for lookups/joins and as the source the display name is derived
+        # from — but it is not what any screen or printed document shows.
         "assigned_to_email": u.get("email", ""),
     }
 
@@ -182,7 +204,14 @@ def _enforce_assignee(parent_note: dict, user: dict, action: str):
         return  # unassigned -> any user with module access can act
     if a == user.get("id"):
         return
-    name = parent_note.get("assigned_to_name") or parent_note.get("assigned_to_email") or "another user"
+    # Named, never addressed — same rule as _display_name. Records written before
+    # that helper existed can hold an address in assigned_to_name, so it is only
+    # trusted when it doesn't look like one.
+    stored = (parent_note.get("assigned_to_name") or "").strip()
+    if stored and "@" not in stored:
+        name = stored
+    else:
+        name = _display_name({"name": stored, "email": parent_note.get("assigned_to_email", "")}) or "another user"
     raise HTTPException(
         status_code=403,
         detail=f"Cannot {action}: this note is assigned to {name}.",

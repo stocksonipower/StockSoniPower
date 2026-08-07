@@ -113,6 +113,25 @@ table {
     @apply bg-slate-50;
 }
 
+/* Indeterminate progress bar, used while a long request is in flight whose
+   completion percentage cannot be known (bulk import: the endpoint returns only
+   once the whole file is written). A sliding segment says "working" without
+   inventing a percentage. */
+@keyframes loading-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}
+
+/* A date is one token and must never be split across two lines. Browsers treat
+   the hyphens in "07-08-2026" as legal break points, so a narrow column wraps it
+   to "07-08-" / "2026", which reads as two different values at a glance. Applied
+   as a class rather than to every mono cell because only dates (and times) have
+   this property — a long hyphenated description SHOULD still wrap.
+   Also forces the column to be at least as wide as the date it holds. */
+.date-cell {
+    white-space: nowrap;
+}
+
 .label-sm {
     @apply text-[11px] uppercase tracking-[0.15em] font-bold text-slate-500;
 }

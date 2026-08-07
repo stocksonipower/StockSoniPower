@@ -1,10 +1,15 @@
 """Dashboard / Stock Balance / Low Stock routes — extracted from server.py with zero logic changes."""
+import io
+import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+import pandas as pd
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from deps import db, get_current_user, now_iso
+from deps import db, get_current_user, now_iso, _notify
+from routes._helpers import _normalize_col
 
 router = APIRouter()
 
@@ -140,6 +145,435 @@ async def put_stock_summary_column_settings(
         upsert=True,
     )
     return {"columns": _merge_stock_summary_columns(cleaned)}
+
+
+# ============================================================================
+# STOCK SUMMARY IMPORT — bring existing stock in from a spreadsheet whose
+# columns are the Stock Summary columns.
+#
+# What it produces is ORDINARY STOCK: one normal IN transaction per row, exactly
+# like any other stock-in. Nothing about these rows is special-cased anywhere
+# else in the app — they are picked, transferred and reported like stock that
+# arrived through a Receipt Note.
+#
+# Location (Godown / Rack / Box) is entirely OPTIONAL and is taken as it comes:
+# a row that leaves it blank produces a transaction with blank location, which is
+# a state the rest of the app already handles (stock can legitimately sit in a
+# godown with no racking, and the aggregation groups on the empty triple fine).
+# Nothing is invented to fill a gap. Where a name IS given it must resolve to an
+# existing Godown/Rack/Box — unknown names are reported as row errors rather than
+# silently creating location masters from a typo.
+#
+# Both endpoints are batched (a handful of queries regardless of file size)
+# rather than per-row, so a large sheet does not turn into tens of thousands of
+# sequential round trips.
+# ============================================================================
+
+# Column header -> field. Accepts the Stock Summary labels, the export's labels
+# and the underlying field names, so a sheet exported from the page re-imports
+# without editing.
+STOCK_SUMMARY_IMPORT_ALIASES = {
+    "sl no": None, "sl.no": None, "slno": None, "s no": None, "sr no": None, "sr": None,
+    "model": "model",
+    "part no": "part_no", "part_no": "part_no", "partno": "part_no", "part number": "part_no",
+    "old part no": "old_part_no", "old_part_no": "old_part_no", "old no": "old_part_no",
+    "make part no": "make_part_no", "make_part_no": "make_part_no", "makepartno": "make_part_no",
+    "description 1": "description_1", "description_1": "description_1", "description1": "description_1",
+    "description 2": "description_2", "description_2": "description_2", "description2": "description_2",
+    "remarks oem": "remarks_oem", "remarks_oem": "remarks_oem", "oem": "remarks_oem",
+    "remarks others": "remarks_others", "remarks_others": "remarks_others", "remarks": "remarks_others",
+    "make": "make",
+    "item category": "item_category", "item_category": "item_category", "category": "item_category",
+    "reorder level": "reorder_level", "reorder_level": "reorder_level", "reorder": "reorder_level",
+    "godown": "godown_name", "godown name": "godown_name", "godown_name": "godown_name",
+    "rack no": "rack_no", "rack_no": "rack_no", "rack": "rack_no",
+    "box no": "box_no", "box_no": "box_no", "box": "box_no",
+    "box category": "box_category", "box_category": "box_category",
+    "qty": "quantity", "quantity": "quantity", "total quantity": "quantity", "total_quantity": "quantity",
+    # Images are not importable — a spreadsheet cell cannot carry one.
+    "image": None, "images": None,
+}
+
+STOCK_SUMMARY_TEMPLATE_COLUMNS = [
+    "SL NO", "MODEL", "PART NO", "OLD PART NO", "MAKE PART NO",
+    "DESCRIPTION 1", "DESCRIPTION 2", "REMARKS OEM", "REMARKS OTHERS",
+    "MAKE", "ITEM CATEGORY", "REORDER LEVEL",
+    "GODOWN", "RACK NO", "BOX NO", "BOX CATEGORY", "QTY",
+]
+
+# Master fields carried on each row — used to create a Stock Master entry for a
+# part/make the catalogue has never seen, so imported stock is never orphaned.
+_MASTER_FIELDS = [
+    "model", "old_part_no", "make_part_no", "description_1", "description_2",
+    "remarks_oem", "remarks_others", "item_category",
+]
+
+
+def _read_upload_dataframe(content: bytes, file_name: str):
+    try:
+        if (file_name or "").lower().endswith(".csv"):
+            return pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
+        return pd.read_excel(io.BytesIO(content), dtype=str, keep_default_na=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"File parse error: {e}")
+
+
+async def _parse_stock_summary_rows(content: bytes, file_name: str) -> dict:
+    """Parse, validate and resolve every row. Shared by preview and import so the
+    two can never disagree about what a file means.
+
+    Returns parsed rows (each already carrying resolved location ids and the
+    master snapshot to write), plus per-row errors and the counts the preview
+    reports.
+    """
+    df = _read_upload_dataframe(content, file_name)
+
+    col_map = {}
+    for col in df.columns:
+        key = _normalize_col(col)
+        if key in STOCK_SUMMARY_IMPORT_ALIASES and STOCK_SUMMARY_IMPORT_ALIASES[key]:
+            col_map[col] = STOCK_SUMMARY_IMPORT_ALIASES[key]
+    mapped = set(col_map.values())
+    missing = [lbl for lbl, f in (("PART NO", "part_no"), ("MAKE", "make"), ("QTY", "quantity")) if f not in mapped]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File must contain {', '.join(missing)} column(s). Download the sample file for the correct format.",
+        )
+
+    # --- pass 1: read the sheet into plain rows, collecting shape errors --------
+    raw_rows, errors = [], []
+    for idx, row in df.iterrows():
+        # +2: pandas is 0-based and the sheet's first line is the header, so this
+        # is the row number the user sees in Excel.
+        line = int(idx) + 2
+        data = {f: "" for f in set(col_map.values())}
+        for orig_col, field in col_map.items():
+            val = row.get(orig_col, "")
+            data[field] = "" if val is None else str(val).strip()
+
+        part_no, make = data.get("part_no", ""), data.get("make", "")
+        qty_raw = data.get("quantity", "")
+        if not part_no and not make and not qty_raw:
+            continue  # entirely blank line — not an error, just padding
+        if not part_no:
+            errors.append({"row": line, "message": "Part No is required"}); continue
+        if not make:
+            errors.append({"row": line, "message": f"{part_no}: Make is required"}); continue
+        try:
+            qty = float(qty_raw)
+        except (TypeError, ValueError):
+            errors.append({"row": line, "message": f"{part_no} / {make}: Qty '{qty_raw}' is not a number"}); continue
+        if qty <= 0:
+            errors.append({"row": line, "message": f"{part_no} / {make}: Qty must be greater than 0"}); continue
+        # A box without a rack has no resolvable position — the same rule the
+        # racking note validator applies.
+        if data.get("box_no") and not data.get("rack_no"):
+            errors.append({"row": line, "message": f"{part_no} / {make}: Box No given without a Rack No"}); continue
+
+        try:
+            reorder = int(float(data.get("reorder_level") or 0))
+        except (TypeError, ValueError):
+            reorder = 0
+
+        raw_rows.append({
+            "line": line, "part_no": part_no, "make": make, "quantity": qty,
+            "godown_name": data.get("godown_name", ""), "rack_no": data.get("rack_no", ""),
+            "box_no": data.get("box_no", ""), "box_category": data.get("box_category", ""),
+            "reorder_level": reorder,
+            **{f: data.get(f, "") for f in _MASTER_FIELDS},
+        })
+
+    if not raw_rows:
+        return {"rows": [], "errors": errors, "new_items": 0, "known_locations": 0}
+
+    # --- pass 2: resolve locations, batched -------------------------------------
+    godown_names = {r["godown_name"].strip().lower() for r in raw_rows if r["godown_name"].strip()}
+    godowns_by_name = {}
+    if godown_names:
+        async for g in db.godowns.find({}, {"_id": 0, "id": 1, "godown_name": 1}):
+            godowns_by_name[(g.get("godown_name") or "").strip().lower()] = g
+    racks_by_key, boxes_by_key = {}, {}
+    if any(r["rack_no"].strip() for r in raw_rows):
+        async for rk in db.racks.find({}, {"_id": 0, "id": 1, "godown_id": 1, "rack_no": 1}):
+            racks_by_key[(rk.get("godown_id"), (rk.get("rack_no") or "").strip().lower())] = rk
+    if any(r["box_no"].strip() for r in raw_rows):
+        async for bx in db.boxes.find({}, {"_id": 0, "id": 1, "rack_id": 1, "box_no": 1, "box_category": 1}):
+            boxes_by_key[(bx.get("rack_id"), (bx.get("box_no") or "").strip().lower())] = bx
+
+    # --- pass 3: resolve masters, batched ---------------------------------------
+    pairs = {(r["part_no"], r["make"]) for r in raw_rows}
+    existing_masters = set()
+    if pairs:
+        async for sm in db.stock_master.find(
+            {"part_no": {"$in": sorted({p for p, _ in pairs})}}, {"_id": 0, "part_no": 1, "make": 1},
+        ):
+            existing_masters.add((sm.get("part_no"), sm.get("make")))
+
+    resolved, seen_new_masters = [], set()
+    for r in raw_rows:
+        gname = r["godown_name"].strip()
+        godown_id = godown_name = ""
+        rack_id = rack_no = ""
+        box_id = box_no = box_category = ""
+        if gname:
+            g = godowns_by_name.get(gname.lower())
+            if not g:
+                errors.append({"row": r["line"], "message": f"Godown '{gname}' does not exist — create it in Location Master first"})
+                continue
+            godown_id, godown_name = g["id"], g.get("godown_name", "")
+            rname = r["rack_no"].strip()
+            if rname:
+                rk = racks_by_key.get((godown_id, rname.lower()))
+                if not rk:
+                    errors.append({"row": r["line"], "message": f"Rack '{rname}' does not exist in godown '{godown_name}'"})
+                    continue
+                rack_id, rack_no = rk["id"], rk.get("rack_no", "")
+                bname = r["box_no"].strip()
+                if bname:
+                    bx = boxes_by_key.get((rack_id, bname.lower()))
+                    if not bx:
+                        errors.append({"row": r["line"], "message": f"Box '{bname}' does not exist in rack '{rack_no}'"})
+                        continue
+                    box_id, box_no = bx["id"], bx.get("box_no", "")
+                    box_category = bx.get("box_category", "") or r["box_category"]
+        elif r["rack_no"].strip():
+            # A rack means nothing without the godown that owns it.
+            errors.append({"row": r["line"], "message": f"Rack '{r['rack_no'].strip()}' given without a Godown"})
+            continue
+
+        key = (r["part_no"], r["make"])
+        is_new_master = key not in existing_masters and key not in seen_new_masters
+        if is_new_master:
+            seen_new_masters.add(key)
+
+        resolved.append({
+            **r,
+            "godown_id": godown_id, "godown_name": godown_name,
+            "rack_id": rack_id, "rack_no": rack_no,
+            "box_id": box_id, "box_no": box_no, "box_category": box_category,
+            "needs_master": key not in existing_masters,
+            "counts_as_new_master": is_new_master,
+        })
+
+    return {
+        "rows": resolved,
+        "errors": errors,
+        "new_items": len(seen_new_masters),
+        "known_locations": sum(1 for r in resolved if r["godown_id"]),
+    }
+
+
+def _stock_location_key(r: dict) -> tuple:
+    """Identity of a stock position — the same five fields the Stock Summary
+    aggregation groups on, so "this row's location" means the same thing here as
+    it does on the page the file came from."""
+    return (
+        r.get("part_no", ""), r.get("make", ""),
+        r.get("godown_id", "") or "", r.get("rack_id", "") or "", r.get("box_id", "") or "",
+    )
+
+
+async def _locations_already_holding_stock(rows: list) -> set:
+    """Which of the file's locations already carry a positive balance.
+
+    Re-running the same sheet would otherwise silently double the stock, which is
+    the single most damaging mistake this feature could allow. The preview
+    surfaces the count and the caller chooses what to do about it.
+    """
+    if not rows:
+        return set()
+    part_nos = sorted({r["part_no"] for r in rows})
+    wanted = {_stock_location_key(r) for r in rows}
+    held = set()
+    async for grp in db.transactions.aggregate([
+        {"$match": {"part_no": {"$in": part_nos}}},
+        {"$group": {
+            "_id": {
+                "part_no": "$part_no", "make": "$make", "godown_id": "$godown_id",
+                "rack_id": "$rack_id", "box_id": "$box_id",
+            },
+            "q": {"$sum": {"$cond": [{"$eq": ["$type", "IN"]}, "$quantity", {"$multiply": ["$quantity", -1]}]}},
+        }},
+        {"$match": {"q": {"$gt": 0}}},
+    ]):
+        k = grp["_id"]
+        key = (
+            k.get("part_no", ""), k.get("make", ""),
+            k.get("godown_id", "") or "", k.get("rack_id", "") or "", k.get("box_id", "") or "",
+        )
+        if key in wanted:
+            held.add(key)
+    return held
+
+
+@router.post("/stock-summary/import/preview")
+async def stock_summary_import_preview(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Read the file and report exactly what an import would do — nothing is written."""
+    content = await file.read()
+    file_name = file.filename or "unknown"
+    parsed = await _parse_stock_summary_rows(content, file_name)
+    rows = parsed["rows"]
+    already = await _locations_already_holding_stock(rows)
+    duplicate_rows = sum(1 for r in rows if _stock_location_key(r) in already)
+    return {
+        "file_name": file_name,
+        "total_rows": len(rows) + len(parsed["errors"]),
+        "valid_rows": len(rows),
+        "total_qty": sum(r["quantity"] for r in rows),
+        "new_items": parsed["new_items"],
+        "duplicate_rows": duplicate_rows,
+        "error_rows": len(parsed["errors"]),
+        # Capped: a badly-shaped file can produce thousands of these and the
+        # dialog only needs enough to show the user what is wrong.
+        "errors": parsed["errors"][:50],
+    }
+
+
+@router.post("/stock-summary/import")
+async def stock_summary_import(
+    file: UploadFile = File(...),
+    mode: str = Query("skip", regex="^(skip|add)$"),
+    user=Depends(get_current_user),
+):
+    """Write the file's rows in as ordinary stock — one IN transaction each.
+
+    `mode` decides what happens to a location that already holds stock:
+      skip — leave it alone (default; makes a re-run of the same sheet a no-op)
+      add  — record the quantity on top of what is already there
+
+    Rows with errors are never written; they are reported and skipped, so a
+    partially-wrong file still imports its good rows instead of failing whole.
+    """
+    content = await file.read()
+    file_name = file.filename or "unknown"
+    parsed = await _parse_stock_summary_rows(content, file_name)
+    rows = parsed["rows"]
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid rows to import" + (f" — {len(parsed['errors'])} row(s) have errors" if parsed["errors"] else ""),
+        )
+
+    already = await _locations_already_holding_stock(rows) if mode == "skip" else set()
+    now = now_iso()
+    batch_id = str(uuid.uuid4())
+
+    # Masters first: stock must never reference a part/make the catalogue does not
+    # know. Only genuinely-new entries are created — an existing master is left
+    # exactly as it is, because the spreadsheet is a stock count, not a catalogue
+    # edit, and must not quietly rewrite item descriptions.
+    new_masters, seen = [], set()
+    for r in rows:
+        key = (r["part_no"], r["make"])
+        if not r["needs_master"] or key in seen:
+            continue
+        seen.add(key)
+        new_masters.append({
+            "id": str(uuid.uuid4()),
+            "part_no": r["part_no"], "make": r["make"],
+            "new_part_no": "", "unit": "",
+            "reorder_level": r.get("reorder_level") or 0,
+            "images": [], "image": "",
+            "created_at": now, "created_by": user.get("email", ""),
+            **{f: r.get(f, "") for f in _MASTER_FIELDS},
+        })
+    if new_masters:
+        try:
+            await db.stock_master.insert_many(new_masters, ordered=False)
+        except Exception:
+            # A concurrent create can claim the same (part_no, make); the unique
+            # index rejects just that document and the rest still land.
+            pass
+
+    # Master snapshot for the transaction rows, re-read so both pre-existing and
+    # just-created items denormalize the same way every other stock-in does.
+    masters = {}
+    async for sm in db.stock_master.find(
+        {"part_no": {"$in": sorted({r["part_no"] for r in rows})}}, {"_id": 0},
+    ):
+        masters[(sm.get("part_no"), sm.get("make"))] = sm
+
+    tx_docs, skipped_existing = [], 0
+    for r in rows:
+        if mode == "skip" and _stock_location_key(r) in already:
+            skipped_existing += 1
+            continue
+        m = masters.get((r["part_no"], r["make"]), {})
+        tx_docs.append({
+            "id": str(uuid.uuid4()),
+            "type": "IN",
+            "part_no": r["part_no"], "make": r["make"],
+            "model": m.get("model", r.get("model", "")),
+            "old_part_no": m.get("old_part_no", r.get("old_part_no", "")),
+            "make_part_no": m.get("make_part_no", r.get("make_part_no", "")),
+            "description_1": m.get("description_1", r.get("description_1", "")),
+            "description_2": m.get("description_2", r.get("description_2", "")),
+            "remarks_oem": m.get("remarks_oem", r.get("remarks_oem", "")),
+            "remarks_others": m.get("remarks_others", r.get("remarks_others", "")),
+            "item_category": m.get("item_category", r.get("item_category", "")),
+            "image": m.get("image", ""),
+            "quantity": r["quantity"],
+            # Taken exactly as the file gave it — blank stays blank. The rest of
+            # the app already handles stock held with no godown/rack/box.
+            "godown_id": r["godown_id"], "godown_name": r["godown_name"],
+            "rack_id": r["rack_id"], "rack_no": r["rack_no"],
+            "box_id": r["box_id"], "box_no": r["box_no"], "box_category": r["box_category"],
+            # Neutral provenance marker so one import can be identified later
+            # (e.g. to reverse a mistaken run). It changes no behaviour.
+            "import_batch_id": batch_id,
+            "created_at": now, "created_by": user.get("email"),
+        })
+
+    if tx_docs:
+        await db.transactions.insert_many(tx_docs)
+
+    await _notify(
+        actor=user, type="stock.imported", module="stock_summary",
+        title=f"Stock imported ({len(tx_docs)} row(s))",
+        message=(
+            f"{user.get('email')} imported {len(tx_docs)} stock row(s) from {file_name}"
+            f", total qty {sum(d['quantity'] for d in tx_docs):g}."
+            + (f" {len(new_masters)} new item(s) added to Stock Master." if new_masters else "")
+            + (f" {skipped_existing} row(s) skipped — location already had stock." if skipped_existing else "")
+        ),
+        audience="module",
+    )
+
+    return {
+        "imported": len(tx_docs),
+        "total_qty": sum(d["quantity"] for d in tx_docs),
+        "new_items": len(new_masters),
+        "skipped_existing": skipped_existing,
+        "error_rows": len(parsed["errors"]),
+        "errors": parsed["errors"][:50],
+        "batch_id": batch_id,
+        "mode": mode,
+    }
+
+
+@router.get("/stock-summary/import/template")
+async def stock_summary_import_template():
+    """Sample file, in exactly the shape the importer expects. The second row
+    deliberately leaves Godown/Rack/Box blank to show that location is optional."""
+    sample_rows = [
+        ["1", "Model-X100", "3922900", "OPN-1001", "CUM-3922900",
+         "Fuel Pump Assembly", "With gasket", "OEM remark sample", "Other remark sample",
+         "Cummins", "Engine Parts", "5", "Main Godown", "R-01", "B-01", "Small", "25"],
+        ["2", "Model-X100", "3922901", "OPN-1002", "CUM-3922901",
+         "Filter Element", "", "", "",
+         "Cummins", "Engine Parts", "2", "", "", "", "", "12"],
+    ]
+    data = [dict(zip(STOCK_SUMMARY_TEMPLATE_COLUMNS, row)) for row in sample_rows]
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(data).to_excel(writer, index=False, sheet_name="Stock Summary")
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=stock_summary_import_sample.xlsx"},
+    )
 
 
 # -------------------- STOCK BALANCE --------------------

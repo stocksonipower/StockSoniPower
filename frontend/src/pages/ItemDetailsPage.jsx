@@ -427,7 +427,7 @@ function ItemDetailsContent({ details, selected }) {
             align={["left", "left", "left", "center", "left"]}
             rows={details.issue_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.in_no}</span>, fmtDate(r.in_date),
-              r.assigned_to_name || "—",
+              assigneeLabel(r.assigned_to_name, r.assigned_to_email),
               (it.issued_qty ?? it.quantity) == null
                 ? <span className="text-blue-700 font-bold">Open</span>
                 : num(it.issued_qty ?? it.quantity),

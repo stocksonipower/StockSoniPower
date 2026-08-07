@@ -265,7 +265,7 @@ export default function UsersPage() {
                   <td className="text-xs text-slate-600">
                     {u.role === "admin" ? "All (admin)" : `${moduleCount} / ${MODULE_KEYS.length}`}
                   </td>
-                  <td className="text-xs text-slate-700 font-mono">{fmtDate(u.last_login)}</td>
+                  <td className="text-xs text-slate-700 font-mono date-cell">{fmtDate(u.last_login)}</td>
                   <td className="text-right">
                     <div className="inline-flex items-center gap-1">
                       <button

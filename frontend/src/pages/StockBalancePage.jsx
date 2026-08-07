@@ -8,11 +8,13 @@ import {
 import {
   MagnifyingGlass, ArrowsClockwise, Image as ImgIcon, FunnelSimple, X,
   DownloadSimple, CaretLeft, CaretRight, ArrowsLeftRight, DotsSixVertical,
+  UploadSimple, FileArrowDown, FileText, CheckCircle, Warning, Package,
 } from "@phosphor-icons/react";
 import AuthImage from "../components/AuthImage";
 import ImageViewerDialog from "../components/ImageViewerDialog";
 import PartNoLink from "../components/PartNoLink";
 import ExcelColumnFilter, { BLANK } from "../components/ExcelColumnFilter";
+import ImportProgressDialog from "../components/ImportProgressDialog";
 import { exportToExcel } from "../lib/exportExcel";
 import { useAuth } from "../lib/auth";
 import { toast } from "sonner";
@@ -67,10 +69,18 @@ export default function StockBalancePage() {
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
 
+  // Stock import: file -> preview (what would happen) -> confirm -> write.
+  // Mirrors the Stock Master bulk import so the two feel like one feature.
+  const [importPreview, setImportPreview] = useState(null);
+  const [pendingFile, setPendingFile] = useState(null);
+  const [analysing, setAnalysing] = useState(false);
+  const [importing, setImporting] = useState(false);
+
   const tableRef = useRef(null);
   const resizingRef = useRef(null);
   const autosizeCanvasRef = useRef(null);
   const searchInputRef = useRef(null);
+  const importInputRef = useRef(null);
 
   const load = async (q) => {
     setLoading(true);
@@ -364,6 +374,71 @@ export default function StockBalancePage() {
     exportToExcel(filteredRows, exportCols, `Stock_Summary_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  /* ---------------- Stock import ---------------- */
+
+  const downloadImportSample = async () => {
+    try {
+      const res = await api.get("/stock-summary/import/template", { responseType: "blob" });
+      const url = window.URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "stock_summary_import_sample.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Sample file downloaded");
+    } catch {
+      toast.error("Could not download the sample file");
+    }
+  };
+
+  const handleImportFileSelected = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (importInputRef.current) importInputRef.current.value = "";
+    setPendingFile(file);
+    setImportPreview(null);
+    setAnalysing(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data } = await api.post("/stock-summary/import/preview", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setImportPreview(data);
+    } catch (err) {
+      setPendingFile(null);
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not read the file");
+    } finally {
+      setAnalysing(false);
+    }
+  };
+
+  const confirmImport = async (mode) => {
+    if (!pendingFile) return;
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", pendingFile);
+      const { data } = await api.post(`/stock-summary/import?mode=${mode}`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const parts = [`Imported ${data.imported} row(s), qty ${data.total_qty}`];
+      if (data.new_items > 0) parts.push(`${data.new_items} new item(s) added to Stock Master`);
+      if (data.skipped_existing > 0) parts.push(`${data.skipped_existing} skipped (already had stock)`);
+      if (data.error_rows > 0) parts.push(`${data.error_rows} row(s) had errors and were not imported`);
+      toast.success(parts.join(" · "));
+      setImportPreview(null);
+      setPendingFile(null);
+      load(search);   // the table is derived from transactions — re-read it
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const stickyTh = "sticky top-0 z-20 bg-slate-50";
 
   const renderCell = (c, r, i) => {
@@ -451,6 +526,32 @@ export default function StockBalancePage() {
             </button>
           )}
         </div>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".xlsx,.csv"
+          onChange={handleImportFileSelected}
+          className="hidden"
+          data-testid="balance-import-input"
+        />
+        <Button
+          onClick={downloadImportSample}
+          variant="outline"
+          className="rounded-sm border-slate-300 shrink-0"
+          title="Download a sample file with the columns the importer expects"
+          data-testid="balance-sample-button"
+        >
+          <FileArrowDown size={16} weight="bold" className="mr-2" /> Sample
+        </Button>
+        <Button
+          onClick={() => importInputRef.current?.click()}
+          variant="outline"
+          className="rounded-sm border-slate-300 shrink-0"
+          title="Import existing stock from a spreadsheet using these same columns"
+          data-testid="balance-import-button"
+        >
+          <UploadSimple size={16} weight="bold" className="mr-2" /> Import Stock
+        </Button>
         <Button
           onClick={() => setColumnSettingsOpen(true)}
           variant="outline"
@@ -577,7 +678,146 @@ export default function StockBalancePage() {
         onSave={persistColumns}
         onAutoFit={measureAutoWidth}
       />
+
+      {/* Reading the file and checking it against stock/locations — nothing written yet. */}
+      <ImportProgressDialog
+        open={analysing}
+        title="Analysing File…"
+        fileName={pendingFile?.name}
+        detail="Checking items, locations and existing stock…"
+        testid="balance-import-analysing-dialog"
+      />
+      {/* The write itself. Indeterminate: the endpoint returns only once every
+          row is in, so there is no honest percentage to report. */}
+      <ImportProgressDialog
+        open={importing}
+        fileName={pendingFile?.name}
+        detail={
+          <>
+            Recording <span className="font-mono font-semibold text-slate-900">{importPreview?.valid_rows ?? 0}</span> stock row(s)
+            from <span className="font-semibold text-slate-800">{pendingFile?.name}</span>.
+          </>
+        }
+        note="Large files can take a while. Please keep this tab open — closing it now would leave the import part-finished."
+        testid="balance-import-progress-dialog"
+      />
+
+      <StockImportPreviewDialog
+        preview={importPreview}
+        fileName={pendingFile?.name}
+        importing={importing}
+        onCancel={() => { if (!importing) { setImportPreview(null); setPendingFile(null); } }}
+        onConfirm={confirmImport}
+      />
     </div>
+  );
+}
+
+/* ============================================================================
+   Import review — what the file will do, before anything is written.
+   ========================================================================== */
+function StockImportPreviewDialog({ preview, fileName, importing, onCancel, onConfirm }) {
+  // `skip` protects against the worst mistake this feature allows: re-running the
+  // same sheet and silently doubling the stock. It is therefore the default, and
+  // `add` has to be chosen deliberately.
+  const [mode, setMode] = useState("skip");
+  useEffect(() => { if (preview) setMode("skip"); }, [preview]);
+
+  // The progress overlay takes over while the write runs.
+  if (!preview || importing) return null;
+
+  const stats = [
+    { label: "File Name", value: fileName || preview.file_name, icon: <FileText size={18} weight="bold" className="text-slate-500" />, wide: true },
+    { label: "Rows To Import", value: preview.valid_rows, icon: <CheckCircle size={18} weight="bold" className="text-emerald-600" />, color: "text-emerald-700" },
+    { label: "Total Qty", value: preview.total_qty, icon: <Package size={18} weight="bold" className="text-blue-600" />, color: "text-blue-700" },
+    { label: "New Items", value: preview.new_items, icon: <ArrowsLeftRight size={18} weight="bold" className="text-blue-600" />, color: "text-blue-700" },
+    { label: "Rows With Errors", value: preview.error_rows, icon: <Warning size={18} weight="bold" className="text-amber-500" />, color: preview.error_rows > 0 ? "text-amber-700" : "text-slate-800" },
+  ];
+
+  return (
+    <Dialog open={true} onOpenChange={(v) => { if (!v) onCancel(); }}>
+      <DialogContent className="max-w-2xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="balance-import-preview-dialog">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-black tracking-tight text-slate-900">Review Stock Import</DialogTitle>
+          <DialogDescription className="text-xs text-slate-500">
+            Each row is recorded as ordinary stock. Godown, Rack and Box are optional — rows that leave
+            them blank are imported with no location, exactly as given.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-3 mt-1">
+          {stats.map((s) => (
+            <div key={s.label} className={`flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-sm p-3 ${s.wide ? "col-span-2" : ""}`}>
+              <div className="mt-0.5 shrink-0">{s.icon}</div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-0.5">{s.label}</div>
+                <div className={`font-mono font-bold text-sm truncate ${s.color || "text-slate-800"}`} title={String(s.value)}
+                  data-testid={`balance-preview-${s.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                  {s.value}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {preview.error_rows > 0 && (
+          <div className="border border-amber-200 bg-amber-50 rounded-sm p-3">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-800 mb-1">
+              {preview.error_rows} row(s) will be skipped
+            </div>
+            <ul className="text-[11px] text-amber-900 space-y-0.5 max-h-32 overflow-y-auto font-mono">
+              {(preview.errors || []).map((e, i) => (
+                <li key={i}>Row {e.row}: {e.message}</li>
+              ))}
+              {preview.error_rows > (preview.errors || []).length && (
+                <li className="italic">…and {preview.error_rows - (preview.errors || []).length} more</li>
+              )}
+            </ul>
+            <div className="text-[10px] text-amber-700 mt-1.5">
+              The remaining rows still import — fix these in the file and import it again.
+            </div>
+          </div>
+        )}
+
+        {preview.duplicate_rows > 0 && (
+          <div className="mt-1">
+            <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-2">
+              {preview.duplicate_rows} row(s) are for a part &amp; location that already holds stock
+            </div>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setMode("skip")} data-testid="balance-mode-skip"
+                className={`flex-1 rounded-sm border-2 px-4 py-3 text-left transition-all cursor-pointer
+                  ${mode === "skip" ? "border-blue-600 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">Skip those rows</div>
+                <div className="text-[11px] text-slate-500 leading-snug">
+                  Leaves existing stock untouched. Re-importing the same file changes nothing.
+                </div>
+              </button>
+              <button type="button" onClick={() => setMode("add")} data-testid="balance-mode-add"
+                className={`flex-1 rounded-sm border-2 px-4 py-3 text-left transition-all cursor-pointer
+                  ${mode === "add" ? "border-amber-500 bg-amber-50" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+                <div className="text-sm font-semibold text-slate-800 leading-none mb-1">Add on top</div>
+                <div className="text-[11px] text-slate-500 leading-snug">
+                  Adds the quantity to what is already there. Running this twice doubles the stock.
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 mt-4">
+          <Button variant="outline" className="rounded-sm" onClick={onCancel} data-testid="balance-import-cancel">Cancel</Button>
+          <Button
+            className="rounded-sm bg-blue-700 hover:bg-blue-800 min-w-[160px]"
+            onClick={() => onConfirm(mode)}
+            disabled={preview.valid_rows === 0}
+            data-testid="balance-import-confirm"
+          >
+            Import {preview.valid_rows} Row(s)
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

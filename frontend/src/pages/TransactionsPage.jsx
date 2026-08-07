@@ -8,8 +8,9 @@ import { exportToExcel } from "../lib/exportExcel";
 import DocumentDetailDialog from "../components/DocumentDetailDialog";
 import PartNoLink from "../components/PartNoLink";
 import { toast } from "sonner";
+import { actorLabel } from "../lib/assignee";
 
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 50;
 
 const fmtDateOnly = (iso) => {
   if (!iso) return "";
@@ -78,7 +79,7 @@ export default function TransactionsPage() {
     { key: "rack_no", label: "Rack No", value: (t) => t.rack_no || "" },
     { key: "box_no", label: "Box No", value: (t) => t.box_no || "" },
     { key: "quantity", label: "Quantity", value: (t) => t.quantity ?? 0 },
-    { key: "by_user", label: "By User", value: (t) => t.created_by || "" },
+    { key: "by_user", label: "By User", value: (t) => actorLabel(t.created_by_name, t.created_by, "") },
   ], []);
 
   const { filteredRows, getColumnHeaderProps } = useTableSortFilter(txns, columns);
@@ -161,8 +162,8 @@ export default function TransactionsPage() {
                 return (
                   <tr key={t.id} data-testid={`tx-row-${t.id}`}>
                     <td className="font-mono text-slate-500">{i + 1}</td>
-                    <td className="text-xs font-mono text-slate-500">{fmtDateOnly(t.created_at)}</td>
-                    <td className="text-xs font-mono text-slate-500">{fmtTimeOnly(t.created_at)}</td>
+                    <td className="text-xs font-mono text-slate-500 date-cell">{fmtDateOnly(t.created_at)}</td>
+                    <td className="text-xs font-mono text-slate-500 date-cell">{fmtTimeOnly(t.created_at)}</td>
                     <td>
                       {(() => {
                         const dt = displayType(t);
@@ -194,7 +195,7 @@ export default function TransactionsPage() {
                     <td className="font-mono">{t.rack_no}</td>
                     <td className="font-mono">{t.box_no}</td>
                     <td className="text-center font-mono font-bold">{t.quantity}</td>
-                    <td className="text-xs text-slate-500">{t.created_by}</td>
+                    <td className="text-xs text-slate-500" title={actorLabel(t.created_by_name, t.created_by)}>{actorLabel(t.created_by_name, t.created_by)}</td>
                   </tr>
                 );
               })}

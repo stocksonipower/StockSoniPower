@@ -5,6 +5,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "./ui/select";
 import { UserCircle } from "@phosphor-icons/react";
+import { assigneeLabel, userLabel } from "../lib/assignee";
 
 /**
  * Dropdown to assign a workflow note (Receipt Note / Issue Note) to a specific user.
@@ -46,11 +47,14 @@ export default function AssigneeSelect({ label = "Assign To", value, onChange, m
           <SelectItem value={UNASSIGNED} data-testid={`${testid || "assignee"}-option-unassigned`}>
             <span className="text-slate-500 italic">— Unassigned (anyone) —</span>
           </SelectItem>
+          {/* Users are chosen and shown by NAME. The email address is deliberately
+              not rendered — it is the account identifier, not how anyone refers to
+              a colleague, and what is picked here is what ends up on the note, its
+              preview and its printed copy. */}
           {users.map((u) => (
             <SelectItem key={u.id} value={u.id} data-testid={`${testid || "assignee"}-option-${u.id}`}>
-              <span className="font-semibold">{u.name || u.email}</span>
+              <span className="font-semibold">{userLabel(u)}</span>
               {u.role === "admin" && <span className="ml-2 text-[10px] text-blue-700 font-bold">ADMIN</span>}
-              <span className="ml-2 text-xs text-slate-500">{u.email}</span>
             </SelectItem>
           ))}
         </SelectContent>
@@ -62,7 +66,7 @@ export default function AssigneeSelect({ label = "Assign To", value, onChange, m
   );
 }
 
-/** Compact, inline assignee chip for list rows / detail dialogs. */
+/** Compact, inline assignee chip for list rows / detail dialogs. Always a name. */
 export function AssigneeBadge({ name, email, testid }) {
   if (!name && !email) {
     return (
@@ -71,13 +75,14 @@ export function AssigneeBadge({ name, email, testid }) {
       </span>
     );
   }
+  const label = assigneeLabel(name, email, "Unassigned");
   return (
     <span
       className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm bg-violet-50 text-violet-800"
-      title={email || ""}
+      title={label}
       data-testid={testid}
     >
-      <UserCircle size={10} weight="bold" /> {name || email}
+      <UserCircle size={10} weight="bold" /> {label}
     </span>
   );
 }

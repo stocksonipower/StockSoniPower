@@ -18,6 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { assigneeLabel, actorLabel } from "../lib/assignee";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
@@ -25,7 +26,7 @@ import { exportToExcel } from "../lib/exportExcel";
 import { buildStandardPrintHtml, openPrintWindow, htmlEscape, formatLocationText } from "../lib/printDocument";
 import { noteQtys, varianceLabel, varianceValue, varianceClass, varianceTitle } from "../lib/noteQtys";
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const NO_LOCATION = "__NO_LOCATION__";
 
 function fmtDate(iso) {
@@ -330,8 +331,8 @@ function printTransferRequest(s, noteHistory = []) {
       ["Status", transferRequestStatusLabel(s.status)],
     ],
     fieldsRight: [
-      ["Assigned To", s.assigned_to_name || s.assigned_to_email || "—"],
-      ["Created By", s.created_by || "—"],
+      ["Assigned To", assigneeLabel(s.assigned_to_name, s.assigned_to_email)],
+      ["Created By", actorLabel(null, s.created_by)],
       ["Created At", s.created_at ? new Date(s.created_at).toLocaleString() : "—"],
     ],
     columns: [
@@ -342,7 +343,7 @@ function printTransferRequest(s, noteHistory = []) {
       { label: "Status" },
     ],
     rows,
-    printedBy: s.created_by,
+    printedBy: actorLabel(null, s.created_by),
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
@@ -388,8 +389,8 @@ function printTransferNote(stn) {
     // Quantities live only in the table below, not duplicated up here — one place to read
     // them, and no risk of the header block and the table showing different numbers.
     fieldsRight: [
-      ["Assigned To", stn.parent_assigned_to_name || stn.parent_assigned_to_email || "—"],
-      ["Receiver / Created By", stn.created_by || "—"],
+      ["Assigned To", assigneeLabel(stn.parent_assigned_to_name, stn.parent_assigned_to_email)],
+      ["Receiver / Created By", actorLabel(null, stn.created_by)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item" },
@@ -400,7 +401,7 @@ function printTransferNote(stn) {
       { label: "Receiver" },
     ],
     rows,
-    printedBy: stn.created_by,
+    printedBy: actorLabel(null, stn.created_by),
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
@@ -601,15 +602,15 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lock = hasNotes || lockedToOther;
               const editTitle = hasNotes ? "Cannot edit — transfer has already started"
-                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
+                : (lockedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Edit");
               const deleteTitle = hasNotes ? "Cannot delete — transfer has already started"
-                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
+                : (lockedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Delete");
               const label = statusLabel(r);
               const cls = transferRequestStatusClass(r.status);
               return (
                 <tr key={r.id} data-testid={`str-row-${r.str_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.str_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.str_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`str-open-${r.str_no}`}>
                       {r.str_no}
@@ -694,7 +695,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                 } />
               </div>
               <div className="space-y-2">
-                <Detail k="CREATED BY" v={s.created_by || "—"} />
+                <Detail k="CREATED BY" v={actorLabel(null, s.created_by)} />
                 <Detail k="CREATED AT" v={s.created_at ? new Date(s.created_at).toLocaleString() : "—"} />
                 <div>
                   <div className="label-sm">ASSIGNED TO</div>
@@ -1561,13 +1562,13 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               const aEmail = r.parent_assigned_to_email;
               const lockedToOther = !!aId && aId !== me?.id && !isAdmin;
               const lock = recorded || lockedToOther;
-              const editTitle = recorded ? "Already completed" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Transfer Note" : "Edit"));
-              const recordTitle = recorded ? "Already completed" : (pending ? "Open and save draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Complete Transfer"));
+              const editTitle = recorded ? "Already completed" : (lockedToOther ? `Locked — assigned to ${assigneeLabel(aName, aEmail)}` : (pending ? "Open Transfer Note" : "Edit"));
+              const recordTitle = recorded ? "Already completed" : (pending ? "Open and save draft first" : (lockedToOther ? `Locked — assigned to ${assigneeLabel(aName, aEmail)}` : "Complete Transfer"));
               const recordDisabled = recorded || pending || lockedToOther || recordingId === r.id;
               return (
                 <tr key={r.id} data-testid={`stn-row-${r.stn_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.stn_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.stn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`stn-open-${r.stn_no}`}>{r.stn_no}</button>
                   </td>
@@ -1673,7 +1674,7 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 <Detail k="REJECTED QTY" v={
                   <span className={`font-mono font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>
                 } />
-                <Detail k="CREATED BY" v={stn.created_by || "—"} />
+                <Detail k="CREATED BY" v={actorLabel(null, stn.created_by)} />
                 <div>
                   <div className="label-sm">ASSIGNED TO (FROM REQUEST)</div>
                   <div className="mt-1"><AssigneeBadge name={stn.parent_assigned_to_name} email={stn.parent_assigned_to_email} /></div>

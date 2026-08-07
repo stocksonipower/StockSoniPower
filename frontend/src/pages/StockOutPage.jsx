@@ -19,6 +19,8 @@ import {
 } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 import AssigneeSelect, { AssigneeBadge } from "../components/AssigneeSelect";
+import { assigneeLabel, actorLabel } from "../lib/assignee";
+import ImportProgressDialog from "../components/ImportProgressDialog";
 import ExcelColumnFilter from "../components/ExcelColumnFilter";
 import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
@@ -26,7 +28,7 @@ import { exportToExcel } from "../lib/exportExcel";
 import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
 import { noteQtys, varianceLabel, varianceValue, varianceClass, varianceTitle } from "../lib/noteQtys";
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const NO_GODOWN = "__NO_GODOWN__";
 // Stock can legitimately sit in a godown with no rack and/or no box (racking is not
 // mandatory everywhere). Radix rejects an empty SelectItem value, so those levels get a
@@ -369,8 +371,8 @@ function printPickingNote(pn) {
     // read them, and no risk of the header block and the table ever showing different
     // numbers for the same note.
     fieldsRight: [
-      ["Assigned To", pn.parent_assigned_to_name || pn.parent_assigned_to_email || "—"],
-      ["Picker", pn.created_by || "—"],
+      ["Assigned To", assigneeLabel(pn.parent_assigned_to_name, pn.parent_assigned_to_email)],
+      ["Picker", actorLabel(null, pn.created_by)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part No" }, { label: "Item" },
@@ -382,7 +384,7 @@ function printPickingNote(pn) {
     ],
     rows,
     narration: pn.narration || "",
-    printedBy: pn.created_by,
+    printedBy: actorLabel(null, pn.created_by),
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
@@ -454,9 +456,9 @@ function printIssueNote(inn, pickingHistory = []) {
     // numbers for the same note.
     fieldsRight: [
       ["Status", issueStatusLabel(inn.status)],
-      ["Created By", inn.created_by || "—"],
+      ["Created By", actorLabel(null, inn.created_by)],
       ["Created At", inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"],
-      ["Assigned To", inn.assigned_to_name || inn.assigned_to_email || "—"],
+      ["Assigned To", assigneeLabel(inn.assigned_to_name, inn.assigned_to_email)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
@@ -466,7 +468,7 @@ function printIssueNote(inn, pickingHistory = []) {
     ],
     rows,
     narration: inn.narration || "",
-    printedBy: inn.created_by,
+    printedBy: actorLabel(null, inn.created_by),
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
@@ -735,23 +737,23 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
               const lock = hasPicking || lockedToOther;
               const editTitle = hasPicking ? "Cannot edit — picking has already started"
-                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Edit");
+                : (lockedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Edit");
               const deleteTitle = hasPicking ? "Cannot delete — picking has already started"
-                : (lockedToOther ? `Locked — assigned to ${r.assigned_to_name || r.assigned_to_email}` : "Delete");
+                : (lockedToOther ? `Locked — assigned to ${assigneeLabel(r.assigned_to_name, r.assigned_to_email)}` : "Delete");
               const label = statusLabel(r);
               const cls = issueStatusClass(r.status);
               return (
                 <tr key={r.id} data-testid={`in-row-${r.in_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="text-slate-700" data-testid={`in-type-${r.in_no}`}>{r.stock_out_type || "—"}</td>
-                  <td className="font-mono text-slate-700 whitespace-nowrap">{fmtDate(r.in_date)}</td>
+                  <td className="font-mono text-slate-700 whitespace-nowrap date-cell">{fmtDate(r.in_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`in-open-${r.in_no}`}>
                       {r.in_no}
                     </button>
                   </td>
                   <td className="text-slate-700 max-w-[220px] truncate" title={r.reference_doc_name || ""}>{r.reference_doc_name || "—"}</td>
-                  <td className="font-mono text-slate-700 whitespace-nowrap">{r.reference_doc_date ? fmtDate(r.reference_doc_date) : "—"}</td>
+                  <td className="font-mono text-slate-700 whitespace-nowrap date-cell">{r.reference_doc_date ? fmtDate(r.reference_doc_date) : "—"}</td>
                   <td className="font-mono text-slate-700">{r.reference_doc_no || "—"}</td>
                   <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.issued_qty_total || "—"}</td>
                   <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.picked_qty_total ?? 0}</td>
@@ -836,7 +838,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                     {issueStatusLabel(inn.status)}
                   </span>
                 } />
-                <Detail k="CREATED BY" v={inn.created_by || "—"} />
+                <Detail k="CREATED BY" v={actorLabel(null, inn.created_by)} />
                 <Detail k="CREATED AT" v={inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"} />
                 <div>
                   <div className="label-sm">ASSIGNED TO</div>
@@ -1060,6 +1062,9 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
   const [savingDraft, setSavingDraft] = useState(false);
   const [savingFinal, setSavingFinal] = useState(false);
   const [assignedToUserId, setAssignedToUserId] = useState("");
+  // { done, total, fileName } while an Excel import is being read and its rows
+  // resolved against stock; null when idle. See handleExcelImport.
+  const [importProgress, setImportProgress] = useState(null);
   const fileInputRef = useRef(null);
 
   const loadStockOutTypes = useCallback(async () => {
@@ -1397,12 +1402,18 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
   const handleExcelImport = async (file) => {
     if (!file) return;
+    // Parsing is quick, but each imported row then costs one part lookup (and a
+    // second godown lookup when the part resolves), so a sheet of any size leaves
+    // the grid visibly half-populated for a while. The overlay reports how far
+    // along that is and stops the user editing rows that are about to be
+    // overwritten by an in-flight lookup.
+    setImportProgress({ done: 0, total: 0, fileName: file.name });
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
-      if (!rows.length) { toast.error("Excel file has no rows"); return; }
+      if (!rows.length) { toast.error("Excel file has no rows"); setImportProgress(null); return; }
       const norm = (s) => String(s || "").toLowerCase().replace(/[\s_-]+/g, "");
       const pickCol = (row, names) => {
         const map = {};
@@ -1437,11 +1448,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
           _importId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         });
       }
-      if (!newRows.length) { toast.error("No valid rows found in file"); return; }
+      if (!newRows.length) { toast.error("No valid rows found in file"); setImportProgress(null); return; }
       setItems((prev) => {
         const onlyEmpty = prev.length === 1 && !prev[0].part_no && !prev[0].quantity;
         return onlyEmpty ? newRows : [...prev, ...newRows];
       });
+      // One row is "done" only once its whole lookup chain has settled — the part
+      // lookup AND, when the part resolved, the follow-up godown lookup. Counting
+      // at the part lookup alone would drop the overlay while the Godown
+      // Preference dropdowns were still filling in.
+      setImportProgress({ done: 0, total: newRows.length, fileName: file.name });
+      let settled = 0;
+      const finishOne = () => {
+        settled += 1;
+        setImportProgress((p) => (
+          settled >= newRows.length ? null : (p ? { ...p, done: settled } : p)
+        ));
+      };
       newRows.forEach((row) => {
         const importId = row._importId;
         setTimeout(() => {
@@ -1476,17 +1499,23 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
                       selected_godown_id: gmatch ? gmatch.godown_id : null,
                       selected_godown_name: gmatch ? gmatch.godown_name : null,
                     }));
-                  }).catch(() => {});
+                  })
+                  .catch(() => {})
+                  .finally(finishOne);
+              } else {
+                finishOne();   // no make resolved — no godown lookup follows
               }
             })
             .catch(() => {
               setItems((prev) => prev.map((r) => r._importId !== importId ? r : { ...r, partLooked: true }));
+              finishOne();
             });
         }, 0);
       });
       toast.success(`Imported ${newRows.length} row${newRows.length > 1 ? "s" : ""} from Excel`);
     } catch (err) {
       toast.error("Could not read Excel file");
+      setImportProgress(null);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
@@ -1494,6 +1523,18 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
 
   return (
     <div className="mt-4 space-y-6" data-testid="in-create-view">
+      {/* Blocking while an import is in flight: the rows are still being filled
+          in from stock lookups, so editing them now would be overwritten. */}
+      <ImportProgressDialog
+        open={!!importProgress}
+        fileName={importProgress?.fileName}
+        done={importProgress?.done}
+        total={importProgress?.total}
+        detail={importProgress?.total > 0 ? (
+          <>Matching items against stock — <span className="font-mono font-semibold text-slate-900">{importProgress.done}</span> of <span className="font-mono font-semibold text-slate-900">{importProgress.total}</span></>
+        ) : null}
+        testid="in-import-progress-dialog"
+      />
       <div className="flex items-center justify-between">
         <Button onClick={onCancel} variant="outline" className="rounded-sm border-slate-300" data-testid="in-back-button">
           <ArrowLeft size={14} weight="bold" className="mr-2" /> Back to list
@@ -2093,19 +2134,19 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               const lock = recorded || closed || lockedToOther;
               const editTitle = recorded ? "Cannot edit — already recorded"
                 : closed ? "Cannot edit — this note was closed as unpickable"
-                : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Picking" : "Edit"));
+                : (lockedToOther ? `Locked — assigned to ${assigneeLabel(aName, aEmail)}` : (pending ? "Open Picking" : "Edit"));
               const recordTitle = recorded ? "Already recorded"
                 : closed ? "Closed — nothing to record"
-                : (pending ? "Open Picking and save a draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out"));
+                : (pending ? "Open Picking and save a draft first" : (lockedToOther ? `Locked — assigned to ${assigneeLabel(aName, aEmail)}` : "Record as Stock Out"));
               const recordDisabled = lock || pending || recordingId === r.id;
               return (
                 <tr key={r.id} data-testid={`pn-row-${r.pn_no}`} className={`transition-colors duration-100 ${closed ? "bg-slate-50" : ""}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.pn_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`pn-open-${r.pn_no}`}>{r.pn_no}</button>
                   </td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.issue_note_date)}</td>
+                  <td className="font-mono text-slate-700 date-cell">{fmtDate(r.issue_note_date)}</td>
                   <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="text-slate-700 truncate" title={r.parent_assigned_to_name || ""}>{r.parent_assigned_to_name || "—"}</td>
                   <td className="font-mono text-slate-600 tabular-nums text-center">{pickingDisplayCount(r)}</td>
@@ -2176,7 +2217,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                 } />
               </div>
               <div className="space-y-2">
-                <Detail k="CREATED BY (PICKER)" v={pn.created_by || "—"} />
+                <Detail k="CREATED BY (PICKER)" v={actorLabel(null, pn.created_by)} />
                 <Detail k="CREATED AT" v={new Date(pn.created_at).toLocaleString()} />
                 <Detail k="ISSUED QTY / AVAILABLE QTY" v={
                   <span className="font-mono">
@@ -2202,7 +2243,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                   <Detail k="CLOSED" v={
                     <span className="text-slate-700">
                       {pn.closed_at ? new Date(pn.closed_at).toLocaleString() : "—"}
-                      {pn.closed_by ? ` · ${pn.closed_by}` : ""}
+                      {pn.closed_by ? ` · ${actorLabel(null, pn.closed_by)}` : ""}
                       {pn.close_reason ? <div className="text-xs text-slate-500 mt-0.5">{pn.close_reason}</div> : null}
                     </span>
                   } />
