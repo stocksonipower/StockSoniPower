@@ -420,39 +420,24 @@ export default function StockBalancePage() {
 
   return (
     <div className="p-8 max-w-[1900px] mx-auto" data-testid="balance-page">
-      <div className="mb-6 flex items-end justify-between gap-4">
-        <div>
-          <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Summary</h1>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button
-            onClick={() => setColumnSettingsOpen(true)}
-            variant="outline"
-            className="rounded-sm border-slate-300"
-            title="Drag to reorder columns and set their widths — saved to your account only"
-            data-testid="column-settings-button"
-          >
-            <ArrowsLeftRight size={16} weight="bold" className="mr-2" /> Edit Columns
-          </Button>
-          <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300" data-testid="balance-export-button">
-            <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
-          </Button>
-          <Button onClick={() => load(search)} variant="outline" className="rounded-sm border-slate-300" disabled={loading} data-testid="refresh-button">
-            <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-        </div>
+      <div className="mb-6">
+        <h1 className="text-4xl font-black tracking-tight text-slate-900">Stock Summary</h1>
       </div>
 
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
-        <div className="relative flex-1 min-w-[240px] max-w-md">
+      {/* One toolbar row: the search box takes all the slack so the three
+          buttons sit flush against the right edge and the row reads as a single
+          band rather than a control floating in white space. `shrink-0` keeps
+          the buttons at their natural width — the search field is the only
+          thing that gives. */}
+      <div className="flex items-center gap-2 mb-4">
+        <div className="relative flex-1 min-w-[200px]">
           <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
             ref={searchInputRef}
             placeholder="Search part no, descriptions, remarks, category…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-10 pr-9 rounded-sm"
+            className="pl-10 pr-9 rounded-sm w-full"
             data-testid="balance-search-input"
           />
           {search && (
@@ -466,29 +451,49 @@ export default function StockBalancePage() {
             </button>
           )}
         </div>
-        {activeFilterCount > 0 && (
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <FunnelSimple size={14} weight="bold" />
-            <span>{activeFilterCount} column filter(s) active</span>
-          </div>
-        )}
-        {(activeFilterCount > 0 || sort?.key) && (
-          <Button onClick={() => { setColFilters({}); setSort(null); }} variant="ghost" size="sm" className="rounded-sm h-7 text-xs" data-testid="clear-filters-button">
-            <X size={12} weight="bold" className="mr-1" /> Clear filters &amp; sort
-          </Button>
-        )}
+        <Button
+          onClick={() => setColumnSettingsOpen(true)}
+          variant="outline"
+          className="rounded-sm border-slate-300 shrink-0"
+          title="Drag to reorder columns and set their widths — saved to your account only"
+          data-testid="column-settings-button"
+        >
+          <ArrowsLeftRight size={16} weight="bold" className="mr-2" /> Edit Columns
+        </Button>
+        <Button onClick={handleExport} variant="outline" className="rounded-sm border-slate-300 shrink-0" data-testid="balance-export-button">
+          <DownloadSimple size={14} weight="bold" className="mr-2" /> Export
+        </Button>
+        <Button onClick={() => load(search)} variant="outline" className="rounded-sm border-slate-300 shrink-0" disabled={loading} data-testid="refresh-button">
+          <ArrowsClockwise size={14} weight="bold" className={`mr-2 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
       </div>
 
-      {/* Pagination bar — above the table, same shape as every other list page */}
-      <div className="flex items-center justify-between mb-3 text-xs text-slate-600" data-testid="balance-pagination">
-        <div>
-          {filteredRows.length === 0 ? "No rows" : (
-            <>
-              Showing <span className="font-semibold text-slate-900">{pageRows.length}</span>
-              {" · "}<span className="font-semibold text-slate-900">{filteredRows.length}</span> row{filteredRows.length === 1 ? "" : "s"}
-              {activeFilterCount > 0 && <span className="text-slate-500"> (filtered from {rows.length})</span>}
-              {" · Total Qty "}<span className="font-mono font-semibold text-slate-900" data-testid="balance-total-qty">{totalQty.toLocaleString()}</span>
-            </>
+      {/* Pagination bar — above the table, same shape as every other list page.
+          The active-filter notice lives here rather than in the toolbar above so
+          that row keeps one fixed shape instead of reflowing as filters change. */}
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-600 gap-3 flex-wrap" data-testid="balance-pagination">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span>
+            {filteredRows.length === 0 ? "No rows" : (
+              <>
+                Showing <span className="font-semibold text-slate-900">{pageRows.length}</span>
+                {" · "}<span className="font-semibold text-slate-900">{filteredRows.length}</span> row{filteredRows.length === 1 ? "" : "s"}
+                {activeFilterCount > 0 && <span className="text-slate-500"> (filtered from {rows.length})</span>}
+                {" · Total Qty "}<span className="font-mono font-semibold text-slate-900" data-testid="balance-total-qty">{totalQty.toLocaleString()}</span>
+              </>
+            )}
+          </span>
+          {activeFilterCount > 0 && (
+            <span className="flex items-center gap-1.5 text-slate-500">
+              <FunnelSimple size={13} weight="bold" />
+              {activeFilterCount} column filter(s) active
+            </span>
+          )}
+          {(activeFilterCount > 0 || sort?.key) && (
+            <Button onClick={() => { setColFilters({}); setSort(null); }} variant="ghost" size="sm" className="rounded-sm h-6 text-xs px-2" data-testid="clear-filters-button">
+              <X size={12} weight="bold" className="mr-1" /> Clear filters &amp; sort
+            </Button>
           )}
         </div>
         <div className="flex items-center gap-2">
