@@ -282,6 +282,11 @@ async def startup():
     # ---- Stock Master column settings (admin-editable order/widths) ----
     await db.column_settings.create_index("page", unique=True)
 
+    # ---- Per-user table layouts (Stock Summary column order/widths) ----
+    # Unique per (user, page): one saved layout each, and the upsert in
+    # put_stock_summary_column_settings relies on that to stay one row.
+    await db.user_column_settings.create_index([("user_id", 1), ("page", 1)], unique=True)
+
     # ---- Phase 2: RN stock_in_type backfill ----
     # Older receipt notes have no stock_in_type field. Default existing rows to "INVOICE"
     # (the prior behaviour was always invoice-based).

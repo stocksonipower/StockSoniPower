@@ -1,11 +1,145 @@
 """Dashboard / Stock Balance / Low Stock routes — extracted from server.py with zero logic changes."""
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
-from deps import db, get_current_user
+from deps import db, get_current_user, now_iso
 
 router = APIRouter()
+
+
+# ============================================================================
+# STOCK SUMMARY COLUMN SETTINGS — order + widths, persisted PER USER in
+# `user_column_settings` (unique on user_id + page).
+#
+# Deliberately different from Stock Master's equivalent, which is one global
+# admin-owned layout: the Stock Summary table is a personal working view, so
+# every user arranges it for themselves and nobody can rearrange it for anyone
+# else. There is no admin gate for the same reason — you can only ever write
+# your own row.
+#
+# Registered before any dynamic route that could shadow it (FastAPI matches in
+# declaration order).
+# ============================================================================
+DEFAULT_STOCK_SUMMARY_COLUMNS = [
+    {"key": "model",          "label": "MODEL",          "width": 140, "order": 1},
+    {"key": "part_no",        "label": "PART NO",        "width": 150, "order": 2},
+    {"key": "old_part_no",    "label": "OLD PART NO",    "width": 150, "order": 3},
+    {"key": "make_part_no",   "label": "MAKE PART NO",   "width": 170, "order": 4},
+    {"key": "description_1",  "label": "DESCRIPTION 1",  "width": 230, "order": 5},
+    {"key": "description_2",  "label": "DESCRIPTION 2",  "width": 230, "order": 6},
+    {"key": "remarks_oem",    "label": "REMARKS OEM",    "width": 180, "order": 7},
+    {"key": "remarks_others", "label": "REMARKS OTHERS", "width": 180, "order": 8},
+    {"key": "make",           "label": "MAKE",           "width": 130, "order": 9},
+    {"key": "item_category",  "label": "ITEM CATEGORY",  "width": 150, "order": 10},
+    {"key": "reorder_level",  "label": "REORDER LEVEL",  "width": 130, "order": 11},
+    {"key": "godown_name",    "label": "GODOWN",         "width": 140, "order": 12},
+    {"key": "rack_no",        "label": "RACK NO",        "width": 110, "order": 13},
+    {"key": "box_no",         "label": "BOX NO",         "width": 110, "order": 14},
+    {"key": "box_category",   "label": "BOX CATEGORY",   "width": 140, "order": 15},
+    {"key": "total_quantity", "label": "QTY",            "width": 100, "order": 16},
+    # Pinned last, like Stock Master's IMAGES column: a thumbnail strip reads as
+    # the end of a row, and letting it float into the middle just breaks the scan.
+    {"key": "image",          "label": "IMAGE",          "width": 110, "order": 99},
+]
+
+# Traits that belong to the DATA, not to the user's layout preference: which
+# column is numeric, which renders an image, which is the quantity. They are
+# always taken from the defaults below and never from the stored document, so a
+# saved layout can never claim a column is something it isn't.
+_STOCK_SUMMARY_COLUMN_TRAITS = {
+    "reorder_level":  {"isNumeric": True},
+    "total_quantity": {"isNumeric": True, "isQty": True, "total": True},
+    "image":          {"isImage": True},
+}
+
+
+def _merge_stock_summary_columns(saved: Optional[List[dict]]) -> List[dict]:
+    """Overlay a user's saved order/widths onto the defaults.
+
+    Only `order` and `width` are ever taken from the saved document. Columns the
+    user has never seen (added to the app after they last saved) fall back to
+    their default position rather than vanishing from the table.
+    """
+    by_key = {c.get("key"): c for c in (saved or []) if isinstance(c, dict)}
+    merged = []
+    for d in DEFAULT_STOCK_SUMMARY_COLUMNS:
+        existing = by_key.get(d["key"]) or {}
+        # `is None` rather than a truthiness fallback: order 0 is a legitimate
+        # position (leftmost) and must not be mistaken for "not set".
+        try:
+            raw_width = existing.get("width")
+            width = int(d["width"] if raw_width is None else raw_width) or d["width"]
+        except (TypeError, ValueError):
+            width = d["width"]
+        try:
+            raw_order = existing.get("order")
+            order = int(d["order"] if raw_order is None else raw_order)
+        except (TypeError, ValueError):
+            order = d["order"]
+        traits = _STOCK_SUMMARY_COLUMN_TRAITS.get(d["key"], {})
+        if traits.get("isImage"):
+            order = 99   # always last, whatever a stale/hand-edited document says
+        merged.append({
+            "key": d["key"],
+            "label": d["label"],
+            "width": max(60, min(800, width)),
+            "order": order,
+            "isNumeric": bool(traits.get("isNumeric")),
+            "isImage": bool(traits.get("isImage")),
+            "isQty": bool(traits.get("isQty")),
+            "total": bool(traits.get("total")),
+        })
+    merged.sort(key=lambda c: c["order"])
+    return merged
+
+
+class StockSummaryColumnSettings(BaseModel):
+    columns: List[Dict[str, Any]]
+
+
+@router.get("/stock-summary/column-settings")
+async def get_stock_summary_column_settings(user=Depends(get_current_user)):
+    """This user's own Stock Summary column order + widths, defaults where unset."""
+    doc = await db.user_column_settings.find_one(
+        {"user_id": user.get("id"), "page": "stock_summary"}, {"_id": 0},
+    )
+    return {"columns": _merge_stock_summary_columns((doc or {}).get("columns"))}
+
+
+@router.put("/stock-summary/column-settings")
+async def put_stock_summary_column_settings(
+    payload: StockSummaryColumnSettings, user=Depends(get_current_user),
+):
+    """Save this user's own Stock Summary layout. Always scoped to the caller —
+    there is no path by which one user writes another's row."""
+    valid_keys = {c["key"] for c in DEFAULT_STOCK_SUMMARY_COLUMNS}
+    cleaned = []
+    for c in payload.columns:
+        key = c.get("key")
+        if key not in valid_keys:
+            continue
+        default = next(d for d in DEFAULT_STOCK_SUMMARY_COLUMNS if d["key"] == key)
+        try:
+            width = int(c.get("width") or default["width"])
+        except (TypeError, ValueError):
+            width = default["width"]
+        try:
+            raw_order = c.get("order")
+            order = int(default["order"] if raw_order is None else raw_order)
+        except (TypeError, ValueError):
+            order = default["order"]
+        cleaned.append({"key": key, "width": max(60, min(800, width)), "order": order})
+    await db.user_column_settings.update_one(
+        {"user_id": user.get("id"), "page": "stock_summary"},
+        {"$set": {
+            "user_id": user.get("id"), "page": "stock_summary",
+            "columns": cleaned, "updated_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"columns": _merge_stock_summary_columns(cleaned)}
 
 
 # -------------------- STOCK BALANCE --------------------
