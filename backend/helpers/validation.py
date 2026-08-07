@@ -176,6 +176,64 @@ async def _box_id_required_for_rack(rack_id: str) -> bool:
     return await db.boxes.count_documents({"rack_id": rack_id}) > 0
 
 
+def _is_whole(v) -> bool:
+    return abs(float(v) - round(float(v))) < 1e-9
+
+
+def _validate_reject_rules(groups: dict, actual_label: str) -> None:
+    """Enforce the Reject Quantity rules for one note, per requested line.
+
+    Reject Quantity records the part of a request that was deliberately NOT fulfilled.
+    It moves no stock and creates no transaction — it only closes the request so no
+    follow-up note is raised for the shortfall. That is exactly why it is bounded by
+    what is still outstanding:
+
+        actual + rejected <= requested          (and remaining = requested - actual)
+
+    `groups` maps "<part> / <make>" to {"requested", "actual", "rejected"}, aggregated
+    over every row of the note that belongs to the same requested line. `requested`
+    is None for an open line (the office left the quantity to the store incharge), so
+    there is no target to measure a rejection against and only the shape rules apply.
+    """
+    for label, g in groups.items():
+        rejected = float(g.get("rejected") or 0)
+        if rejected < 0:
+            raise HTTPException(status_code=400, detail=f"{label}: Rejected Qty cannot be negative")
+        if rejected <= 1e-9:
+            continue  # nothing rejected on this line — every rule below is vacuous
+        actual = float(g.get("actual") or 0)
+        requested = g.get("requested")
+        # Whole-number items must be rejected in whole numbers — a half-rejected
+        # discrete part is not a quantity anyone can act on.
+        if requested is not None and _is_whole(requested) and _is_whole(actual) and not _is_whole(rejected):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: Rejected Qty must be a whole number for this item",
+            )
+        if requested is None:
+            continue  # open line — unbounded by design
+        if actual > requested + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{label}: Reject Quantity cannot be entered because the actual quantity "
+                f"exceeds the requested quantity ({actual_label.lower()} {actual}, requested {requested})"
+            ))
+        if abs(actual - requested) <= 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{label}: Rejected Qty must be 0 — the full requested quantity of "
+                f"{requested} was already {actual_label.lower()}"
+            ))
+        if rejected > requested + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{label}: Rejected Qty {rejected} exceeds the requested quantity {requested}"
+            ))
+        remaining = requested - actual
+        if rejected > remaining + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{label}: Rejected Qty {rejected} exceeds the remaining quantity {remaining} "
+                f"(requested {requested} − {actual_label.lower()} {actual})"
+            ))
+
+
 def _validate_picking_items(items):
     if not items:
         raise HTTPException(status_code=400, detail="At least one item is required")
@@ -193,9 +251,7 @@ def _validate_picking_items(items):
         # A 0 row is meaningful and must survive: it records that this specific Issue Note
         # line was deliberately left unpicked (e.g. its quantity was taken on another
         # line of the same part). It moves no stock and needs no location. The note as a
-        # whole still has to pick something — checked once after the loop.
-        if rejected > 0 and not (getattr(it, "rejection_reason", "") or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejection reason is required when Rejected Qty > 0")
+        # whole still has to account for something — checked once after the loop.
         # Godown is always required for the physically-picked portion. Rack and box are
         # NOT demanded here: stock can legitimately sit in a godown that has no racking,
         # in which case rack_id/box_id are empty on the very transactions the pick draws
@@ -203,8 +259,14 @@ def _validate_picking_items(items):
         # godown/rack/box triple to match a location that currently holds stock.
         if qty > 0 and not (it.godown_id or "").strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Godown is required")
+    # A note that neither picks nor rejects anything decides nothing — there is no answer
+    # in it for the Issue Note to act on. Rejecting the whole quantity is a valid answer
+    # (it closes the request out without stock moving), so it counts here.
     if not any((it.quantity or 0) > 0 or (getattr(it, "rejected_qty", 0) or 0) > 0 for it in items):
-        raise HTTPException(status_code=400, detail="Enter a Picked Qty on at least one row")
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a Picked Qty or a Rejected Qty on at least one row",
+        )
 
 
 async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Optional[str] = None, assigned_items: Optional[list] = None):
@@ -213,29 +275,57 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
     Picking Note (see `prepare_picking_note`). The store user may accept the
     suggestion, pick partially from it, or choose any other valid stock location.
 
-    The requested quantity is a target, not a ceiling either — the store incharge may
-    pick more or less than the office asked for (a package rarely breaks down exactly
-    the way the office assumed). The one hard limit is real stock: nothing may be
-    picked that isn't physically on the shelf."""
+    The ISSUED quantity is a target, not a ceiling: the store incharge may pick more
+    than the office asked for (a package rarely breaks down exactly the way the office
+    assumed). The surplus is an EXTRA and simply stands. Picking under it leaves a
+    PENDING quantity that rolls into a follow-up Picking Note — unless it is REJECTED,
+    which closes it out with no follow-up. Pending and Extra are pure arithmetic and are
+    never entered; Picked and Rejected are the only two inputs.
+
+    The one hard limit is real stock: nothing may be picked that isn't physically on
+    the shelf, at the exact location it is being picked from, and no more in total than
+    the live Available Qty for that part/make."""
     from helpers.stock_helpers import _stock_locations_for
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         raise HTTPException(status_code=400, detail="Issue note not found")
     requested = {}
+    # An OPEN line (the office left the quantity to the store incharge) has no target
+    # number, so it is tracked as None rather than 0 — otherwise every reject against it
+    # would read as "rejecting more than the 0 that was asked for".
+    open_keys = set()
     for it in (assigned_items if assigned_items is not None else inn.get("items", [])):
         k = _key(it.get("part_no"), it.get("make"))
         requested.setdefault(k, 0)
-        if it.get("quantity") is not None:
+        if it.get("quantity") is None:
+            open_keys.add(k)
+        else:
             requested[k] += it.get("quantity") or 0
 
     new_loc_sums = {}
+    new_item_sums = {}
+    reject_groups = {}
     for it in items:
         k = _key(it.part_no, it.make)
         if (it.quantity or 0) > 0:
             loc_key = f"{it.part_no}||{it.make}||{it.godown_id or ''}||{it.rack_id or ''}||{it.box_id or ''}"
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
+        new_item_sums[(it.part_no, it.make)] = new_item_sums.get((it.part_no, it.make), 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked issue note")
+        # Pooled per part+make — the same level `_remaining_assigned_items` and the Issue
+        # Note status recompute resolve at, so a note that passes here is exactly a note
+        # those two can account for. (The form bounds reject per line, which is stricter.)
+        g = reject_groups.setdefault(f"{it.part_no} / {it.make}", {
+            "requested": None if k in open_keys else requested.get(k, 0),
+            "actual": 0, "rejected": 0,
+        })
+        g["actual"] += it.quantity or 0
+        g["rejected"] += getattr(it, "rejected_qty", 0) or 0
+    # Reject bounds first: "Picked exceeds Issued, so Reject must be 0" is the rule the
+    # user actually broke, and it reads better than a downstream stock message.
+    _validate_reject_rules(reject_groups, "Picked")
+
     # Per-location stock availability. Draft picking does not reserve stock.
     # Group by part||make to fetch locations once
     loc_cache = {}
@@ -252,6 +342,21 @@ async def _validate_picking_constraints(in_id: str, items, exclude_pn_id: Option
             raise HTTPException(status_code=400, detail=(
                 f"{part_no} / {make}: trying to pick {new_q} but only {available} available at "
                 f"{loc.get('godown_name')}/{loc.get('rack_no')}/{loc.get('box_no') or '—'}"
+            ))
+
+    # Total Available Qty ceiling. The per-location checks above already imply this, but
+    # stated explicitly it produces the message the picker needs — "you asked for 10 and
+    # only 8 exist" — instead of a location-by-location one that never names the real
+    # constraint. Picking is bounded by live availability, never by the issued quantity.
+    for (part_no, make), picked_total in new_item_sums.items():
+        if picked_total <= 0:
+            continue
+        if (part_no, make) not in loc_cache:
+            loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
+        total_available = sum(L.get("current_qty") or 0 for L in loc_cache[(part_no, make)])
+        if picked_total > total_available + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{part_no} / {make}: cannot pick {picked_total} — only {total_available} available in stock"
             ))
 
 
@@ -400,20 +505,38 @@ async def _validate_transfer_note_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Transferred Qty cannot be negative")
         if rejected < 0:
             raise HTTPException(status_code=400, detail=f"Row {idx}: Rejected Qty cannot be negative")
-        if qty <= 0 and rejected <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Transferred Qty or Rejected Qty must be > 0")
-        if rejected > 0 and not (getattr(it, "rejection_reason", "") or "").strip():
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Rejection reason is required when Rejected Qty > 0")
+        # A 0 row is allowed and preserved: it records a requested line that this note
+        # did not move. The note as a whole must account for something — checked once
+        # after the loop. A rejection reason is optional: Reject Qty is a quantity field
+        # on the note, not a form to justify. Any reason supplied is still stored.
         # Source/destination locations are only required for the portion that
-        # actually moves — a fully-rejected row (qty=0, e.g. "Rack Empty") may
-        # carry just the source rack that was checked, or no location at all.
+        # actually moves — a row that moves nothing may carry no location at all.
         if qty > 0:
             if not (it.src_godown_id or "").strip() or not (it.src_rack_id or "").strip():
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Source Godown and Rack are required")
             if not (it.dest_godown_id or "").strip():
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Godown is required")
-            if it.src_godown_id == it.dest_godown_id:
-                raise HTTPException(status_code=400, detail=f"Row {idx}: Source and destination godown must differ")
+            if not (it.dest_rack_id or "").strip():
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Rack is required")
+            # A rack that has boxes must be resolved to the box on both sides, otherwise
+            # the stock's real position is ambiguous.
+            if not (it.src_box_id or "").strip() and await _box_id_required_for_rack(it.src_rack_id):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Source Box is required for this rack")
+            if not (it.dest_box_id or "").strip() and await _box_id_required_for_rack(it.dest_rack_id):
+                raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is required for this rack")
+            # Transferring within one godown is legitimate (rack-to-rack, box-to-box);
+            # only moving stock onto the shelf it already occupies is meaningless, so the
+            # full godown/rack/box triple must differ somewhere.
+            same_location = (
+                (it.src_godown_id or "") == (it.dest_godown_id or "")
+                and (it.src_rack_id or "") == (it.dest_rack_id or "")
+                and (it.src_box_id or "") == (it.dest_box_id or "")
+            )
+            if same_location:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Row {idx}: Source and destination are the same location — change the rack or box",
+                )
         # Existence + referential-integrity checks (rack must belong to its stated
         # godown, box must belong to its stated rack) — rejects stale/fabricated
         # location ids, e.g. a godown/rack/box deleted after the form was loaded.
@@ -443,6 +566,8 @@ async def _validate_transfer_note_items(items):
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box is invalid or no longer exists")
             if (it.dest_rack_id or "").strip() and boxes_by_id[it.dest_box_id] != it.dest_rack_id:
                 raise HTTPException(status_code=400, detail=f"Row {idx}: Destination Box does not belong to the selected Destination Rack")
+    if not any((it.quantity or 0) > 0 or (getattr(it, "rejected_qty", 0) or 0) > 0 for it in items):
+        raise HTTPException(status_code=400, detail="Enter a Transferred Qty or a Rejected Qty on at least one row")
 
 
 async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None, assigned_items: Optional[list] = None):
@@ -460,6 +585,7 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
 
     new_sums = {}
     new_loc_sums = {}
+    reject_groups = {}
     for it in items:
         k = _key(it.part_no, it.make)
         rejected = getattr(it, "rejected_qty", 0) or 0
@@ -469,6 +595,17 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
+        # Pooled per part+make, and measured against what is still outstanding after any
+        # other note for this request — the same basis the cumulative cap below uses.
+        g = reject_groups.setdefault(f"{it.part_no} / {it.make}", {
+            "requested": max(0, requested.get(k, 0) - other_sums.get(k, 0)),
+            "actual": 0, "rejected": 0,
+        })
+        g["actual"] += it.quantity or 0
+        g["rejected"] += rejected
+    # Reject-specific rules first, so an over-reject reports the rule it actually broke
+    # rather than the generic combined-total message below.
+    _validate_reject_rules(reject_groups, "Transferred")
 
     # Cumulative qty cap vs request — transferred + rejected together cannot exceed requested
     for k, new_q in new_sums.items():

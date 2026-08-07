@@ -25,7 +25,6 @@ import { exportToExcel } from "../lib/exportExcel";
 import { buildStandardPrintHtml, openPrintWindow, htmlEscape, formatLocationText } from "../lib/printDocument";
 
 const PAGE_SIZE = 100;
-const REJECTION_REASONS = ["Rack Empty", "Not Available", "Damaged", "Expired", "Wrong Specification", "Other"];
 const NO_LOCATION = "__NO_LOCATION__";
 
 function fmtDate(iso) {
@@ -55,9 +54,12 @@ function transferMovedQty(stn) {
   return parseInt(stn.transferred_qty_total) || qtySum(stn.items || []);
 }
 
+// Rejected qty never moves stock — it records the part of the request the operator
+// closed out as "will not be transferred", which is why it resolves the request without
+// ever counting toward the transferred total.
 function transferRejectedQty(stn) {
-  if (stn.rejected_qty_total !== undefined) return parseInt(stn.rejected_qty_total) || 0;
-  return (stn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
+  return parseInt(stn.rejected_qty_total)
+    || (stn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
 }
 
 function transferNoteDone(stn) {
@@ -172,6 +174,9 @@ function printTransferRequest(s, noteHistory = []) {
   const rows = (s.items || []).map((it, idx) => {
     const p = processedByKey[transferKey(it)] || { transferred: 0, rejected: 0 };
     const requested = parseFloat(it.quantity) || 0;
+    // A rejected quantity resolves its share of the request just as a transferred one
+    // does — the line is settled, it simply wasn't moved. Same rule the server's status
+    // recompute uses, so the printed row status can never disagree with the document.
     const resolved = p.transferred + p.rejected;
     const rowStatus = resolved <= 0 ? "Pending" : (resolved + 1e-6 >= requested ? "Complete" : "In Process");
     const eff = transferEffectiveLocations(it, noteHistory);
@@ -184,7 +189,7 @@ function printTransferRequest(s, noteHistory = []) {
       locationCellHtml(eff.destLocs),
       `<span style="text-align:right;display:block">${htmlEscape(requested || "—")}</span>`,
       `<span style="text-align:right;display:block">${htmlEscape(p.transferred || "—")}</span>`,
-      `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(p.rejected || "—")}</span>`,
+      `<span style="text-align:right;display:block">${htmlEscape(p.rejected || "—")}</span>`,
       htmlEscape(rowStatus),
     ];
   });
@@ -206,7 +211,8 @@ function printTransferRequest(s, noteHistory = []) {
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Make" },
       { label: "Source Location" }, { label: "Destination Location" },
-      { label: "Requested Qty", align: "right" }, { label: "Transferred Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Requested Qty", align: "right" }, { label: "Transferred Qty", align: "right" },
+      { label: "Rejected Qty", align: "right" },
       { label: "Status" },
     ],
     rows,
@@ -216,7 +222,7 @@ function printTransferRequest(s, noteHistory = []) {
 }
 
 // Transfer Note print columns: Sr, Part Number, Item, Rack, Source, Destination,
-// Transferred Qty, Rejected Qty, Receiver, Remarks
+// Transferred Qty, Reject Qty, Receiver
 function printTransferNote(stn) {
   const displayItems = (stn.items || []).length ? stn.items : (stn.assigned_items || []);
   const rows = displayItems.map((it, idx) => [
@@ -227,9 +233,8 @@ function printTransferNote(stn) {
     htmlEscape([it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "—"),
     htmlEscape([it.dest_godown_name, it.dest_rack_no, it.dest_box_no].filter(Boolean).join(" / ") || "—"),
     `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
-    `<span style="text-align:right;display:block;color:#b91c1c">${htmlEscape(it.rejected_qty || "—")}</span>`,
+    `<span style="text-align:right;display:block">${htmlEscape(parseInt(it.rejected_qty) || "—")}</span>`,
     htmlEscape(stn.created_by || "—"),
-    htmlEscape(it.rejection_reason || "—"),
   ]);
   const html = buildStandardPrintHtml({
     docTitle: "Transfer Note",
@@ -246,13 +251,14 @@ function printTransferNote(stn) {
       ["Assigned To", stn.parent_assigned_to_name || stn.parent_assigned_to_email || "—"],
       ["Receiver / Created By", stn.created_by || "—"],
       ["Transferred Qty", transferMovedQty(stn)],
-      ["Rejected Qty", transferRejectedQty(stn)],
+      ["Reject Qty", transferRejectedQty(stn)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Rack" },
       { label: "Source" }, { label: "Destination" },
-      { label: "Transferred Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
-      { label: "Receiver" }, { label: "Remarks" },
+      { label: "Transferred Qty", align: "right" },
+      { label: "Reject Qty", align: "right" },
+      { label: "Receiver" },
     ],
     rows,
     printedBy: stn.created_by,
@@ -445,6 +451,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
             {filteredRows.map((r, idx) => {
               const totalQty = parseInt(r.requested_qty_total) || qtySum(r.items);
               const movedQty = parseInt(r.transferred_qty_total) || 0;
+              const rejectedQty = parseInt(r.rejected_qty_total) || 0;
               // Editable only until the first quantity is transferred/rejected — matches
               // the backend rule (a transfer note with processed qty flips status off Pending).
               const hasNotes = transferRequestHasProcessed(r.status);
@@ -469,7 +476,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{movedQty} / {totalQty}</td>
-                  <td className="text-left font-mono font-bold text-red-700">{parseInt(r.rejected_qty_total) || "—"}</td>
+                  <td className={`text-left font-mono font-bold ${rejectedQty > 0 ? "text-amber-700" : "text-slate-400"}`}>{rejectedQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-status-${r.str_no}`}>{label}</span>
                   </td>
@@ -491,7 +498,7 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer requests. Click 'Create New Transfer Request' to begin." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -547,7 +554,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                 <table className="data-table w-full text-xs">
                   <thead>
                     <tr>
-                      <th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+                      <th>SL NO.</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
                       <th className="text-center">QTY</th><th>SOURCE LOCATION</th><th>DESTINATION LOCATION</th>
                     </tr>
                   </thead>
@@ -587,7 +594,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                         <td className="font-mono">{parent?.stn_no || "—"}</td>
                         <td className="text-center font-mono font-bold">{transferAssignedQty(stn)}</td>
                         <td className="text-center font-mono font-bold">{transferMovedQty(stn)}</td>
-                        <td className="text-center font-mono font-bold text-red-700">{transferRejectedQty(stn) || "—"}</td>
+                        <td className={`text-center font-mono font-bold ${transferRejectedQty(stn) > 0 ? "text-amber-700" : "text-slate-400"}`}>{transferRejectedQty(stn)}</td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${done ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
                             {transferNoteStatusLabel(stn.status)}
@@ -716,6 +723,16 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
     updateItem(i, { make: makeVal, model: found?.model || "", available_qty: found?.available_qty || 0 });
   };
 
+  // Quantity is clamped to live availability — the source location's balance once one is
+  // chosen, otherwise the part/make total. Nothing over-stock can be typed, so the row
+  // never enters an "over" state that has to be flagged and then rejected on save.
+  const onReqQtyChange = (i, raw, cap) => {
+    if (raw === "") { updateItem(i, { quantity: "" }); return; }
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 0) return;
+    updateItem(i, { quantity: String(Math.min(n, cap || 0)) });
+  };
+
   // Recompute the row's location-specific available qty (undefined = no source
   // selected, fall back to the part/make grand total) whenever the source changes.
   const refreshLocationQty = async (i, patch) => {
@@ -814,6 +831,14 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
     return m;
   }, [items]);
 
+  // Rows whose quantity no longer fits current stock. Typing is clamped, so this can
+  // only happen when stock fell after the request was saved.
+  const shortRows = items.reduce((n, r) => {
+    if (!r.make) return n;
+    const avail = r.src_godown_id ? (r.location_available_qty || 0) : (r.available_qty || 0);
+    return n + ((parseInt(r.quantity) || 0) > avail ? 1 : 0);
+  }, 0);
+
   const save = async () => {
     if (items.length === 0) { toast.error("Add at least one item"); return; }
     for (let i = 0; i < items.length; i++) {
@@ -900,7 +925,14 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-center justify-between p-4 border-b border-slate-200">
           <div>
-            <div className="label-sm">Items to Transfer</div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="label-sm">Items to Transfer</div>
+              {shortRows > 0 && (
+                <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-sm px-2 py-0.5" data-testid="str-short-banner">
+                  {shortRows} row{shortRows > 1 ? "s" : ""} exceed current stock — availability has changed
+                </span>
+              )}
+            </div>
             <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""} · source and destination are both optional — specify as much as you know (godown only, godown+rack, or leave blank), the Transfer Note resolves the rest against current stock</div>
           </div>
           <div className="flex items-center gap-2">
@@ -914,40 +946,71 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="data-table w-full">
+          {/* Fixed layout + colgroup: with auto layout the browser treats width classes
+              as hints and redistributes the slack, which is what left a gap between the
+              auto-filled Model and Make. These widths are exact. */}
+          <table className="data-table data-table-fixed w-full min-w-[1420px]">
+            <colgroup>
+              <col style={{ width: "60px" }} />
+              <col style={{ width: "170px" }} />
+              <col style={{ width: "96px" }} />
+              <col style={{ width: "150px" }} />
+              <col style={{ width: "112px" }} />
+              <col style={{ width: "148px" }} />
+              <col style={{ width: "118px" }} />
+              <col style={{ width: "118px" }} />
+              <col style={{ width: "148px" }} />
+              <col style={{ width: "118px" }} />
+              <col style={{ width: "118px" }} />
+              <col style={{ width: "56px" }} />
+            </colgroup>
             <thead>
               <tr>
-                <th className="w-16">SL NO.</th><th className="w-64">PART NO</th><th className="w-40">MODEL</th><th className="w-48">MAKE</th><th className="w-24">QTY</th>
+                <th>SL NO.</th><th>PART NO</th><th>MODEL</th><th>MAKE</th><th className="!text-center">QTY</th>
                 <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
-                <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th><th className="w-14"></th>
+                <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th><th></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const effAvail = it.src_godown_id ? (it.location_available_qty || 0) : it.available_qty;
-                const overStock = effAvail !== undefined && (parseInt(it.quantity) || 0) > (effAvail || 0) + 1e-6;
+                const effAvail = it.src_godown_id ? (it.location_available_qty || 0) : (it.available_qty || 0);
+                const atCap = effAvail > 0 && (parseInt(it.quantity) || 0) === effAvail;
+                // Typing is clamped to availability, so a quantity can only exceed it if
+                // stock fell after this request was saved (consumed by a Stock Out, a
+                // transfer, or a correction). Flag it rather than silently rewriting the
+                // operator's number.
+                const shortNow = it.make && (parseInt(it.quantity) || 0) > effAvail;
                 const srcRacks = racksByGodown[it.src_godown_id] || [];
                 const srcBoxes = boxesByRack[it.src_rack_id] || [];
                 const destRacks = racksByGodown[it.dest_godown_id] || [];
                 const destBoxes = boxesByRack[it.dest_rack_id] || [];
                 return (
-                  <tr key={idx} data-testid={`str-item-row-${idx}`} className={overStock ? "bg-red-50" : ""}>
+                  <tr key={idx} data-testid={`str-item-row-${idx}`} className={shortNow ? "bg-amber-50" : ""}>
                     <td className="font-mono text-slate-500">{idx + 1}</td>
-                    <td className="w-64">
+                    <td>
                       <Input value={it.part_no}
                         onChange={(e) => updateItem(idx, { part_no: e.target.value, partLooked: false, makes: [], make: "", model: "", available_qty: 0 })}
                         onBlur={(e) => lookupMakes(idx, e.target.value)}
+                        onKeyDown={async (e) => {
+                          // The Make dropdown is disabled until the part lookup resolves,
+                          // so a plain Tab lands nowhere. Hold focus, look up, then hand
+                          // focus to Make. Model in between is auto-fetched and skipped.
+                          if (e.key !== "Tab" || e.shiftKey) return;
+                          e.preventDefault();
+                          if (!it.partLooked) await lookupMakes(idx, e.target.value);
+                          document.querySelector(`[data-testid="str-make-${idx}"]`)?.focus();
+                        }}
                         placeholder="Enter part no" className="rounded-sm font-mono h-9 text-base" data-testid={`str-part-no-${idx}`} />
                     </td>
-                    <td className="w-40">
-                      <div className="h-8 flex items-center px-2 font-mono text-sm text-slate-700 truncate" data-testid={`str-model-${idx}`}>
+                    <td>
+                      <div className="h-9 flex items-center font-mono text-sm text-slate-700 truncate" data-testid={`str-model-${idx}`}>
                         {it.model || <span className="text-slate-400 italic">—</span>}
                       </div>
                     </td>
-                    <td className="w-48">
+                    <td>
                       <Select disabled={!it.partLooked || it.makes.length === 0}
                         value={it.make || undefined} onValueChange={(v) => onMakeChange(idx, v)}>
-                        <SelectTrigger className="rounded-sm h-8" data-testid={`str-make-${idx}`}>
+                        <SelectTrigger className="rounded-sm h-9 w-full [&>span]:truncate" data-testid={`str-make-${idx}`}>
                           <SelectValue placeholder={!it.partLooked ? "Enter Part No first" : (it.makes.length === 0 ? "No stock" : "Select make")} />
                         </SelectTrigger>
                         <SelectContent>
@@ -960,14 +1023,30 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                         </SelectContent>
                       </Select>
                     </td>
-                    <td className="w-28">
+                    <td>
                       <Input type="number" min="1" step="1" value={it.quantity} disabled={!it.make}
-                        onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                        placeholder="0" className={`rounded-sm font-mono h-8 text-center ${overStock ? "border-red-400" : ""}`}
+                        max={effAvail || undefined}
+                        onChange={(e) => onReqQtyChange(idx, e.target.value, effAvail)}
+                        title={it.make ? `Up to ${effAvail} available` : undefined}
+                        placeholder="0"
+                        className={`rounded-sm font-mono h-9 text-center text-base ${shortNow ? "border-amber-500" : ""}`}
                         data-testid={`str-qty-${idx}`} />
                       {it.make && (
-                        <div className={`text-[10px] mt-0.5 ${overStock ? "text-red-600 font-bold" : "text-slate-500"}`} data-testid={`str-avail-hint-${idx}`}>
-                          {overStock ? `Over ${it.quantity}/${effAvail}` : `Avail ${effAvail}`}
+                        <div className={`text-[10px] mt-0.5 ${shortNow ? "text-amber-700 font-bold" : (atCap ? "text-amber-600 font-bold" : "text-slate-500")}`} data-testid={`str-avail-hint-${idx}`}>
+                          {atCap && !shortNow ? `Max ${effAvail}` : `Avail ${effAvail}`}
+                        </div>
+                      )}
+                      {shortNow && (
+                        <div className="text-[10px] text-amber-800 mt-1 leading-tight" data-testid={`str-short-warning-${idx}`}>
+                          Stock dropped to {effAvail} since this request was created.
+                          <button
+                            type="button"
+                            onClick={() => updateItem(idx, { quantity: String(effAvail) })}
+                            className="ml-1 underline font-bold hover:text-amber-900"
+                            data-testid={`str-use-avail-${idx}`}
+                          >
+                            Use {effAvail}
+                          </button>
                         </div>
                       )}
                     </td>
@@ -1036,6 +1115,14 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                     </td>
                     <td>
                       <button onClick={() => removeItem(idx)} disabled={items.length === 1}
+                        onKeyDown={(e) => {
+                          // End of the last row — the Save button sits above the table in
+                          // DOM order, so forward Tab would otherwise leave the form.
+                          if (e.key === "Tab" && !e.shiftKey && idx === items.length - 1) {
+                            e.preventDefault();
+                            document.querySelector('[data-testid="str-save-button"]')?.focus();
+                          }
+                        }}
                         className={`p-1.5 rounded-sm ${items.length === 1 ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
                         data-testid={`str-remove-row-${idx}`}><Trash size={14} /></button>
                     </td>
@@ -1101,13 +1188,48 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  const handleDelete = async (stn) => {
-    if (!window.confirm(`Delete ${stn.stn_no}?`)) return;
-    try { await api.delete(`/transfer-notes/${stn.id}`); toast.success(`${stn.stn_no} deleted`); load(); }
-    catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not delete"); }
+  // Completion is refused while any row asks for more than its source currently holds.
+  // The server enforces this inside the transaction regardless; checking here first means
+  // the operator gets the same explanation the edit form gives — naming the row, the
+  // location and the real figure — instead of a bare failure after confirming.
+  const blockingShortfall = async (stn) => {
+    const { data } = await api.get(`/transfer-notes/prepare/${stn.transfer_request_id}`,
+      { params: { exclude_stn_id: stn.id } });
+    const locsByItem = {};
+    (data.items || []).forEach((p) => {
+      const k = `${p.part_no}||${p.make}`;
+      if (!locsByItem[k]) locsByItem[k] = p.available_locations || [];
+    });
+    for (let i = 0; i < (stn.items || []).length; i++) {
+      const it = stn.items[i];
+      const q = parseInt(it.quantity) || 0;
+      if (q <= 0) continue;
+      const loc = (locsByItem[`${it.part_no}||${it.make}`] || []).find((L) => (
+        (L.godown_id || "") === (it.src_godown_id || "")
+        && (L.rack_id || "") === (it.src_rack_id || "")
+        && (L.box_id || "") === (it.src_box_id || "")
+      ));
+      const avail = loc ? (loc.available_qty ?? loc.current_qty ?? 0) : 0;
+      if (q > avail) {
+        const where = [it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "the source";
+        return `Row ${i + 1} (${it.part_no} / ${it.make}) needs ${q} but only ${avail} is available at ${where}.`;
+      }
+    }
+    return null;
   };
 
   const handleRecord = async (stn) => {
+    setRecordingId(stn.id);
+    try {
+      const shortfall = await blockingShortfall(stn);
+      if (shortfall) {
+        toast.error(`Cannot complete ${stn.stn_no} — ${shortfall} Open the note, reduce the quantity or pick another location, then complete it.`);
+        return;
+      }
+    } catch {
+      // Availability check failed (network/permission) — fall through and let the server
+      // make the call; it re-checks the real ledger before moving anything.
+    } finally { setRecordingId(null); }
     if (!window.confirm(`Record ${stn.stn_no} as Stock Transfer?\n\n${stn.items.length} item(s) — 1 OUT + 1 IN transaction will be created per item.`)) return;
     setRecordingId(stn.id);
     try {
@@ -1122,7 +1244,6 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
   const columns = useMemo(() => [
     { key: "stn_date", label: "STN DATE", value: (r) => fmtDate(r.stn_date) },
     { key: "stn_no", label: "STN NO", value: (r) => r.stn_no || "" },
-    { key: "attempt", label: "ATTEMPT", value: (r) => r.execution_attempt || 1 },
     { key: "str_no", label: "REQUEST NO", value: (r) => r.transfer_request_no || "" },
     { key: "items_count", label: "ITEMS", value: (r) => (r.assigned_items || r.items || []).length},
     { key: "assigned_qty", label: "ASSIGNED", value: transferAssignedQty},
@@ -1190,11 +1311,26 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     <span className="text-slate-400 ml-2">{PAGE_SIZE.toLocaleString()} / page</span>
   </div>
 </div>
-      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
-        <table className="data-table w-full">
+      {/* Fixed widths: the document numbers are long, and on auto layout they were
+          wrapping onto a second line inside their cell. Each column is sized to hold its
+          value on one line, with the table scrolling horizontally instead. */}
+      <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
+        <table className="data-table data-table-fixed w-full min-w-[1250px]">
+          <colgroup>
+            <col style={{ width: "60px" }} />
+            <col style={{ width: "116px" }} />
+            <col style={{ width: "150px" }} />
+            <col style={{ width: "150px" }} />
+            <col style={{ width: "80px" }} />
+            <col style={{ width: "108px" }} />
+            <col style={{ width: "128px" }} />
+            <col style={{ width: "110px" }} />
+            <col style={{ width: "110px" }} />
+            <col style={{ width: "230px" }} />
+          </colgroup>
           <thead>
             <tr>
-              <th className="w-16 whitespace-nowrap">SL NO</th>
+              <th>SL NO</th>
               {columns.map((c) => (
                 <th key={c.key} className={c.isQty ? "text-center" : ""}>
                   <ExcelColumnFilter
@@ -1209,7 +1345,7 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   />
                 </th>
               ))}
-              <th className="text-right">ACTIONS</th>
+              <th className="!text-left">ACTIONS</th>
             </tr>
           </thead>
           <tbody>
@@ -1225,7 +1361,6 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
               const lockedToOther = !!aId && aId !== me?.id && !isAdmin;
               const lock = recorded || lockedToOther;
               const editTitle = recorded ? "Already completed" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Transfer Note" : "Edit"));
-              const deleteTitle = recorded ? "Already recorded" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Delete");
               const recordTitle = recorded ? "Already completed" : (pending ? "Open and save draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Complete Transfer"));
               const recordDisabled = recorded || pending || lockedToOther || recordingId === r.id;
               return (
@@ -1235,41 +1370,43 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`stn-open-${r.stn_no}`}>{r.stn_no}</button>
                   </td>
-                  <td className="font-mono text-slate-700">{r.execution_attempt || 1}</td>
                   <td className="font-mono text-slate-700">{r.transfer_request_no || "—"}</td>
                   <td className="text-left font-mono text-slate-600">{(r.assigned_items || r.items || []).length}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{assignedQty}</td>
                   <td className="text-left font-mono font-bold text-slate-900">{movedQty}</td>
-                  <td className="text-left font-mono font-bold text-red-700">{rejectedQty || "—"}</td>
+                  <td className={`text-left font-mono font-bold ${rejectedQty > 0 ? "text-amber-700" : "text-slate-400"}`}>{rejectedQty}</td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`stn-status-${r.stn_no}`}>
                       {transferNoteStatusLabel(r.status)}
                     </span>
                   </td>
-                  <td className="text-left whitespace-nowrap">
-                    <button onClick={() => onEdit(r)} disabled={lock} title={editTitle}
-                      className={`p-1.5 rounded-sm mr-1 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
-                      data-testid={`stn-edit-${r.stn_no}`}>
-                      <Pencil size={14} />
-                    </button>
-                    <button onClick={() => handleDelete(r)} disabled={lock} title={deleteTitle}
-                      className={`p-1.5 rounded-sm mr-2 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-red-50 text-red-700"}`}
-                      data-testid={`stn-delete-${r.stn_no}`}>
-                      <Trash size={14} />
-                    </button>
-                    <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
-                      title={recordTitle}
-                      className={`rounded-sm h-7 text-xs ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
-                      data-testid={`stn-record-${r.stn_no}`}>
-                      <CheckCircle size={12} weight="bold" className="mr-1" />
-                      {recorded ? "Completed" : (recordingId === r.id ? "Completing…" : "Complete Transfer")}
-                    </Button>
+                  {/* Flex row rather than inline buttons: the cell inherits
+                      text-overflow:ellipsis from data-table-fixed, which is what was
+                      rendering "…" after Delete and hiding the Complete button. */}
+                  <td>
+                    <div className="flex items-center gap-1 whitespace-nowrap">
+                      <button onClick={() => onEdit(r)} disabled={lock} title={editTitle}
+                        className={`p-1.5 rounded-sm shrink-0 ${lock ? "text-slate-300 cursor-not-allowed" : "hover:bg-slate-100"}`}
+                        data-testid={`stn-edit-${r.stn_no}`}>
+                        <Pencil size={14} />
+                      </button>
+                      {/* No delete: a Transfer Note is the record of an execution attempt
+                          and must never disappear from the request's history — the same
+                          rule Picking Notes follow. Edit / Preview / Print remain. */}
+                      <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
+                        title={recordTitle}
+                        className={`rounded-sm h-7 text-xs px-2 shrink-0 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                        data-testid={`stn-record-${r.stn_no}`}>
+                        <CheckCircle size={12} weight="bold" className="mr-1" />
+                        {recorded ? "Completed" : (recordingId === r.id ? "Completing…" : "Complete Transfer")}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               );
             })}
             {filteredRows.length === 0 && (
-              <tr><td colSpan={11} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No pending transfer notes." : "No rows match the current filters.")}</td></tr>
+              <tr><td colSpan={columns.length + 2} className="text-center py-12 text-slate-500">{loading ? "Loading…" : (rows.length === 0 ? "No transfer notes yet — they are created from a Transfer Request." : "No rows match the current filters.")}</td></tr>
             )}
           </tbody>
         </table>
@@ -1303,6 +1440,8 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 <Detail k="ASSIGNED" v={transferAssignedQty(stn)} />
                 <Detail k="TRANSFERRED" v={transferMovedQty(stn)} />
                 <Detail k="REJECTED" v={transferRejectedQty(stn)} />
+                {/* Rejected qty resolves its share of the request, so it leaves nothing
+                    outstanding — it comes off Remaining exactly as a transfer does. */}
                 <Detail k="REMAINING" v={Math.max(0, transferAssignedQty(stn) - transferMovedQty(stn) - transferRejectedQty(stn))} />
                 <Detail k="CREATED BY" v={stn.created_by || "—"} />
                 <div>
@@ -1317,8 +1456,8 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 <table className="data-table w-full text-xs">
                   <thead>
                     <tr>
-                      <th>SL</th><th>PART NO</th><th>MAKE</th><th className="text-center">TRANSFERRED QTY</th>
-                      <th className="text-center">REJECTED QTY</th><th>REASON</th>
+                      <th>SL NO.</th><th>PART NO</th><th>MAKE</th><th className="text-center">TRANSFERRED QTY</th>
+                      <th className="text-center">REJECT QTY</th>
                       <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
                       <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th>
                     </tr>
@@ -1330,8 +1469,9 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                         <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                         <td>{it.make}</td>
                         <td className="text-center font-mono font-bold">{it.quantity}</td>
-                        <td className="text-center font-mono font-bold text-red-700">{it.rejected_qty || "—"}</td>
-                        <td className="font-mono text-slate-600">{it.rejection_reason || "—"}</td>
+                        <td className={`text-center font-mono font-bold ${(parseInt(it.rejected_qty) || 0) > 0 ? "text-amber-700" : "text-slate-400"}`}>
+                          {parseInt(it.rejected_qty) || 0}
+                        </td>
                         <td className="font-mono">{it.src_godown_name || "—"}</td>
                         <td className="font-mono">{it.src_rack_no || "—"}</td>
                         <td className="font-mono">{it.src_box_no || "—"}</td>
@@ -1364,6 +1504,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   const [selectedStrId, setSelectedStrId] = useState("");
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const [godowns, setGodowns] = useState([]);
   const [racksByGodown, setRacksByGodown] = useState({});
@@ -1384,7 +1525,13 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
           const sourceItems = (editing.items || []).length ? editing.items : (r.data.items || []);
           setItems(sourceItems.map((it) => {
             const p = map[`${it.part_no}||${it.make}`] || {};
-            return { ...it, available_locations: p.available_locations || [], pending_qty: p.pending_qty ?? 0, requested_qty: p.requested_qty ?? 0 };
+            return {
+              ...it, available_locations: p.available_locations || [],
+              pending_qty: p.pending_qty ?? 0, requested_qty: p.requested_qty ?? 0,
+              // A saved 0 comes back as an empty input, not a literal "0" the operator
+              // has to clear before typing.
+              rejected_qty: (parseInt(it.rejected_qty) || 0) || "",
+            };
           }));
         }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, available_locations: [], pending_qty: 0, requested_qty: 0 }))));
     } else {
@@ -1433,10 +1580,161 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   };
 
   const updateItem = (i, patch) => setItems((p) => p.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+
+  // Split an item across another source: append a fresh row for the same part/make with
+  // the source cleared and the quantity blank, so the operator can take part of the line
+  // from the prepared location and the remainder from somewhere else. The destination is
+  // kept — a split is about where stock is drawn FROM, not where it lands. Mirrors the
+  // Picking Note's "+ Split".
+  const addSourceRow = (i) => {
+    setItems((prev) => {
+      const copy = [...prev];
+      copy.splice(i + 1, 0, {
+        ...prev[i],
+        quantity: "", rejected_qty: "",
+        src_godown_id: "", src_godown_name: "", src_rack_id: "", src_rack_no: "",
+        src_box_id: "", src_box_no: "", src_box_category: "",
+        manual: true,
+      });
+      return copy;
+    });
+  };
+
   // Lets the operator discard a row they don't intend to use — e.g. one of several
   // auto-split source-location rows for the same part when only one is actually chosen.
-  // Without this, an unwanted row could only be gotten rid of by faking a rejection.
-  const removeItem = (i) => setItems((p) => p.filter((_, idx) => idx !== i));
+  // The last remaining row for an item can never be removed: the Transfer Request asked
+  // for that item, so the line has to stay on the note (set Transferred Qty to 0 instead).
+  const rowCountForItem = (row) => items.filter((r) => transferKey(r) === transferKey(row)).length;
+  const removeItem = (i) => setItems((p) => (
+    p.filter((r) => transferKey(r) === transferKey(p[i])).length > 1
+      ? p.filter((_, idx) => idx !== i)
+      : p
+  ));
+
+  // How much this row can actually draw, derived from the live per-location balances the
+  // prepare endpoint returns (`available_locations[].available_qty`). The row itself
+  // carries no availability field, so it has to be computed here — narrowed by whatever
+  // of godown/rack/box has been chosen so far, and netted against what other rows in this
+  // same form already claim from the identical location.
+  const srcAvailableAtRow = (row, idx) => {
+    const locKey = (g, r, b) => `${g || ""}||${r || ""}||${b || ""}`;
+    const matching = (row.available_locations || []).filter((L) => (
+      (!row.src_godown_id || L.godown_id === row.src_godown_id)
+      && (!row.src_rack_id || L.rack_id === row.src_rack_id)
+      && (!row.src_box_id || L.box_id === row.src_box_id)
+    ));
+    const pool = matching.reduce((sum, L) => sum + (L.available_qty || 0), 0);
+    const rowKey = locKey(row.src_godown_id, row.src_rack_id, row.src_box_id);
+    const claimedElsewhere = items.reduce((sum, r, ri) => {
+      if (ri === idx || r.part_no !== row.part_no || r.make !== row.make) return sum;
+      return locKey(r.src_godown_id, r.src_rack_id, r.src_box_id) === rowKey
+        ? sum + (parseInt(r.quantity) || 0) : sum;
+    }, 0);
+    return Math.max(0, pool - claimedElsewhere);
+  };
+
+  // Re-pull live per-location balances and merge them into the rows, keeping every
+  // quantity and location the operator has already entered. Lets them re-check after a
+  // colleague's Stock Out drains a shelf, without abandoning the draft.
+  const refreshAvailability = async () => {
+    if (!selectedStrId) return;
+    setRefreshing(true);
+    try {
+      const { data } = await api.get(`/transfer-notes/prepare/${selectedStrId}`,
+        isEdit ? { params: { exclude_stn_id: editing.id } } : undefined);
+      const byItem = {};
+      (data.items || []).forEach((p) => { byItem[`${p.part_no}||${p.make}`] = p; });
+      setItems((prev) => prev.map((r) => {
+        const p = byItem[`${r.part_no}||${r.make}`];
+        if (!p) return r;
+        return { ...r, available_locations: p.available_locations || [], requested_qty: p.requested_qty ?? r.requested_qty };
+      }));
+      toast.success("Availability updated");
+    } catch (err) {
+      toast.error(formatApiError(err.response?.data?.detail) || "Could not refresh availability");
+    } finally { setRefreshing(false); }
+  };
+
+  // Rows whose entered quantity no longer fits the stock actually on the shelf.
+  const shortRows = items.reduce(
+    (n, r, i) => n + ((parseInt(r.quantity) || 0) > srcAvailableAtRow(r, i) ? 1 : 0), 0,
+  );
+
+  // Source and destination are the same physical place only when all three levels match.
+  // Same godown, or same godown + same rack with a different box, are both real moves.
+  const sameLocation = (it) => (
+    (it.src_godown_id || "") === (it.dest_godown_id || "")
+    && (it.src_rack_id || "") === (it.dest_rack_id || "")
+    && (it.src_box_id || "") === (it.dest_box_id || "")
+  );
+
+  // A request line can be split across several source locations, so Requested is a budget
+  // for the part/make, not for one row — every reject figure below is computed over all
+  // rows that draw on the same requested line.
+  const rowsOfLine = (rows, row) => rows.filter((r) => transferKey(r) === transferKey(row));
+  const lineTotals = (rows, row, skipIdx = -1) => rows.reduce((acc, r, ri) => {
+    if (transferKey(r) !== transferKey(row)) return acc;
+    acc.transferred += parseInt(r.quantity) || 0;
+    if (ri !== skipIdx) acc.rejected += parseInt(r.rejected_qty) || 0;
+    return acc;
+  }, { transferred: 0, rejected: 0 });
+  // Requested is repeated on every split row of the same line, so take it once.
+  const lineRequested = (rows, row) => {
+    const first = rowsOfLine(rows, row)[0];
+    return parseInt(first?.requested_qty) || 0;
+  };
+
+  // Reject Quantity closes out the part of the request that will NOT be moved, so it is
+  // bounded by what is still outstanding on the line:
+  //   remaining = requested − transferred,  and  transferred + rejected <= requested.
+  const maxRejectAtRow = (row, idx, rows = items) => {
+    const requested = lineRequested(rows, row);
+    if (requested <= 0) return 0;
+    const t = lineTotals(rows, row, idx);
+    return Math.max(0, requested - t.transferred - t.rejected);
+  };
+  // Rule 5/6: rejection is only possible while the line is genuinely under-transferred.
+  const rejectDisabledReason = (row, rows = items) => {
+    const requested = lineRequested(rows, row);
+    if (requested <= 0) return "Reject Qty needs a requested quantity on this line";
+    const moved = lineTotals(rows, row, -1).transferred;
+    if (moved > requested) {
+      return "Reject Quantity cannot be entered because the actual quantity exceeds the requested quantity.";
+    }
+    if (moved === requested) return "Nothing to reject — the full requested quantity has been transferred";
+    return "";
+  };
+
+  // Transferred Qty is clamped to what the source actually holds — an impossible number
+  // can never be typed, so there is no "over" state to warn about. Changing it re-derives
+  // Remaining, so any Reject Qty on the same line that no longer fits is clamped down (to
+  // 0 once the line is fully transferred) rather than being left as a total that silently
+  // breaks transferred + rejected = requested.
+  const onTransferQtyChange = (i, raw, cap) => {
+    const n = raw === "" ? null : parseInt(raw, 10);
+    if (raw !== "" && (isNaN(n) || n < 0)) return;
+    setItems((prev) => {
+      const next = prev.map((r, ri) => (ri === i ? { ...r, quantity: raw === "" ? "" : String(Math.min(n, cap)) } : r));
+      return next.map((r, ri) => {
+        if (transferKey(r) !== transferKey(next[i])) return r;
+        const cur = parseInt(r.rejected_qty) || 0;
+        if (!cur) return r;
+        const allowed = maxRejectAtRow(r, ri, next);
+        return cur > allowed ? { ...r, rejected_qty: allowed ? String(allowed) : "" } : r;
+      });
+    });
+  };
+
+  // Reject may be entered before or after the transferred quantity — it is clamped to the
+  // remaining quantity as it is typed, and re-clamped whenever the transferred quantity
+  // moves underneath it.
+  const onRejectQtyChange = (i, raw) => {
+    if (raw === "") { updateItem(i, { rejected_qty: "" }); return; }
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 0) return;
+    const cap = maxRejectAtRow(items[i], i);
+    updateItem(i, { rejected_qty: String(Math.min(n, cap)) });
+  };
 
   const onLocChange = async (i, side, kind, value) => {
     // side: "src" | "dest"; kind: "godown" | "rack" | "box"
@@ -1479,32 +1777,77 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   const save = async () => {
     if (!selectedStrId) { toast.error("Select a Transfer Request"); return; }
     if (items.length === 0) { toast.error("No items to transfer"); return; }
+    if (!items.some((it) => (parseInt(it.quantity) || 0) > 0 || (parseInt(it.rejected_qty) || 0) > 0)) {
+      toast.error("Enter a Transferred Qty or a Rejected Qty on at least one row"); return;
+    }
+    // Reject rules, checked per requested line exactly as the server does: rejection is
+    // only possible while the line is under-transferred, and never beyond what is left
+    // over (transferred + rejected = requested).
+    const seenLines = new Set();
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if ((parseInt(it.rejected_qty) || 0) <= 0) continue;
+      const requested = lineRequested(items, it);
+      if (requested <= 0) { toast.error(`Row ${i + 1}: Reject Qty needs a requested quantity on this line`); return; }
+      const k = transferKey(it);
+      if (seenLines.has(k)) continue;
+      seenLines.add(k);
+      const t = lineTotals(items, it, -1);
+      if (t.transferred > requested) {
+        toast.error(`Row ${i + 1}: Reject Quantity cannot be entered because the actual quantity exceeds the requested quantity.`); return;
+      }
+      if (t.transferred === requested) {
+        toast.error(`Row ${i + 1}: Reject Qty must be 0 — the full requested quantity of ${requested} was transferred`); return;
+      }
+      if (t.rejected > requested - t.transferred) {
+        toast.error(`Row ${i + 1}: Reject Qty ${t.rejected} exceeds the remaining quantity ${requested - t.transferred} (requested ${requested} − transferred ${t.transferred})`); return;
+      }
+    }
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       const q = parseInt(it.quantity) || 0;
-      const rejected = parseInt(it.rejected_qty) || 0;
-      if (q < 0 || rejected < 0) { toast.error(`Row ${i + 1}: quantities cannot be negative`); return; }
-      if (q <= 0 && rejected <= 0) { toast.error(`Row ${i + 1}: enter a Transferred Qty or a Rejected Qty`); return; }
-      if (rejected > 0 && !(it.rejection_reason || "").trim()) { toast.error(`Row ${i + 1}: select a Rejection Reason`); return; }
+      if (q < 0) { toast.error(`Row ${i + 1}: quantity cannot be negative`); return; }
       // Source/destination are only required for the portion that actually moves.
       if (q > 0) {
         if (!it.src_godown_id || !it.src_rack_id) { toast.error(`Row ${i + 1}: pick Source Godown / Rack`); return; }
         if (!it.dest_godown_id) { toast.error(`Row ${i + 1}: pick Destination Godown`); return; }
+        // A rack that has boxes must be resolved down to the box, on both sides —
+        // otherwise the destination is ambiguous and stock lands "in the rack".
         const srcHasBoxes = (boxesByRack[it.src_rack_id] || []).length > 0;
         if (srcHasBoxes && !it.src_box_id) { toast.error(`Row ${i + 1}: pick Source Box`); return; }
-        const destHasBoxes = it.dest_rack_id ? (boxesByRack[it.dest_rack_id] || []).length > 0 : false;
+        if (!it.dest_rack_id) { toast.error(`Row ${i + 1}: pick Destination Rack`); return; }
+        const destHasBoxes = (boxesByRack[it.dest_rack_id] || []).length > 0;
         if (destHasBoxes && !it.dest_box_id) { toast.error(`Row ${i + 1}: pick Destination Box`); return; }
-        if (it.src_godown_id === it.dest_godown_id) {
-          toast.error(`Row ${i + 1}: source and destination godown must differ`); return;
+        // Same godown is a legitimate transfer (rack-to-rack, box-to-box). The only
+        // thing that makes no sense is moving stock onto the shelf it already sits on,
+        // so the full source and destination location must differ somewhere.
+        if (sameLocation(it)) {
+          toast.error(`Row ${i + 1}: source and destination are the same location — change the rack or box`);
+          return;
+        }
+        // Stock may have fallen since this note was drafted — the server checks the real
+        // ledger again on completion, so catch it here with a message that explains why.
+        const avail = srcAvailableAtRow(it, i);
+        if (q > avail) {
+          toast.error(`Row ${i + 1}: only ${avail} available at ${[it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "the source"} — reduce the quantity or pick another location`);
+          return;
         }
       }
     }
     setSaving(true);
     try {
+      // Every requested line is sent, including any left at 0 — a 0 is a real answer
+      // ("this line was covered elsewhere / not taken") and the row must survive the save.
+      // Only split rows the operator added and then left completely empty are dropped.
+      const sendRows = items.filter((it) => !(
+        it.manual && (parseInt(it.quantity) || 0) <= 0 && (parseInt(it.rejected_qty) || 0) <= 0
+      ));
       const payload = {
         transfer_request_id: selectedStrId,
-        items: items.map((it) => ({
+        items: sendRows.map((it) => ({
           part_no: it.part_no, make: it.make, quantity: parseInt(it.quantity) || 0,
+          rejected_qty: parseInt(it.rejected_qty) || 0,
+          rejection_reason: it.rejection_reason || "",
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -1515,8 +1858,6 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
           dest_godown_id: it.dest_godown_id || "", dest_godown_name: it.dest_godown_name || "",
           dest_rack_id: it.dest_rack_id || "", dest_rack_no: it.dest_rack_no || "",
           dest_box_id: it.dest_box_id || "", dest_box_no: it.dest_box_no || "", dest_box_category: it.dest_box_category || "",
-          rejected_qty: parseInt(it.rejected_qty) || 0,
-          rejection_reason: it.rejection_reason || "",
         })),
       };
       const { data } = isEdit
@@ -1569,22 +1910,45 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
 
       {selectedStrId && items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm">
-          <div className="p-4 border-b border-slate-200 flex items-center gap-2">
+          <div className="p-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
             <Package size={16} weight="bold" className="text-slate-500" />
             <div className="label-sm">Items to Transfer ({items.length})</div>
+            {shortRows > 0 && (
+              <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-sm px-2 py-0.5" data-testid="stn-short-banner">
+                {shortRows} row{shortRows > 1 ? "s" : ""} exceed current stock — availability has changed
+              </span>
+            )}
+            <Button
+              onClick={refreshAvailability}
+              variant="outline"
+              size="sm"
+              disabled={refreshing}
+              className="rounded-sm ml-auto"
+              title="Re-check live stock at each source location without losing what you have entered"
+              data-testid="stn-refresh-availability"
+            >
+              <ArrowsClockwise size={14} weight="bold" className={`mr-1.5 ${refreshing ? "animate-spin" : ""}`} />
+              {refreshing ? "Checking…" : "Refresh Availability"}
+            </Button>
+          </div>
+          <div className="px-4 pt-3 text-xs text-slate-500">
+            Use <span className="font-bold text-blue-700">+</span> to draw the same item from another source location —
+            the destination carries over. A requested item always keeps at least one row: to move nothing,
+            set its Transferred Qty to 0 rather than deleting the row.
           </div>
           <div className="overflow-x-auto">
             <table className="data-table w-full text-xs">
               <thead>
                 <tr>
-                  <th className="w-10">SL</th>
+                  <th className="w-16">SL NO.</th>
                   <th>PART / MAKE</th>
-                  <th className="text-center">REQ / PEND / NOW</th>
-                  <th className="text-center min-w-[90px]">REJECTED QTY</th>
-                  <th className="min-w-[140px]">REASON</th>
+                  <th className="text-center w-32">REQUESTED QTY</th>
+                  <th className="text-center w-32">TRANSFERRED QTY</th>
+                  <th className="text-center w-28">REJECT QTY</th>
                   <th>SOURCE</th>
                   <th>DESTINATION</th>
-                  <th className="w-10"></th>
+                  {/* Two 28px icon buttons (split + delete) plus cell padding. */}
+                  <th className="w-20"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1593,49 +1957,66 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   const srcBoxes = boxesByRack[it.src_rack_id] || [];
                   const destRacks = racksByGodown[it.dest_godown_id] || [];
                   const destBoxes = boxesByRack[it.dest_rack_id] || [];
-                  // Live-derived from current field state on every render — never the
-                  // static pending_qty fetched once when the form loaded, so Requested /
-                  // Transferred / Rejected / Pending always match what's on screen right now.
                   const requested = it.requested_qty || 0;
-                  const transferredNow = parseInt(it.quantity) || 0;
-                  const rejectedNow = parseInt(it.rejected_qty) || 0;
-                  const livePending = Math.max(0, requested - transferredNow - rejectedNow);
-                  const overPending = transferredNow + rejectedNow > requested + 1e-6;
+                  const srcAvail = srcAvailableAtRow(it, idx);
+                  // Stock can fall after this note was drafted (consumed by a Stock Out,
+                  // another transfer, a correction). The typed quantity is deliberately
+                  // NOT reduced behind the operator's back — it is flagged instead, so
+                  // they decide whether to lower it or pick another location.
+                  const shortNow = (parseInt(it.quantity) || 0) > srcAvail;
+                  const rejectBlocked = rejectDisabledReason(it);
+                  const maxReject = maxRejectAtRow(it, idx);
+                  const canRemoveRow = rowCountForItem(it) > 1;
                   return (
-                    <tr key={idx} data-testid={`stn-item-row-${idx}`} className={overPending ? "bg-red-50 align-top" : "align-top"}>
+                    <tr key={idx} data-testid={`stn-item-row-${idx}`} className={shortNow ? "align-top bg-amber-50" : "align-top"}>
                       <td className="font-mono text-slate-500 pt-3">{idx + 1}</td>
                       <td className="pt-3">
                         <div><PartNoLink partNo={it.part_no} make={it.make} /></div>
                         <div className="text-slate-600">{it.make}</div>
                         <div className="text-[10px] text-slate-500 mt-0.5">{it.description_1 || ""}</div>
                       </td>
+                      <td className="text-center pt-3 font-mono font-bold text-slate-700" data-testid={`stn-requested-${idx}`}>
+                        {requested || "—"}
+                      </td>
                       <td className="text-center pt-3">
                         <Input type="number" min="0" step="1" value={it.quantity}
-                          onChange={(e) => updateItem(idx, { quantity: e.target.value })}
-                          className={`rounded-sm font-mono h-8 text-center w-24 mx-auto ${overPending ? "border-red-400" : ""}`}
+                          max={srcAvail || undefined}
+                          onChange={(e) => onTransferQtyChange(idx, e.target.value, srcAvail)}
+                          title={`Up to ${srcAvail} available at the selected source`}
+                          className={`rounded-sm font-mono h-9 text-center text-base w-24 mx-auto ${shortNow ? "border-amber-500" : ""}`}
                           data-testid={`stn-qty-${idx}`} />
-                        <div className="font-mono text-[11px] text-slate-500 whitespace-nowrap mt-1" data-testid={`stn-live-summary-${idx}`}>
-                          Req {requested} · Rej {rejectedNow} · Pend <b className={overPending ? "text-red-600" : "text-slate-900"}>{overPending ? "—" : livePending}</b>
+                        <div className={`font-mono text-[11px] whitespace-nowrap mt-1 ${shortNow ? "text-amber-700 font-bold" : "text-slate-500"}`} data-testid={`stn-live-summary-${idx}`}>
+                          Avail {srcAvail}
                         </div>
-                        {overPending && <div className="text-[10px] text-red-600 font-bold mt-0.5">Transferred + Rejected ({transferredNow + rejectedNow}) exceeds Requested ({requested})</div>}
+                        {shortNow && (
+                          <div className="text-[10px] text-amber-800 mt-1 leading-tight" data-testid={`stn-short-warning-${idx}`}>
+                            Stock dropped to {srcAvail} since this note was created.
+                            <button
+                              type="button"
+                              onClick={() => updateItem(idx, { quantity: String(srcAvail) })}
+                              className="ml-1 underline font-bold hover:text-amber-900"
+                              data-testid={`stn-use-avail-${idx}`}
+                            >
+                              Use {srcAvail}
+                            </button>
+                          </div>
+                        )}
                       </td>
+                      {/* Reject Qty — audit only. It never moves stock; it closes out the
+                          untransferred remainder so no follow-up Transfer Note is raised. */}
                       <td className="text-center pt-3">
-                        <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
-                          onChange={(e) => updateItem(idx, { rejected_qty: e.target.value })}
-                          placeholder="0"
-                          className="rounded-sm font-mono h-8 text-center w-20 mx-auto"
-                          data-testid={`stn-rejected-qty-${idx}`} />
-                      </td>
-                      <td className="pt-3">
-                        <Select value={it.rejection_reason || undefined} onValueChange={(v) => updateItem(idx, { rejection_reason: v })}
-                          disabled={!(parseInt(it.rejected_qty) > 0)}>
-                          <SelectTrigger className="rounded-sm h-8 text-xs" data-testid={`stn-reject-reason-${idx}`}>
-                            <SelectValue placeholder={parseInt(it.rejected_qty) > 0 ? "Select reason" : "—"} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {REJECTION_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
-                          </SelectContent>
-                        </Select>
+                        <Input type="number" min="0" step="1" max={maxReject || undefined}
+                          value={it.rejected_qty ?? ""}
+                          disabled={!!rejectBlocked}
+                          onChange={(e) => onRejectQtyChange(idx, e.target.value)}
+                          title={rejectBlocked || `Up to ${maxReject} can be rejected on this line`}
+                          className="rounded-sm font-mono h-9 text-center text-base w-20 mx-auto disabled:bg-slate-50"
+                          data-testid={`stn-reject-${idx}`} />
+                        <div className={`font-mono text-[11px] whitespace-nowrap mt-1 ${
+                          rejectBlocked ? "text-slate-400" : ((parseInt(it.rejected_qty) || 0) > 0 ? "text-amber-700 font-bold" : "text-slate-500")
+                        }`} data-testid={`stn-reject-hint-${idx}`}>
+                          {rejectBlocked ? "Not allowed" : `Rem ${maxReject}`}
+                        </div>
                       </td>
                       <td className="space-y-1 pt-2">
                         <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider"><MapPin size={10} weight="bold" className="inline mr-0.5" /> From</div>
@@ -1679,10 +2060,17 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                         </Select>
                       </td>
                       <td className="pt-3">
-                        <button onClick={() => removeItem(idx)}
-                          className="p-1.5 rounded-sm hover:bg-red-50 text-red-700"
-                          title="Remove this row"
-                          data-testid={`stn-remove-row-${idx}`}><Trash size={14} /></button>
+                        <div className="flex items-center gap-1 whitespace-nowrap">
+                          <button type="button" onClick={() => addSourceRow(idx)}
+                            className="p-1.5 rounded-sm shrink-0 hover:bg-blue-50 text-blue-700"
+                            title="Add a row for this item from another source location"
+                            data-testid={`stn-split-row-${idx}`}><Plus size={14} /></button>
+                          <button type="button" onClick={() => removeItem(idx)}
+                            disabled={!canRemoveRow}
+                            className={`p-1.5 rounded-sm shrink-0 ${canRemoveRow ? "hover:bg-red-50 text-red-700" : "text-slate-300 cursor-not-allowed"}`}
+                            title={canRemoveRow ? "Remove this row" : "The last row for an item cannot be removed — set Transferred Qty to 0 instead"}
+                            data-testid={`stn-remove-row-${idx}`}><Trash size={14} /></button>
+                        </div>
                       </td>
                     </tr>
                   );

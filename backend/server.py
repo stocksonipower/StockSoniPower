@@ -161,6 +161,32 @@ async def startup():
     await db.picking_notes.create_index("created_at")
     await db.picking_notes.create_index("status")
     await db.picking_notes.create_index("issue_note_id")
+    await db.picking_notes.create_index("parent_picking_note_id")
+    # Auto-raised Picking Notes are created with a find-then-insert, which two concurrent
+    # requests can both pass. These unique partial indexes are what actually make them
+    # once-only — the loser's insert fails and adopts the winner's note instead of
+    # producing a second note for the same work (see routes/stock_out.py).
+    #   - one root note per Issue Note (auto-created ones only: a user may legitimately
+    #     raise several manual notes against the same Issue Note over its lifetime)
+    #   - one continuation note per parent note
+    # Wrapped: an existing database that already contains such a duplicate would
+    # otherwise fail startup outright, which is worse than running without the guard.
+    for spec in (
+        dict(keys="issue_note_id", name="uniq_root_pn_per_issue",
+             # `$type: "null"` matches an explicit null but NOT a missing field, which is
+             # precisely the auto-created root notes — manually created notes omit the
+             # field entirely and stay outside the index.
+             partial={"parent_picking_note_id": {"$type": "null"}, "auto_created": True}),
+        dict(keys="parent_picking_note_id", name="uniq_followup_pn_per_parent",
+             partial={"parent_picking_note_id": {"$type": "string"}}),
+    ):
+        try:
+            await db.picking_notes.create_index(
+                spec["keys"], unique=True, name=spec["name"],
+                partialFilterExpression=spec["partial"],
+            )
+        except Exception as e:
+            logger.error(f"Could not create picking-note uniqueness index {spec['name']}: {e}")
     await db.transfer_requests.create_index("id", unique=True)
     await db.transfer_requests.create_index([("fy", 1), ("serial", 1)], unique=True)
     await db.transfer_requests.create_index("created_at")

@@ -80,7 +80,15 @@ async def _issue_items_for_storage(items):
 
 
 async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional[dict]:
-    existing = await db.picking_notes.find_one({"issue_note_id": inn["id"], "parent_picking_note_id": {"$in": [None, ""]}}, {"_id": 0})
+    """Raise the one root Picking Note for an Issue Note, exactly once.
+
+    The find-then-insert below is not atomic on its own — two concurrent finalize/create
+    requests for the same Issue Note can both see "no note yet". The `uniq_root_pn_per_issue`
+    unique partial index (server.py) is what actually makes it once-only: the loser's
+    insert raises DuplicateKeyError and picks up the winner's note instead of creating a
+    second one for the same work.
+    """
+    existing = await _find_root_picking_note(inn["id"])
     if existing:
         return existing
     today = datetime.now(timezone.utc)
@@ -111,11 +119,31 @@ async def _auto_create_picking_note_for_issue(inn: dict, user: dict) -> Optional
             doc.pop("_id", None)
             return doc
         except DuplicateKeyError as e:
+            # Either the (fy, serial) number was claimed first (retry with a new one) or a
+            # concurrent request already raised this Issue Note's root note (adopt it).
+            winner = await _find_root_picking_note(inn["id"])
+            if winner:
+                return winner
             last_err = e
     raise HTTPException(status_code=500, detail=f"Could not auto-create picking note: {last_err}")
 
 
+async def _find_root_picking_note(in_id: str) -> Optional[dict]:
+    return await db.picking_notes.find_one(
+        {"issue_note_id": in_id, "auto_created": True, "parent_picking_note_id": {"$in": [None, ""]}},
+        {"_id": 0},
+    )
+
+
 async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[dict], user: dict) -> Optional[dict]:
+    """Raise the continuation Picking Note for whatever a partial pick left outstanding.
+
+    Idempotent by design: it runs after the recording transaction has already committed,
+    so it may legitimately be re-attempted (a retried request, a worker restarted between
+    commit and this call). One continuation per parent note is enforced by the
+    `uniq_followup_pn_per_parent` unique partial index, not by the find below — that
+    check alone loses a concurrent race.
+    """
     if not assigned_items:
         return None
     existing = await db.picking_notes.find_one({"parent_picking_note_id": parent_pn["id"]}, {"_id": 0})
@@ -150,16 +178,24 @@ async def _create_followup_picking_note(parent_pn: dict, assigned_items: list[di
             doc.pop("_id", None)
             return doc
         except DuplicateKeyError as e:
+            winner = await db.picking_notes.find_one({"parent_picking_note_id": parent_pn["id"]}, {"_id": 0})
+            if winner:
+                return winner
             last_err = e
     raise HTTPException(status_code=500, detail=f"Could not auto-create remaining picking note: {last_err}")
 
 
 async def _enrich_picking_requested_items(rows: list[dict]) -> None:
-    """Expose requested issue quantities for pending auto-created picking notes.
+    """Expose the issued quantities, the five derived totals, and live availability.
 
-    `picking_notes.items` stores physical rack/box allocations. Pending notes
-    have no allocations yet, but the list/detail UI still needs to show the
-    issue item count and requested qty.
+    `picking_notes.items` stores physical rack/box allocations. Pending notes have no
+    allocations yet, but the list/detail UI still needs to show the issue item count and
+    the issued qty — so `assigned_items` (falling back to the parent Issue Note) is the
+    source for Issued either way.
+
+    Every total comes from `_picking_totals`, so the list, the detail dialog, the print
+    sheet and the Excel export cannot drift apart: there is one implementation of
+    Pending = Issued − Picked − Rejected and Extra = Picked − Issued.
     """
     issue_ids = sorted({r.get("issue_note_id") for r in rows if r.get("issue_note_id")})
     if not issue_ids:
@@ -169,13 +205,59 @@ async def _enrich_picking_requested_items(rows: list[dict]) -> None:
         {"_id": 0, "id": 1, "items": 1},
     ).to_list(len(issue_ids))
     by_id = {i["id"]: i for i in issues}
+    # Live Available Qty per part/make, fetched once for every part on the page.
+    avail_cache: dict[tuple, float] = {}
     for row in rows:
         requested_items = row.get("assigned_items") or by_id.get(row.get("issue_note_id"), {}).get("items", []) or []
         row["requested_items"] = requested_items
         row["requested_items_count"] = len(requested_items)
-        row["requested_qty_total"] = sum(float(it.get("quantity") or 0) for it in requested_items)
-        row["picked_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("items") or []))
-        row["rejected_qty_total"] = sum(float(it.get("rejected_qty") or 0) for it in (row.get("items") or []))
+        row.update(_picking_totals(requested_items, row.get("items") or []))
+        # Kept under its historical name too — existing callers/exports read it.
+        row["requested_qty_total"] = row["issued_qty_total"]
+        available_by_item = []
+        for it in requested_items:
+            ck = (it.get("part_no") or "", it.get("make") or "")
+            if ck not in avail_cache:
+                avail_cache[ck] = float(await _stock_total_for(ck[0], ck[1]) or 0)
+            available_by_item.append({
+                "part_no": ck[0], "make": ck[1], "line_no": it.get("line_no"),
+                "available_qty": avail_cache[ck],
+            })
+        row["available_by_item"] = available_by_item
+        # Grand total of what is on the shelf for the DISTINCT parts on this note —
+        # summing per line would count the same shelf twice for two lines of one part.
+        row["available_qty_total"] = sum(
+            avail_cache[k] for k in {(it.get("part_no") or "", it.get("make") or "") for it in requested_items}
+        )
+
+
+async def _enrich_issue_note_totals(rows: list[dict]) -> None:
+    """Roll every related Picking Note up onto the Issue Note.
+
+    The Issue Note states what was ISSUED; its Picking Notes are the only record of what
+    was actually picked and rejected against it. So Picked and Rejected are summed live
+    across the whole chain (root note plus every continuation) rather than snapshotted —
+    a corrected pick shows up on the Issue Note, its print and its export immediately.
+
+    CLOSED notes are excluded: closing is the decision that the note's quantity will
+    never be picked, and whatever draft numbers it happened to carry were never
+    recorded. Its write-off is reflected in the Issue Note's STATUS (see
+    `_recompute_in_status`), not in these quantities.
+
+    Pending and Extra are then the same arithmetic used everywhere else, applied to the
+    Issue Note's own issued quantities — which is what keeps the two documents in step.
+    """
+    in_ids = sorted({r.get("id") for r in rows if r.get("id")})
+    if not in_ids:
+        return
+    picked_by_in: dict[str, list] = {}
+    async for pn in db.picking_notes.find(
+        {"issue_note_id": {"$in": in_ids}, "status": {"$ne": "CLOSED"}},
+        {"_id": 0, "issue_note_id": 1, "items": 1},
+    ):
+        picked_by_in.setdefault(pn["issue_note_id"], []).extend(pn.get("items") or [])
+    for row in rows:
+        row.update(_picking_totals(row.get("items") or [], picked_by_in.get(row["id"], [])))
 
 
 def _stock_out_lock_key(it: dict) -> str:
@@ -206,22 +288,32 @@ def _issue_qty_signature(items: list[dict]) -> dict:
 
 
 def _sum_issue_like_items(items: list[dict]) -> dict:
+    """Resolved quantity per (part, make) — Picked + Rejected.
+
+    Both settle part of the request, in opposite ways: a pick moves the stock, a reject
+    refuses it. Either way that much is answered for and stops being outstanding, which
+    is precisely why a fully-rejected note raises no follow-up. Only the unanswered
+    remainder (the PENDING quantity) rolls forward.
+    """
     sums = {}
     for it in items or []:
         k = _key(it.get("part_no"), it.get("make"))
-        # picked + rejected both resolve the requested qty — neither needs re-picking.
         sums[k] = sums.get(k, 0) + float(it.get("quantity") or 0) + float(it.get("rejected_qty") or 0)
     return sums
 
 
 def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dict]) -> list[dict]:
-    """What still needs picking, line by line.
+    """What is still PENDING, line by line — Issued − Picked − Rejected, floored at 0.
 
-    The picked quantity is a single pool per (part, make) — the picker records where
+    The resolved quantity is a single pool per (part, make) — the picker records where
     stock came off the shelf, not which of several identical lines it was for. So the
     pool is CONSUMED line by line in order: 15 picked against lines of 15 and 5 leaves
     the second line's 5 outstanding, rather than both lines seeing the full 15 and the
     remainder silently vanishing.
+
+    An over-pick (EXTRA) never produces a negative remainder — `min` caps consumption at
+    the line's own issued quantity — so an extra can no more raise a follow-up note than
+    it can cancel one on a sibling line.
     """
     pool = _sum_issue_like_items(picked_items)
     remaining = []
@@ -230,7 +322,7 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
         k = _key(row.get("part_no"), row.get("make"))
         if row.get("quantity") is None:
             # Open line: the store incharge's picked quantity IS the quantity, so any
-            # pick resolves it. Untouched open lines carry over still open.
+            # pick (or reject) resolves it. Untouched open lines carry over still open.
             if pool.get(k, 0) <= 1e-6:
                 remaining.append(row)
             continue
@@ -242,6 +334,54 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
             row["quantity"] = rem
             remaining.append(row)
     return remaining
+
+
+def _picking_totals(assigned_items: list[dict], picked_items: list[dict]) -> dict:
+    """The five quantities of a Picking Note, from the only two that are ever stored.
+
+        Issued   — what the Issue Note assigned to this note (blank/open lines count 0)
+        Picked   — what physically came off the shelf
+        Rejected — what was deliberately refused
+        Pending  — max(0, Issued − Picked − Rejected), summed per (part, make)
+        Extra    — max(0, Picked − Issued), summed per (part, make)
+
+    Pending and Extra are floored per part/make rather than on the grand total, so a
+    surplus on one item can never mask a shortfall on another. Every view, print,
+    export and API response derives its numbers here, which is what makes them agree.
+    """
+    issued_by_key, picked_by_key, rejected_by_key = {}, {}, {}
+    # An OPEN line (quantity left blank for the store incharge to decide) has no target
+    # number. It contributes 0 to Issued, but it must not therefore make the whole pick
+    # look like an Extra — there was nothing to exceed. Both Pending and Extra are
+    # undefined for it, so it is skipped in the arithmetic below rather than counted as 0.
+    open_keys = set()
+    for it in assigned_items or []:
+        k = _key(it.get("part_no"), it.get("make"))
+        issued_by_key.setdefault(k, 0.0)
+        if it.get("quantity") is None:
+            open_keys.add(k)
+        else:
+            issued_by_key[k] += float(it.get("quantity") or 0)
+    for it in picked_items or []:
+        k = _key(it.get("part_no"), it.get("make"))
+        picked_by_key[k] = picked_by_key.get(k, 0.0) + float(it.get("quantity") or 0)
+        rejected_by_key[k] = rejected_by_key.get(k, 0.0) + float(it.get("rejected_qty") or 0)
+    pending = extra = 0.0
+    for k in set(issued_by_key) | set(picked_by_key) | set(rejected_by_key):
+        if k in open_keys:
+            continue
+        issued = issued_by_key.get(k, 0.0)
+        picked = picked_by_key.get(k, 0.0)
+        rejected = rejected_by_key.get(k, 0.0)
+        pending += max(0.0, issued - picked - rejected)
+        extra += max(0.0, picked - issued)
+    return {
+        "issued_qty_total": sum(issued_by_key.values()),
+        "picked_qty_total": sum(picked_by_key.values()),
+        "rejected_qty_total": sum(rejected_by_key.values()),
+        "pending_qty_total": pending,
+        "extra_qty_total": extra,
+    }
 
 
 @router.post("/stock-out")
@@ -561,6 +701,7 @@ async def list_issue_notes(
     skip = (page - 1) * page_size
     rows = await db.issue_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
+    await _enrich_issue_note_totals(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -574,6 +715,7 @@ async def get_issue_note(in_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Issue note not found")
     await _enrich_note_items([doc])
+    await _enrich_issue_note_totals([doc])
     return doc
 
 
@@ -609,11 +751,37 @@ async def update_issue_note(in_id: str, payload: IssueNoteCreate, user=Depends(g
     await db.issue_notes.update_one({"id": in_id}, {"$set": update})
     if items_changed:
         # Propagate the edited request into every not-yet-processed Picking Note so
-        # allocation/availability/preview never show a stale requested quantity.
-        await db.picking_notes.update_many(
+        # allocation/availability/preview never show a stale requested quantity — but
+        # KEEP what the picker has already entered. A quantity typed against a physical
+        # shelf is the picker's own observation; the office revising the request (e.g.
+        # filling in an open line as 8) must not silently erase a draft pick of 6. The
+        # draft stays fully editable until it is recorded.
+        valid_keys = {_key(it.get("part_no"), it.get("make")) for it in stored_items}
+        valid_lines = {
+            (it.get("line_no"), _key(it.get("part_no"), it.get("make")))
+            for it in stored_items
+        }
+        async for pn in db.picking_notes.find(
             {"issue_note_id": in_id, "status": {"$nin": ["RECORDED", "COMPLETED"]}},
-            {"$set": {"items": [], "assigned_items": stored_items, "updated_at": now_iso()}},
-        )
+            {"_id": 0, "id": 1, "items": 1},
+        ):
+            kept = []
+            for it in pn.get("items") or []:
+                k = _key(it.get("part_no"), it.get("make"))
+                if k not in valid_keys:
+                    continue  # that item is no longer requested at all — drop the row
+                row = dict(it)
+                # Line numbers are re-assigned by position on every save, so a stored
+                # line_no can end up pointing at a different line. Keep it only when it
+                # still resolves to the same part/make; otherwise fall back to the
+                # part/make total for display.
+                if (row.get("line_no"), k) not in valid_lines:
+                    row["line_no"] = None
+                kept.append(row)
+            await db.picking_notes.update_one(
+                {"id": pn["id"]},
+                {"$set": {"assigned_items": stored_items, "items": kept, "updated_at": now_iso()}},
+            )
     await _write_audit_log(
         module="stock_out", action="issue_note.edited", actor=user,
         ref_collection="issue_notes", ref_id=in_id,
@@ -703,8 +871,16 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
             "part_no": part_no, "make": make,
             "line_no": line_no,
             "open_quantity": is_open,
+            # Issued = what THIS picking note is being asked for (already the frozen
+            # remainder on a continuation note, never the original full request).
             "requested_qty": None if is_open else pending,
+            "issued_qty": None if is_open else pending,
             "pending_qty": None if is_open else pending,
+            # Live Available Qty across every location holding this part/make — the real
+            # ceiling on Picked Qty, and the number the form shows read-only. Derived
+            # from the same `available_locations` the picker chooses from, so the total
+            # and the per-location amounts can never disagree.
+            "available_qty": sum(L.get("current_qty") or 0 for L in available_locations),
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -737,11 +913,13 @@ async def prepare_picking_note(in_id: str, exclude_pn_id: Optional[str] = None, 
                 "box_id": (preferred or {}).get("box_id", ""), "box_no": (preferred or {}).get("box_no", ""),
                 "box_category": (preferred or {}).get("box_category", ""),
             })
-        elif allocated_qty + 1e-6 < pending:
-            # Stock fell short of the greedily-suggested quantity since the Issue Note
-            # was created/edited (e.g. concurrent consumption elsewhere) — surface the
-            # gap as an unfilled row; the picker can reject it or pick it from another
-            # location in `available_locations`.
+        elif not allocation:
+            # Nothing at all could be suggested for this line — not a partial shortfall
+            # (that case already has a row above, for whatever real stock covers part of
+            # it; Pending/Extra pick up the rest automatically, no extra row needed) but
+            # a total absence of stock anywhere. Without this fallback the line would
+            # have zero rows and silently vanish from the note. The picker can reject it
+            # outright, or use "+ Split" once stock reappears somewhere.
             items_out.append({
                 **common, "quantity": 0, "allocated_qty": 0, "suggested": False, "unallocated_shortfall": pending - allocated_qty,
                 "godown_id": "", "godown_name": "", "rack_id": "", "rack_no": "",
@@ -791,6 +969,7 @@ async def create_picking_note(payload: PickingNoteCreate, user=Depends(get_curre
             "issue_note_date": inn["in_date"],
             "assigned_items": inn.get("items", []),
             "items": [it.model_dump() for it in payload.items],
+            "narration": (payload.narration or "").strip(),
             "status": "DRAFT",
             "created_at": now_iso(),
             "created_by": user.get("email", ""),
@@ -869,6 +1048,8 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
         raise HTTPException(status_code=404, detail="Picking note not found")
     if existing.get("status") in ("RECORDED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="Cannot edit — already recorded as Stock Out")
+    if existing.get("status") == "CLOSED":
+        raise HTTPException(status_code=409, detail="Cannot edit — this picking note was closed as unpickable")
     in_parent = await db.issue_notes.find_one({"id": existing.get("issue_note_id")}, {"_id": 0}) or {}
     _enforce_assignee(in_parent, user, "edit this picking note")
     _validate_picking_items(payload.items)
@@ -880,6 +1061,7 @@ async def update_picking_note(pn_id: str, payload: PickingNoteCreate, user=Depen
     await _validate_picking_constraints(existing.get("issue_note_id"), payload.items, exclude_pn_id=pn_id, assigned_items=assigned_items)
     update = {
         "items": [it.model_dump() for it in payload.items],
+        "narration": (payload.narration or "").strip(),
         "status": "DRAFT",
         "updated_at": now_iso(),
     }
@@ -896,6 +1078,70 @@ async def delete_picking_note(pn_id: str, user=Depends(get_current_user)):
     raise HTTPException(status_code=403, detail="Picking Notes cannot be deleted — edit instead")
 
 
+@router.post("/picking-notes/{pn_id}/close")
+async def close_picking_note(pn_id: str, payload: PickingNoteClose, user=Depends(get_current_user)):
+    """Write off a Picking Note whose quantity is never going to be picked.
+
+    This is the escape hatch for the case that used to need a reject field: Issue Note 1
+    takes the last 10 in stock, Issue Note 2 still wants 5, and no more will ever arrive.
+    IN-2's Picking Note cannot be picked and cannot be left open forever, so it is closed
+    — no stock moves, no continuation note is raised, and its assigned quantity stops
+    counting as outstanding so the Issue Note can reach COMPLETE.
+
+    Only an unrecorded note can be closed. A COMPLETED one is the record of stock that
+    physically left the shelf and must never be undone this way.
+    """
+    pn = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
+    if not pn:
+        raise HTTPException(status_code=404, detail="Picking note not found")
+    status = (pn.get("status") or "").upper()
+    if status in ("RECORDED", "COMPLETED"):
+        raise HTTPException(status_code=409, detail="Cannot close — this picking note is already recorded as Stock Out")
+    if status == "CLOSED":
+        raise HTTPException(status_code=409, detail="This picking note is already closed")
+    if status == "RECORDING":
+        raise HTTPException(status_code=409, detail="Picking note is currently being recorded")
+    in_parent = await db.issue_notes.find_one({"id": pn.get("issue_note_id")}, {"_id": 0}) or {}
+    _enforce_assignee(in_parent, user, "close this picking note")
+
+    now = now_iso()
+    # CAS on the status we actually read, so a concurrent record/close cannot slip past.
+    claimed = await db.picking_notes.update_one(
+        {"id": pn_id, "status": pn.get("status")},
+        {"$set": {
+            "status": "CLOSED", "closed_at": now,
+            "closed_by": user.get("email", ""), "close_reason": (payload.reason or "").strip(),
+        }},
+    )
+    if claimed.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Picking note changed while being closed — reload and try again")
+
+    await _write_audit_log(
+        module="stock_out", action="picking_note.closed", actor=user,
+        ref_collection="picking_notes", ref_id=pn_id,
+        old={"status": pn.get("status")},
+        new={"status": "CLOSED", "assigned_items": pn.get("assigned_items") or []},
+        reason=(payload.reason or "").strip(),
+    )
+    if pn.get("issue_note_id"):
+        await _recompute_in_status(pn["issue_note_id"])
+    written_off = sum(
+        float(it.get("quantity") or 0) for it in (pn.get("assigned_items") or []) if it.get("quantity") is not None
+    )
+    await _notify(
+        actor=user, type="picking_note.closed", module="stock_out",
+        title=f"Picking Note closed ({pn['pn_no']})",
+        message=(
+            f"{user.get('email')} closed {pn['pn_no']} from {pn.get('issue_note_no') or 'IN'} — "
+            f"qty {written_off:g} will not be picked."
+            + (f" Reason: {(payload.reason or '').strip()}" if (payload.reason or "").strip() else "")
+        ),
+        audience="module", ref_collection="picking_notes", ref_id=pn_id,
+    )
+    doc = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
+    return doc
+
+
 @router.post("/picking-notes/{pn_id}/record")
 async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
     pn = await db.picking_notes.find_one({"id": pn_id}, {"_id": 0})
@@ -903,6 +1149,8 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Picking note not found")
     if pn.get("status") in ("RECORDED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="Already recorded")
+    if pn.get("status") == "CLOSED":
+        raise HTTPException(status_code=409, detail="Cannot record — this picking note was closed as unpickable")
     if pn.get("status") != "DRAFT":
         raise HTTPException(status_code=409, detail="Picking note must be saved as Draft before recording")
     in_parent = await db.issue_notes.find_one({"id": pn.get("issue_note_id")}, {"_id": 0}) or {}
@@ -945,9 +1193,9 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
                 if await uow.transactions.find_one({"picking_note_id": pn_id}):
                     raise HTTPException(status_code=409, detail="Stock Out transactions already exist for this Picking Note")
 
-                # Final availability check (real ledger balance). Fully-rejected rows
-                # (quantity == 0, resolved entirely via rejected_qty) move no stock and
-                # need no location/balance check.
+                # Final availability check (real ledger balance). A 0-qty row records an
+                # Issue Note line this note did not pick — it moves no stock and needs no
+                # location/balance check.
                 for idx, it in enumerate(items, start=1):
                     if (it.get("quantity") or 0) <= 0:
                         continue
@@ -976,7 +1224,7 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
 
                 for it in items:
                     if (it.get("quantity") or 0) <= 0:
-                        continue  # fully-rejected row — nothing physically issued
+                        continue  # line not picked on this note — nothing physically issued
                     master = await uow.db.stock_master.find_one(
                         {"part_no": it["part_no"], "make": it["make"]}, {"_id": 0}, session=uow.session
                     ) or {}
@@ -1003,9 +1251,15 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
                     })
                 if tx_docs:
                     await uow.transactions.insert_many(tx_docs)
+                # `remaining_items` is committed together with the stock movement so the
+                # continuation note's contents are durable the moment the pick is. Raising
+                # that note is a separate write after commit (it needs its own number and
+                # must be retryable), and this field is what lets it be re-derived exactly
+                # if that step is interrupted.
                 finalized = await uow.picking_notes.transition_status(
                     pn_id, from_status="RECORDING", to_status="COMPLETED",
-                    set_fields={"recorded_at": now}, unset_fields=["recording_started_at"],
+                    set_fields={"recorded_at": now, "remaining_items": remaining_items},
+                    unset_fields=["recording_started_at"],
                 )
                 if not finalized:
                     raise HTTPException(status_code=409, detail="Picking note recording state changed; stock out was not finalized")
@@ -1070,13 +1324,24 @@ async def record_picking_note(pn_id: str, user=Depends(get_current_user)):
         child_pn = await _create_followup_picking_note(pn, remaining_items, user)
     if pn.get("issue_note_id"):
         await _recompute_in_status(pn["issue_note_id"])
-    total_qty = sum(int(it.get("quantity") or 0) for it in items)
-    total_rejected = sum(int(it.get("rejected_qty") or 0) for it in items)
-    rejected_note = f", rejected {total_rejected}" if total_rejected else ""
+    totals = _picking_totals(assigned_items or [], items)
+    total_qty = totals["picked_qty_total"]
+    # The variance is the whole story of a pick, so it belongs in the notification rather
+    # than only on screen: an extra was taken off the shelf, a rejection refused part of
+    # the request outright, and anything still pending is somebody's follow-up to chase.
+    parts = []
+    if totals["extra_qty_total"] > 1e-6:
+        parts.append(f"extra {totals['extra_qty_total']:g} taken")
+    if totals["rejected_qty_total"] > 1e-6:
+        parts.append(f"rejected {totals['rejected_qty_total']:g}")
+    if totals["pending_qty_total"] > 1e-6:
+        parts.append(f"pending {totals['pending_qty_total']:g}")
+    variance = (", " + ", ".join(parts)) if parts else ""
+    followup = f" Remaining {child_pn['pn_no']} raised." if child_pn else ""
     await _notify(
         actor=user, type="stock_out.recorded", module="stock_out",
         title=f"Stock Out recorded ({pn['pn_no']})",
-        message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty}{rejected_note} to '{in_parent.get('assigned_to_name') or '—'}' from {pn.get('issue_note_no') or 'IN'}.",
+        message=f"{user.get('email')} issued {len(tx_docs)} item(s), total qty {total_qty:g}{variance} to '{in_parent.get('assigned_to_name') or '—'}' from {pn.get('issue_note_no') or 'IN'}.{followup}",
         audience="module", ref_collection="picking_notes", ref_id=pn_id,
     )
     return {"ok": True, "transactions_created": len(tx_docs), "remaining_picking_note": child_pn}

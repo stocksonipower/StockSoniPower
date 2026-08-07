@@ -365,9 +365,21 @@ function PickingBody({ d }) {
         <Detail k="Status" v={d.status} />
         <Detail k="Created By" v={d.created_by || "—"} />
       </div>
+      {/* The note's five quantities, taken straight from the server's own roll-up
+          (`_enrich_picking_requested_items`) rather than recomputed here — this dialog is
+          reached from the transaction ledger and must report exactly what the Stock Out
+          screens report. Pending = Issued − Picked − Rejected; Extra = Picked − Issued. */}
+      <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
+        <Detail k="Issued Qty" v={d.issued_qty_total ?? "—"} />
+        <Detail k="Available Qty" v={d.available_qty_total ?? "—"} />
+        <Detail k="Picked Qty" v={d.picked_qty_total ?? 0} />
+        <Detail k="Pending Qty" v={d.pending_qty_total ?? 0} />
+        <Detail k="Rejected Qty" v={d.rejected_qty_total ?? 0} />
+        <Detail k="Extra Qty" v={d.extra_qty_total ?? 0} />
+      </div>
       <div className="overflow-x-auto">
         <table className="data-table w-full text-xs">
-          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-center">QTY</th></tr></thead>
+          <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>LOCATION</th><th className="text-center">PICKED QTY</th><th className="text-center">REJECTED QTY</th></tr></thead>
           <tbody>
             {(d.items || []).map((it, idx) => (
               <tr key={idx}>
@@ -377,6 +389,11 @@ function PickingBody({ d }) {
                 <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                 <td><LocCell g={it.godown_name} r={it.rack_no} b={it.box_no} /></td>
                 <td className="text-center font-mono font-bold">{it.quantity}</td>
+                {/* Rejected moves no stock, so it has no location and never appears in the
+                    transaction ledger — the note is the only place it is visible. */}
+                <td className={`text-center font-mono font-bold ${(it.rejected_qty || 0) > 0 ? "text-red-700" : "text-slate-400"}`}>
+                  {it.rejected_qty || 0}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -94,6 +94,21 @@ table {
     text-align: left;
 }
 
+/* Wrapping headers for fixed-width tables whose column labels are longer than
+   their columns. The rules above CLIP an oversized header to nothing rather than
+   showing it (nowrap + overflow:hidden), which silently hides a column's meaning —
+   "PENDING / EXTRA" and "SL NO" on the Picking Note edit grid both vanished this
+   way. Here a long label wraps onto a second line instead, on slightly tighter
+   letter-spacing and with more horizontal padding so neighbouring columns read as
+   separated. Body cells keep their single-line truncation untouched. */
+.data-table-fixed.data-table-wrap-head th {
+    white-space: normal;
+    overflow-wrap: break-word;
+    line-height: 1.2;
+    vertical-align: bottom;
+    @apply tracking-[0.08em] px-4 py-2.5;
+}
+
 .data-table tr:hover td {
     @apply bg-slate-50;
 }

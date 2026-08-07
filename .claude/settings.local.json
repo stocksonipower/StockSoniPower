@@ -38,7 +38,10 @@
       "Bash(node_modules/.bin/eslint src/pages/StockTransferPage.jsx)",
       "Bash(node *)",
       "Bash(grep -vE 'node_modules|package-lock.json|\\\\.lock$|dist/|build/')",
-      "Bash(grep -E '\\\\.\\(js|jsx|ts|tsx|py|java|go|rb|php|css|scss|html\\)$')"
+      "Bash(grep -E '\\\\.\\(js|jsx|ts|tsx|py|java|go|rb|php|css|scss|html\\)$')",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
+      "Bash(python3 -c \"import fastapi, uvicorn; print\\('deps ok'\\)\")",
+      "Bash(python3 -c \"import fastapi,uvicorn,motor;print\\('deps ok'\\)\")"
     ]
   }
 }

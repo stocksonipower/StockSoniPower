@@ -48,12 +48,23 @@ def _sum_transfer_like_items(items: list[dict]) -> dict:
 
 
 def _remaining_assigned_items(assigned_items: list[dict], transferred_items: list[dict]) -> list[dict]:
-    moved = _sum_transfer_like_items(transferred_items)
+    """What still needs transferring, line by line, driven by the ACTUAL moved quantity.
+
+    The moved quantity is a single pool per (part, make) — the operator records what came
+    off which shelf, not which of several identical request lines it was for. So the pool
+    is CONSUMED line by line in order: 15 moved against lines of 15 and 5 leaves the
+    second line's 5 outstanding, instead of both lines seeing the full 15 and the
+    remainder silently vanishing with no follow-up note.
+    """
+    pool = _sum_transfer_like_items(transferred_items)
     remaining = []
     for it in assigned_items or []:
         row = dict(it)
         k = _key(row.get("part_no"), row.get("make"))
-        rem = max(0, float(row.get("quantity") or 0) - moved.get(k, 0))
+        assigned_qty = float(row.get("quantity") or 0)
+        used = min(pool.get(k, 0), assigned_qty)
+        pool[k] = pool.get(k, 0) - used
+        rem = assigned_qty - used
         if rem > 1e-6:
             row["quantity"] = rem
             remaining.append(row)
@@ -307,11 +318,26 @@ async def update_transfer_request(str_id: str, payload: TransferRequestCreate, u
     await db.transfer_requests.update_one({"id": str_id}, {"$set": update})
     if items_changed:
         # Propagate the edited request into every not-yet-processed Transfer Note so
-        # allocation/availability/preview never show a stale requested quantity.
-        await db.transfer_notes.update_many(
+        # allocation/availability/preview never show a stale requested quantity — but
+        # KEEP what the operator has already entered. A quantity typed against a physical
+        # shelf is their own observation of what was actually moved/staged; the office
+        # revising the request must not silently erase it. The draft stays fully editable
+        # until it is completed.
+        valid_keys = {_key(it.get("part_no"), it.get("make")) for it in update["items"]}
+        async for stn in db.transfer_notes.find(
             {"transfer_request_id": str_id, "status": {"$nin": ["RECORDED", "COMPLETED"]}},
-            {"$set": {"items": [], "assigned_items": update["items"], "updated_at": now_iso()}},
-        )
+            {"_id": 0, "id": 1, "items": 1},
+        ):
+            # Only rows for items the request no longer asks for are dropped — they would
+            # otherwise fail the "not on the linked transfer request" check on next save.
+            kept = [
+                it for it in (stn.get("items") or [])
+                if _key(it.get("part_no"), it.get("make")) in valid_keys
+            ]
+            await db.transfer_notes.update_one(
+                {"id": stn["id"]},
+                {"$set": {"assigned_items": update["items"], "items": kept, "updated_at": now_iso()}},
+            )
     await _audit_transfer("request.edited", user, "transfer_requests", str_id,
                            {"items": existing.get("items", [])}, {"items": update["items"]})
     new_aid = assignee.get("assigned_to_user_id")
@@ -581,8 +607,11 @@ async def list_transfer_notes(
     if not_status:
         nvals = [s.strip().upper() for s in not_status.split(",") if s.strip()]
         query["status"] = {"$nin": nvals} if not query.get("status") else {**query["status"], "$nin": nvals}
-    if not transfer_request_id and not status and not not_status and not search:
-        query["status"] = {"$in": ["PENDING", "DRAFT", "PROCESSING"]}
+    # No implicit status filter: a completed Transfer Note is the record of stock that
+    # physically moved and must stay visible in the list. It used to disappear the moment
+    # it was completed — and because completion also creates a follow-up note for any
+    # remainder, the row appeared to "reset" to 1 item / 0 transferred when it was really
+    # a different note. Callers that want only open work pass status explicitly.
     total = await db.transfer_notes.count_documents(query)
     skip = (page - 1) * page_size
     rows = await db.transfer_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
@@ -591,6 +620,7 @@ async def list_transfer_notes(
     for row in rows:
         row["assigned_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("assigned_items") or []))
         row["transferred_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("items") or []))
+        row["rejected_qty_total"] = sum(float(it.get("rejected_qty") or 0) for it in (row.get("items") or []))
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -607,6 +637,7 @@ async def get_transfer_note(stn_id: str, user=Depends(get_current_user)):
     await _enrich_with_parent_assignee([doc], "transfer_requests", "transfer_request_id")
     doc["assigned_qty_total"] = sum(float(it.get("quantity") or 0) for it in (doc.get("assigned_items") or []))
     doc["transferred_qty_total"] = sum(float(it.get("quantity") or 0) for it in (doc.get("items") or []))
+    doc["rejected_qty_total"] = sum(float(it.get("rejected_qty") or 0) for it in (doc.get("items") or []))
     return doc
 
 

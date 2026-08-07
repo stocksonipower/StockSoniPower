@@ -326,7 +326,11 @@ function ItemDetailsContent({ details, selected }) {
           <StatTile label="Racked" value={t.racked_qty} icon={Stack} tone="blue" />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <StatTile label="Issue" value={t.issued_qty} icon={ArrowUp} tone="rose" />
+          {/* "Issue Requested" is the total asked for across Issue Notes; "Picked" is what
+              physically left the shelf. Naming the first one plainly stops it being read
+              as a movement — it is the only tile here sourced from a request. Mirrors the
+              Transfer Requested / Transferred pair below. */}
+          <StatTile label="Issue Requested" value={t.issued_qty} icon={ArrowUp} tone="rose" />
           <StatTile label="Picked" value={t.picked_qty} icon={ArrowUp} tone="indigo" />
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -419,12 +423,14 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Issue Notes" count={details.issue_notes.length} icon={ArrowUp}>
         {details.issue_notes.length === 0 ? <Empty>No issue notes.</Empty> : (
           <Tbl
-            cols={["IN No", "Date", "Assigned To", "Qty", "Status"]}
+            cols={["IN No", "Date", "Assigned To", "Requested Qty", "Status"]}
             align={["left", "left", "left", "center", "left"]}
             rows={details.issue_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.in_no}</span>, fmtDate(r.in_date),
               r.assigned_to_name || "—",
-              num(it.issued_qty || it.quantity),
+              (it.issued_qty ?? it.quantity) == null
+                ? <span className="text-blue-700 font-bold">Open</span>
+                : num(it.issued_qty ?? it.quantity),
               <StatusPill s={r.status} />,
             ]))}
           />
@@ -435,7 +441,7 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Picking Notes" count={details.picking_notes.length} icon={ArrowUp}>
         {details.picking_notes.length === 0 ? <Empty>No picking notes.</Empty> : (
           <Tbl
-            cols={["PN No", "Date", "Source", "Godown", "Rack", "Box", "Qty", "Status"]}
+            cols={["PN No", "Date", "Source", "Godown", "Rack", "Box", "Picked Qty", "Status"]}
             align={["left", "left", "left", "left", "left", "left", "center", "left"]}
             rows={details.picking_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.pn_no}</span>, fmtDate(r.pn_date),
@@ -452,7 +458,7 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Transfer Requests" count={details.transfer_requests.length} icon={ArrowsLeftRight}>
         {details.transfer_requests.length === 0 ? <Empty>No transfer requests.</Empty> : (
           <Tbl
-            cols={["STR No", "Date", "Destination", "Qty", "Status"]}
+            cols={["STR No", "Date", "Destination", "Requested Qty", "Status"]}
             align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_requests.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.str_no}</span>, fmtDate(r.str_date),
@@ -468,7 +474,7 @@ function ItemDetailsContent({ details, selected }) {
       <Section title="Transfer Notes" count={details.transfer_notes.length} icon={ArrowsLeftRight}>
         {details.transfer_notes.length === 0 ? <Empty>No transfer notes.</Empty> : (
           <Tbl
-            cols={["STN No", "Date", "From → To", "Qty", "Status"]}
+            cols={["STN No", "Date", "From → To", "Transferred Qty", "Status"]}
             align={["left", "left", "left", "center", "left"]}
             rows={details.transfer_notes.flatMap((r) => r.items.map((it) => [
               <span className="font-mono font-bold">{r.stn_no}</span>, fmtDate(r.stn_date),

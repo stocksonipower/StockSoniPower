@@ -213,12 +213,21 @@ async def _recompute_ern_racking_status(ern_id: str):
 
 
 async def _recompute_in_status(in_id: str):
-    """Active 3-status set: PENDING (nothing picked/rejected yet) -> IN_PROCESS
-    (some picked+rejected, some still pending) -> COMPLETE (picked+rejected covers
-    every requested line — the request is fully resolved, whether by pick or reject).
-    Only COMPLETED Picking Notes count toward "processed"; DRAFT allocations (nothing
-    recorded yet) do not move the status off PENDING, so editing stays unlocked until
-    the first quantity is actually processed."""
+    """Active 3-status set: PENDING (nothing picked or written off yet) -> IN_PROCESS
+    (some resolved, some still outstanding) -> COMPLETE (every requested line resolved).
+
+    A requested quantity is resolved three ways, and only three:
+      * PICKED on a COMPLETED Picking Note — stock actually left the shelf.
+      * REJECTED on a COMPLETED Picking Note — the store incharge refused that much of
+        the request. No stock moves and no follow-up note is raised, so it settles the
+        quantity exactly as a pick does; that is why it is counted here alongside one.
+      * WRITTEN OFF by a CLOSED Picking Note — the shortfall that raised that note can
+        never be met (the stock went elsewhere and none is left), so its whole assigned
+        quantity stops counting as outstanding. This is the only way a request goes away
+        without stock moving, which is why closing is an explicit, audited action.
+
+    DRAFT allocations (nothing recorded yet) resolve nothing and do not move the status
+    off PENDING, so editing stays unlocked until the first quantity is really processed."""
     inn = await db.issue_notes.find_one({"id": in_id}, {"_id": 0})
     if not inn:
         return
@@ -237,16 +246,31 @@ async def _recompute_in_status(in_id: str):
             requested.setdefault(k, 0)
             continue
         requested[k] = requested.get(k, 0) + (it.get("quantity") or 0)
-    processed = {}
-    async for pn in db.picking_notes.find({"issue_note_id": in_id}, {"_id": 0, "items": 1, "status": 1}):
+    resolved = {}
+    # Open lines carry no target number, so they can only ever be resolved as a yes/no —
+    # tracked as a set rather than a quantity.
+    resolved_open_keys = set()
+    async for pn in db.picking_notes.find(
+        {"issue_note_id": in_id}, {"_id": 0, "items": 1, "status": 1, "assigned_items": 1}
+    ):
         status = (pn.get("status") or "").upper()
         if status in ("RECORDED", "COMPLETED"):
             for it in pn.get("items", []):
                 k = _key(it.get("part_no"), it.get("make"))
-                processed[k] = processed.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
-    has_processed = any(v > 1e-6 for v in processed.values())
-    quantified_done = all(processed.get(k, 0) + 1e-6 >= q for k, q in requested.items() if k not in open_keys and q > 0)
-    open_done = all(processed.get(k, 0) > 1e-6 for k in open_keys)
+                resolved[k] = resolved.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
+                resolved_open_keys.add(k)
+        elif status == "CLOSED":
+            # Written off. A closed note never recorded anything and so never spawned a
+            # continuation, which is why counting its full assignment cannot double-count
+            # against a sibling note.
+            for it in pn.get("assigned_items") or []:
+                k = _key(it.get("part_no"), it.get("make"))
+                resolved_open_keys.add(k)
+                if it.get("quantity") is not None:
+                    resolved[k] = resolved.get(k, 0) + (it.get("quantity") or 0)
+    has_processed = any(v > 1e-6 for v in resolved.values()) or bool(resolved_open_keys)
+    quantified_done = all(resolved.get(k, 0) + 1e-6 >= q for k, q in requested.items() if k not in open_keys and q > 0)
+    open_done = all(k in resolved_open_keys for k in open_keys)
     if not requested:
         new_status = "PENDING"
     elif has_processed and quantified_done and open_done:
@@ -375,39 +399,6 @@ async def _aggregate_other_rkn_qty_by_source(source_type: str, source_id: str, e
         for it in rkn.get("items", []):
             k = _key(it.get("part_no"), it.get("make"))
             sums[k] = sums.get(k, 0) + (it.get("quantity") or 0)
-    return sums
-
-
-async def _pick_aggregate_other(in_id: str, exclude_pn_id: Optional[str] = None) -> dict:
-    """Sum picking-note (picked + rejected) qty per (part,make) across other PNs for
-    an Issue Note (DRAFT + RECORDED) — both consume the requested allocation."""
-    q = {"issue_note_id": in_id}
-    if exclude_pn_id:
-        q["id"] = {"$ne": exclude_pn_id}
-    sums = {}
-    async for pn in db.picking_notes.find(q, {"_id": 0, "items": 1}):
-        for it in pn.get("items", []):
-            k = _key(it.get("part_no"), it.get("make"))
-            sums[k] = sums.get(k, 0) + (it.get("quantity") or 0) + (it.get("rejected_qty") or 0)
-    return sums
-
-
-async def _pick_aggregate_other_by_loc(in_id: str, exclude_pn_id: Optional[str] = None) -> dict:
-    """Per-location sum across other PNs. Key = part||make||godown_id||rack_id||box_id."""
-    q = {"issue_note_id": in_id}
-    if exclude_pn_id:
-        q["id"] = {"$ne": exclude_pn_id}
-    sums = {}
-    async for pn in db.picking_notes.find(q, {"_id": 0, "items": 1, "status": 1}):
-        # Kept for legacy callers; draft picks no longer reduce available stock.
-        if pn.get("status") != "DRAFT":
-            continue
-        for it in pn.get("items", []):
-            loc_key = (
-                f"{it.get('part_no','')}||{it.get('make','')}||"
-                f"{it.get('godown_id','') or ''}||{it.get('rack_id','') or ''}||{it.get('box_id','') or ''}"
-            )
-            sums[loc_key] = sums.get(loc_key, 0) + (it.get("quantity") or 0)
     return sums
 
 

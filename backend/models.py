@@ -497,16 +497,39 @@ class PickingNoteItem(BaseModel):
     box_id: Optional[str] = ""
     box_no: Optional[str] = ""
     box_category: Optional[str] = ""
-    # Legacy: rejection is no longer captured on the Picking Note (the picker simply
-    # picks what is actually there). Kept so historical notes still deserialize and
-    # their recorded values keep showing in read-only views.
+    # Rejected Qty: the part of the ISSUED quantity the store incharge deliberately will
+    # not pick. It moves no stock and writes no transaction — it only closes out that much
+    # of the request so no follow-up Picking Note is raised for it.
+    #
+    # The full arithmetic of a Stock Out line, all of it derived from these two inputs:
+    #     Pending = max(0, Issued - Picked - Rejected)
+    #     Extra   = max(0, Picked - Issued)
+    # Pending and Extra are NEVER stored or typed in — recomputing them everywhere is what
+    # keeps the Picking Note, the Issue Note, the prints and the exports agreeing. Reject
+    # is only legal while Extra is 0 (see _validate_reject_rules): once more came off the
+    # shelf than was asked for, there is nothing left outstanding to refuse.
     rejected_qty: Optional[float] = 0
+    # Optional. Reject is a quantity field, not a form to justify; any reason supplied is
+    # kept for the audit trail but none is ever demanded.
     rejection_reason: Optional[str] = ""
 
 
 class PickingNoteCreate(BaseModel):
     issue_note_id: str
     items: List[PickingNoteItem] = []
+    # The picker's own free-text note about this pick — why a line came up short, which
+    # shelf the stock was really found on, who authorised an over-pick. Separate from the
+    # Issue Note's narration (the office's instruction), which it never overwrites.
+    narration: Optional[str] = ""
+
+
+class PickingNoteClose(BaseModel):
+    """Write off a Picking Note whose quantity will never be picked.
+
+    The reason is optional but strongly encouraged — this is the one action that lets a
+    requested quantity vanish without stock moving, so the audit log wants to know why.
+    """
+    reason: Optional[str] = ""
 
 
 class PickingNote(BaseModel):
@@ -521,8 +544,17 @@ class PickingNote(BaseModel):
     parent_picking_note_id: Optional[str] = None
     assigned_items: List[IssueNoteItem] = []
     items: List[PickingNoteItem] = []
-    status: str = "PENDING"  # PENDING | DRAFT | COMPLETED | RECORDED(legacy)
+    narration: Optional[str] = ""
+    # PENDING -> DRAFT -> (RECORDING) -> COMPLETED, or CLOSED.
+    # CLOSED is the terminal answer to "this quantity is never going to be picked": the
+    # shortfall that raised this note cannot be met (the stock went to another Issue Note
+    # and none is left). It moves no stock, spawns no further note, and counts as
+    # resolving its assigned quantity so the Issue Note can reach COMPLETE.
+    status: str = "PENDING"  # PENDING | DRAFT | COMPLETED | CLOSED | RECORDED(legacy)
     recorded_at: Optional[str] = None
+    closed_at: Optional[str] = None
+    closed_by: Optional[str] = ""
+    close_reason: Optional[str] = ""
     created_at: str
     created_by: str = ""
 

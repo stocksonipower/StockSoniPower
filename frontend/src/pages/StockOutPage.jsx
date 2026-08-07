@@ -45,6 +45,15 @@ function fmtDate(iso) {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : iso;
 }
 
+// `pn_date`/`in_date` are calendar dates only (no time component is ever stored on
+// them — see backend `today.date().isoformat()`), so the clock time a Picking Note was
+// actually raised has to come from `created_at`, which does carry a full timestamp.
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -90,8 +99,19 @@ function issueHasProcessed(status) {
 // "Draft" for display.
 function pickingNoteStatusLabel(status) {
   if (status === "COMPLETED" || status === "RECORDED") return "Completed";
+  if (status === "CLOSED") return "Closed";
   if (status === "PENDING") return "Pending";
   return "Draft";
+}
+
+// Closed reads as a dead end rather than a success — it is the one terminal state where
+// a requested quantity went away without any stock moving.
+function pickingNoteStatusClass(status) {
+  const label = pickingNoteStatusLabel(status);
+  if (label === "Completed") return "bg-green-100 text-green-800";
+  if (label === "Closed") return "bg-slate-200 text-slate-700";
+  if (label === "Pending") return "bg-blue-50 text-blue-800";
+  return "bg-amber-50 text-amber-700";
 }
 
 // Row identity for matching saved picking rows back to freshly-prepared ones: the Issue
@@ -109,14 +129,59 @@ function locOnlyKey(L) {
   return `${L?.godown_id || ""}||${L?.rack_id || ""}||${L?.box_id || ""}`;
 }
 
+// Null-safe: the detail dialog stays mounted with a null note until a row is opened, so
+// every totals helper below it runs at least once against nothing.
 function pickingAssignedItems(pn) {
-  return (pn.assigned_items || []).length ? (pn.assigned_items || []) : (pn.requested_items || []);
+  return (pn?.assigned_items || []).length ? (pn?.assigned_items || []) : (pn?.requested_items || []);
 }
 
 // Where stock was ACTUALLY picked from, per part/make, out of the completed Picking
 // Notes. The Issue Note only ever held a suggested allocation; once the store incharge
 // resolves the real godown/rack/box, that supersedes the suggestion everywhere the
 // Issue Note is shown or printed.
+// Total Picked and Rejected per part/make across the Issue Note's whole Picking Note
+// chain — the root note plus every continuation. Derived live rather than snapshotted,
+// so a corrected pick shows up on the Issue Note, its print and its export at once.
+//
+// CLOSED notes are skipped, matching `_enrich_issue_note_totals` on the server: closing
+// is the decision that a quantity will never be picked, and whatever draft numbers such
+// a note carried were never recorded. Its write-off shows in the Issue Note's STATUS,
+// not in these quantities.
+function issueQtysByKey(pickingHistory = []) {
+  const picked = {}, rejected = {};
+  (pickingHistory || []).forEach((pn) => {
+    if (pickingNoteIsClosed(pn)) return;
+    (pn.items || []).forEach((it) => {
+      const k = pickingKey(it);
+      picked[k] = (picked[k] || 0) + (parseFloat(it.quantity) || 0);
+      rejected[k] = (rejected[k] || 0) + (parseFloat(it.rejected_qty) || 0);
+    });
+  });
+  return { picked, rejected };
+}
+
+// The Issue Note's own five totals, aggregated over its Picking Notes. Mirrors
+// `_enrich_issue_note_totals` on the server (and `_picking_totals` under it): Pending and
+// Extra are floored per part/make before being summed, so a surplus on one item can never
+// mask a shortfall on another.
+function issueTotals(inn, pickingHistory = []) {
+  const { picked, rejected } = issueQtysByKey(pickingHistory);
+  const { issued, openKeys } = issuedByKey(inn?.items);
+  return rollUp(issued, openKeys, picked, rejected);
+}
+
+// Part/make keys whose outstanding quantity was written off by a CLOSED Picking Note.
+// The shortfall is real and still shown — this only marks that nobody is chasing it any
+// more, which is the difference between "short, follow-up pending" and "short, closed".
+function issueWrittenOffKeys(pickingHistory = []) {
+  const s = new Set();
+  (pickingHistory || []).forEach((pn) => {
+    if (!pickingNoteIsClosed(pn)) return;
+    pickingAssignedItems(pn).forEach((it) => s.add(pickingKey(it)));
+  });
+  return s;
+}
+
 function issueActualLocations(pickingHistory = []) {
   const m = {};
   (pickingHistory || []).forEach((pn) => {
@@ -134,7 +199,71 @@ function issueActualLocations(pickingHistory = []) {
   return m;
 }
 
-// Requested qty for a picking row, from the Issue Note assignment carried on the Picking
+// ---------------------------------------------------------------------------
+// The five Stock Out quantities. Only two of them are ever entered — Picked and
+// Rejected — and the other three follow from them by arithmetic that is identical
+// everywhere: the form, the lists, the detail dialogs, the prints and the backend
+// (`_picking_totals` in routes/stock_out.py).
+//
+//     Pending = max(0, Issued − Picked − Rejected)      never negative, never typed
+//     Extra   = max(0, Picked − Issued)                 never negative, never typed
+//
+// Reject is legal only while Extra is 0: once more came off the shelf than was asked
+// for, there is nothing outstanding left to refuse.
+// ---------------------------------------------------------------------------
+function stockOutQtys(issued, picked, rejected) {
+  const p = parseFloat(picked) || 0;
+  const r = parseFloat(rejected) || 0;
+  // An OPEN line (the office left the quantity to the store incharge) has no target to
+  // measure against, so Pending is unknown rather than 0 and nothing is ever Extra.
+  if (issued == null || issued === "") return { issued: null, picked: p, rejected: r, pending: null, extra: 0 };
+  const i = parseFloat(issued) || 0;
+  return { issued: i, picked: p, rejected: r, pending: Math.max(0, i - p - r), extra: Math.max(0, p - i) };
+}
+
+// Note-level totals, mirroring the backend exactly: Pending and Extra are floored per
+// (part, make) and only then summed, so a surplus on one item can never mask a shortfall
+// on another.
+function pickingTotals(pn) {
+  const { issued, openKeys } = issuedByKey(pickingAssignedItems(pn));
+  const picked = {}, rejected = {};
+  (pn?.items || []).forEach((it) => {
+    const k = pickingKey(it);
+    picked[k] = (picked[k] || 0) + (parseFloat(it.quantity) || 0);
+    rejected[k] = (rejected[k] || 0) + (parseFloat(it.rejected_qty) || 0);
+  });
+  return rollUp(issued, openKeys, picked, rejected);
+}
+
+// Issued per part/make, keeping OPEN lines (blank quantity) apart from lines that really
+// were issued 0 — an open line has no target, so it can be neither short nor exceeded.
+function issuedByKey(lines) {
+  const issued = {};
+  const openKeys = new Set();
+  (lines || []).forEach((it) => {
+    const k = pickingKey(it);
+    if (!(k in issued)) issued[k] = 0;
+    if (it.quantity == null) openKeys.add(k);
+    else issued[k] += parseFloat(it.quantity) || 0;
+  });
+  return { issued, openKeys };
+}
+
+// Sum the five totals, flooring Pending and Extra per part/make first. Open lines are
+// skipped: there is no number they could be measured against.
+function rollUp(issued, openKeys, picked, rejected) {
+  let pending = 0, extra = 0;
+  new Set([...Object.keys(issued), ...Object.keys(picked), ...Object.keys(rejected)]).forEach((k) => {
+    if (openKeys.has(k)) return;
+    const q = stockOutQtys(issued[k] || 0, picked[k] || 0, rejected[k] || 0);
+    pending += q.pending;
+    extra += q.extra;
+  });
+  const sum = (m) => Object.values(m).reduce((s, v) => s + v, 0);
+  return { issued: sum(issued), picked: sum(picked), rejected: sum(rejected), pending, extra };
+}
+
+// Issued qty for a picking row, from the Issue Note assignment carried on the Picking
 // Note. Resolved per LINE so two lines of the same part/make keep their own numbers;
 // rows saved before line numbers existed fall back to the part/make total. `null` = the
 // office left the quantity open, which every view renders as blank rather than 0.
@@ -158,43 +287,93 @@ function pickingRequestedLookup(pn) {
   return (row) => (row?.line_no != null && row.line_no in byLine ? byLine[row.line_no] : byKey[pickingKey(row)]);
 }
 
-function pickingAssignedQty(pn) {
-  return pickingAssignedItems(pn).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
+// Single-value accessors for the list columns. Everywhere that needs more than one
+// number calls `pickingTotals` once instead, so Pending and Extra have no accessors of
+// their own — the views that show them (edit form, detail, print) take the whole set.
+function pickingIssuedQty(pn)   { return pickingTotals(pn).issued; }
+function pickingPickedQty(pn)   { return pickingTotals(pn).picked; }
+function pickingRejectedQty(pn) { return pickingTotals(pn).rejected; }
+
+// Pending and Extra collapsed into one signed number: they are the two directions of a
+// single variance and can never both be non-zero on the same note, so one column carries
+// both — negative for what's still outstanding (Pending), positive for what went over
+// (Extra). Used wherever the list/summary views show them side by side.
+function varianceValue(pending, extra) {
+  if (extra > 0) return extra;
+  if (pending > 0) return -pending;
+  return 0;
 }
 
-function pickingPickedQty(pn) {
-  return (pn.items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
+function pickingNoteIsClosed(pn) {
+  return (pn?.status || "").toUpperCase() === "CLOSED";
 }
 
+// Live Available Qty for the note, supplied by the server (`_enrich_picking_requested_items`).
+// Picking Note only — the Issue Note is an office document and never shows availability.
+function pickingAvailableQty(pn) {
+  return pn?.available_qty_total ?? null;
+}
+
+// One normalized row per line of the note, whichever stage it is at. A note with no
+// picking rows yet is shown through its ASSIGNED items — and on those rows `quantity` is
+// the issued quantity, not a pick, so picked/rejected are pinned to 0. Without that, a
+// freshly raised note would print "Picked 10" before anybody had touched a shelf.
 function pickingDisplayItems(pn) {
-  if ((pn.items || []).length) {
-    return (pn.items || []).map((it) => ({ ...it, row_status: pn.status === "COMPLETED" || pn.status === "RECORDED" ? "Picked" : "Draft Pick" }));
+  if ((pn?.items || []).length) {
+    return (pn?.items || []).map((it) => ({
+      ...it,
+      picked_qty: parseFloat(it.quantity) || 0,
+      rejected_qty: parseFloat(it.rejected_qty) || 0,
+      row_status: pn.status === "COMPLETED" || pn.status === "RECORDED" ? "Picked" : "Draft Pick",
+    }));
   }
-  return pickingAssignedItems(pn).map((it) => ({ ...it, row_status: pn.status === "PENDING" ? "Pending" : "Assigned" }));
-}
-
-function pickingDisplayQty(pn) {
-  return pickingAssignedQty(pn);
+  return pickingAssignedItems(pn).map((it) => ({
+    ...it,
+    picked_qty: 0,
+    rejected_qty: 0,
+    row_status: pn?.status === "PENDING" ? "Pending" : "Assigned",
+  }));
 }
 
 function pickingDisplayCount(pn) {
   return pickingDisplayItems(pn).length || pn.requested_items_count || (pn.requested_items || []).length || 0;
 }
 
-// Picking Note print columns: Sr, Part No, Item, Godown, Rack, Box, Requested Qty, Picked Qty, Picker
+// Live Available Qty per part/make, as served alongside the note. Keyed the same way the
+// rows are, so a print never has to go back to the API for it.
+function pickingAvailableLookup(pn) {
+  const byKey = {};
+  (pn?.available_by_item || []).forEach((a) => { byKey[pickingKey(a)] = a.available_qty; });
+  return (row) => byKey[pickingKey(row)];
+}
+
+// Picking Note print columns: Sr, Part No, Item, Godown, Rack, Box, Issued Qty,
+// Available Qty, Picked Qty, Pending Qty, Rejected Qty, Extra Qty, Picker.
+// Every number here is produced by `stockOutQtys`, the same function the screen uses —
+// the printed sheet and the application can never disagree.
 function printPickingNote(pn) {
-  const requestedFor = pickingRequestedLookup(pn);
-  const rows = pickingDisplayItems(pn).map((it, idx) => [
-    String(idx + 1),
-    htmlEscape(it.part_no),
-    htmlEscape(it.description_1 || it.make || ""),
-    htmlEscape(it.godown_name || "—"),
-    htmlEscape(it.rack_no || "—"),
-    htmlEscape(it.box_no || "—"),
-    `<span style="text-align:right;display:block">${htmlEscape(requestedFor(it) ?? "")}</span>`,
-    `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
-    htmlEscape(pn.created_by || "—"),
-  ]);
+  const issuedFor = pickingRequestedLookup(pn);
+  const availableFor = pickingAvailableLookup(pn);
+  const rows = pickingDisplayItems(pn).map((it, idx) => {
+    const q = stockOutQtys(issuedFor(it), it.picked_qty, it.rejected_qty);
+    const avail = availableFor(it);
+    const num = (v) => `<span style="text-align:right;display:block">${htmlEscape(v)}</span>`;
+    return [
+      String(idx + 1),
+      htmlEscape(it.part_no),
+      htmlEscape(it.description_1 || it.make || ""),
+      htmlEscape(it.godown_name || "—"),
+      htmlEscape(it.rack_no || "—"),
+      htmlEscape(it.box_no || "—"),
+      num(q.issued == null ? "Open" : q.issued),
+      num(avail == null ? "—" : avail),
+      num(q.picked),
+      num(q.pending == null ? "—" : q.pending),
+      num(q.rejected),
+      num(q.extra),
+      htmlEscape(pn.created_by || "—"),
+    ];
+  });
   const html = buildStandardPrintHtml({
     docTitle: "Picking Note",
     docNo: pn.pn_no,
@@ -202,62 +381,78 @@ function printPickingNote(pn) {
     fieldsLeft: [
       ["Picking No", pn.pn_no],
       ["Picking Date", fmtDate(pn.pn_date)],
+      ["Picking Time", fmtTime(pn.created_at)],
       ["Issue Note No", pn.issue_note_no || "—"],
       ["Issue Note Date", fmtDate(pn.issue_note_date)],
       ["Status", pickingNoteStatusLabel(pn.status)],
     ],
+    // Quantities live only in the table below, not duplicated up here — one place to
+    // read them, and no risk of the header block and the table ever showing different
+    // numbers for the same note.
     fieldsRight: [
       ["Assigned To", pn.parent_assigned_to_name || pn.parent_assigned_to_email || "—"],
       ["Picker", pn.created_by || "—"],
-      ["Requested Qty", pickingAssignedQty(pn) || "—"],
-      ["Picked Qty", pickingPickedQty(pn)],
     ],
     columns: [
       { label: "Sr" }, { label: "Part No" }, { label: "Item" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
-      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" },
+      { label: "Issued Qty", align: "right" }, { label: "Available Qty", align: "right" },
+      { label: "Picked Qty", align: "right" }, { label: "Pending Qty", align: "right" },
+      { label: "Rejected Qty", align: "right" }, { label: "Extra Qty", align: "right" },
       { label: "Picker" },
     ],
     rows,
+    narration: pn.narration || "",
     printedBy: pn.created_by,
   });
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
-// Issue Note print columns: Sr, Part Number, Item Name, Make, Godown, Rack, Box, Requested Qty, Picked Qty
+// Issue Note print columns: Sr, Part Number, Item Name, Make, Godown, Rack, Box,
+// Issued Qty, Picked Qty, Pending Qty, Rejected Qty, Extra Qty. No Available column —
+// availability is the store's live concern and belongs to the Picking Note alone.
 function printIssueNote(inn, pickingHistory = []) {
-  // Picked quantity is derived live from the completed Picking Notes, so a corrected
-  // pick is reflected here the next time the note is printed — nothing is snapshotted.
-  const processedByKey = {};
-  pickingHistory.forEach((pn) => {
-    if (!(pn.status === "COMPLETED" || pn.status === "RECORDED")) return;
-    (pn.items || []).forEach((it) => {
-      const k = pickingKey(it);
-      const cur = processedByKey[k] || { picked: 0 };
-      cur.picked += parseFloat(it.quantity) || 0;
-      processedByKey[k] = cur;
-    });
-  });
+  // Picked and Rejected are derived live from the Picking Notes, so a corrected pick is
+  // reflected here the next time the note is printed — nothing is snapshotted.
+  const { picked: pickedByKey, rejected: rejectedByKey } = issueQtysByKey(pickingHistory);
+  const writtenOffKeys = issueWrittenOffKeys(pickingHistory);
   const actualLocs = issueActualLocations(pickingHistory);
   const rows = [];
   (inn.items || []).forEach((it, idx) => {
-    const p = processedByKey[pickingKey(it)] || { picked: 0 };
+    const k = pickingKey(it);
+    const q = stockOutQtys(it.quantity, pickedByKey[k], rejectedByKey[k]);
     // Actual pick locations win over the planned allocation once picking has happened.
-    const locs = actualLocs[pickingKey(it)] || it.allocated_locations || [];
-    const base = (showItem, godownCell, rackCell, boxCell) => [
+    // Kept apart from the fallback so the Picked column knows which case it's in — a
+    // planned/suggested location has no real pick yet and must never print one.
+    const actual = actualLocs[k];
+    const isActual = !!(actual && actual.length);
+    const locs = isActual ? actual : (it.allocated_locations || []);
+    // A pending quantity nobody is chasing any more reads differently from one that is
+    // still on somebody's list, so a closed follow-up is called out rather than hidden.
+    const pendingCell = q.pending == null ? "—"
+      : `${q.pending}${q.pending > 0 && writtenOffKeys.has(k) ? " (closed)" : ""}`;
+    const num = (v) => `<span style="text-align:right;display:block">${htmlEscape(v)}</span>`;
+    // `rowPicked` is per-row: each row is one actual pick at one location (possibly from
+    // a different Picking Note than the row above it), so each carries its own quantity
+    // instead of the line's aggregate — that aggregate is still what Issued/Pending/
+    // Rejected/Extra describe, which is why only those stay gated by `showItem`.
+    const base = (showItem, godownCell, rackCell, boxCell, rowPicked) => [
       String(idx + 1),
       showItem ? htmlEscape(it.part_no) : "",
       showItem ? htmlEscape(it.description_1 || "") : "",
       showItem ? htmlEscape(it.make || "—") : "",
       godownCell, rackCell, boxCell,
-      showItem ? `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "Open")}</span>` : "",
-      showItem ? `<span style="text-align:right;display:block">${htmlEscape(p.picked || "—")}</span>` : "",
+      showItem ? num(q.issued == null ? "Open" : q.issued) : "",
+      num(isActual ? (rowPicked ?? "—") : (showItem ? q.picked : "")),
+      showItem ? num(pendingCell) : "",
+      showItem ? num(q.rejected) : "",
+      showItem ? num(q.extra) : "",
     ];
     if (locs.length === 0) {
       rows.push(base(true, "—", "—", "—"));
     } else {
       locs.forEach((loc, li) => {
-        rows.push(base(li === 0, htmlEscape(loc.godown_name || "—"), htmlEscape(loc.rack_no || "—"), htmlEscape(loc.box_no || "—")));
+        rows.push(base(li === 0, htmlEscape(loc.godown_name || "—"), htmlEscape(loc.rack_no || "—"), htmlEscape(loc.box_no || "—"), loc.quantity));
       });
     }
   });
@@ -265,23 +460,32 @@ function printIssueNote(inn, pickingHistory = []) {
     docTitle: "Issue Note",
     docNo: inn.in_no,
     statusLabel: issueStatusLabel(inn.status),
+    // Same two field blocks, in the same order, as the on-screen preview dialog — the
+    // printed sheet and the dialog are the same document and must read identically.
     fieldsLeft: [
       ["Stock Out Type", inn.stock_out_type || "—"],
-      ["Issue No", inn.in_no],
-      ["Issue Date", fmtDate(inn.in_date)],
+      ["Issue Note Date", fmtDate(inn.in_date)],
+      ["Issue Note No", inn.in_no],
+      ["Reference Document Name", inn.reference_doc_name || "—"],
+      ["Reference Document Date", inn.reference_doc_date ? fmtDate(inn.reference_doc_date) : "—"],
+      ["Reference Document No", inn.reference_doc_no || "—"],
       ["Status", issueStatusLabel(inn.status)],
     ],
+    // Quantities live only in the table below, not duplicated up here — one place to
+    // read them, and no risk of the header block and the table ever showing different
+    // numbers for the same note.
     fieldsRight: [
-      ["Reference Doc", inn.reference_doc_name || "—"],
-      ["Reference Doc No", inn.reference_doc_no || "—"],
-      ["Reference Doc Date", inn.reference_doc_date ? fmtDate(inn.reference_doc_date) : "—"],
-      ["Assigned To", inn.assigned_to_name || inn.assigned_to_email || "—"],
+      ["Status", issueStatusLabel(inn.status)],
       ["Created By", inn.created_by || "—"],
+      ["Created At", inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"],
+      ["Assigned To", inn.assigned_to_name || inn.assigned_to_email || "—"],
     ],
     columns: [
       { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
-      { label: "Requested Qty", align: "right" }, { label: "Picked Qty", align: "right" },
+      { label: "Issued Qty", align: "right" }, { label: "Picked Qty", align: "right" },
+      { label: "Pending Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
+      { label: "Extra Qty", align: "right" },
     ],
     rows,
     narration: inn.narration || "",
@@ -292,19 +496,32 @@ function printIssueNote(inn, pickingHistory = []) {
 
 function buildPickingEditItems(editing, preparedItems) {
   const preparedByLocKey = {};
+  const preparedByLine = {};
+  const preparedByItemKey = {};
   const availableByItemKey = {};
+  const availableTotalByItemKey = {};
   const openByItemKey = {};
   (preparedItems || []).forEach((p) => {
     preparedByLocKey[pickingLocKey(p)] = p;
     const k = pickingKey(p);
+    if (p.line_no != null && !(p.line_no in preparedByLine)) preparedByLine[p.line_no] = p;
+    if (!(k in preparedByItemKey)) preparedByItemKey[k] = p;
+    if (!(k in availableTotalByItemKey)) availableTotalByItemKey[k] = p.available_qty ?? 0;
     if (!availableByItemKey[k]) availableByItemKey[k] = p.available_locations || [];
     if (p.open_quantity) openByItemKey[k] = true;
   });
   const existing = editing?.items || [];
   if (existing.length) {
     return existing.map((it) => {
-      const p = preparedByLocKey[pickingLocKey(it)] || {};
       const k = pickingKey(it);
+      // Match the freshly-prepared row by location first, then by Issue Note line, then
+      // by part/make. A saved row picked from a different shelf than the current
+      // suggestion still has to pick up the CURRENT requested quantity — otherwise an
+      // Issue Note edit (e.g. an open line filled in as 8) would never show up here.
+      const p = preparedByLocKey[pickingLocKey(it)]
+        || (it.line_no != null ? preparedByLine[it.line_no] : null)
+        || preparedByItemKey[k]
+        || {};
       const open = !!openByItemKey[k];
       return {
       ...it,
@@ -313,13 +530,19 @@ function buildPickingEditItems(editing, preparedItems) {
       open_quantity: open,
       pending_qty: open ? null : (p.pending_qty ?? it.pending_qty ?? 0),
       requested_qty: open ? null : (p.requested_qty ?? it.requested_qty ?? 0),
+      // Rejected Qty is the picker's own second input and belongs to the saved row, not
+      // to the freshly-prepared suggestion — an edit must reopen with what was entered.
+      rejected_qty: it.rejected_qty ?? 0,
+      // Availability is always the CURRENT number, never what it was when the draft was
+      // saved: the whole point of the field is that the shelf moves underneath the note.
+      available_qty: p.available_qty ?? availableTotalByItemKey[k] ?? 0,
       allocated_qty: p.allocated_qty ?? it.allocated_qty ?? it.quantity ?? 0,
       suggested: p.suggested ?? it.suggested ?? false,
       available_locations: availableByItemKey[k] || it.available_locations || [],
       };
     });
   }
-  return (preparedItems || []).map((it) => ({ ...it, ...locSelKeys(it), row_status: "Assigned" }));
+  return (preparedItems || []).map((it) => ({ ...it, ...locSelKeys(it), rejected_qty: 0, row_status: "Assigned" }));
 }
 
 /* ==============================================================
@@ -427,6 +650,15 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
     { key: "reference_doc_name", label: "REFERENCE DOCUMENT NAME", value: (r) => r.reference_doc_name || "" },
     { key: "reference_doc_date", label: "REFERENCE DOCUMENT DATE", value: (r) => (r.reference_doc_date ? fmtDate(r.reference_doc_date) : "") },
     { key: "reference_doc_no", label: "REFERENCE DOCUMENT NO", value: (r) => r.reference_doc_no || "" },
+    // The note's quantities, aggregated server-side over every Picking Note raised
+    // against it (`_enrich_issue_note_totals`). Read from the response rather than
+    // recomputed here, so the list, the detail dialog and the print sheet agree by
+    // construction — the list has no Picking Note history loaded to derive them from.
+    // Pending and Extra are combined into one signed column (see `varianceValue`).
+    { key: "issued_qty", label: "ISSUED", value: (r) => r.issued_qty_total ?? 0, isQty: true, isNumeric: true },
+    { key: "picked_qty", label: "PICKED", value: (r) => r.picked_qty_total ?? 0, isQty: true, isNumeric: true },
+    { key: "rejected_qty", label: "REJECTED", value: (r) => r.rejected_qty_total ?? 0, isQty: true, isNumeric: true },
+    { key: "variance_qty", label: "PENDING / EXTRA", value: (r) => varianceValue(r.pending_qty_total ?? 0, r.extra_qty_total ?? 0), isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -490,7 +722,14 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
   </div>
 </div>
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto overflow-visible">
-        <table className="data-table w-full">
+        {/* `w-full` alone lets this auto-layout table get squeezed to the container's
+            width once enough columns are added — the browser shrinks whichever column
+            has the least content to give room to the others, and a date's hyphens are a
+            break point, so "07-08-2026" wraps onto two lines. `min-w` gives the table a
+            floor at its natural content width instead, so it grows past the container
+            and the wrapper's `overflow-x-auto` scrolls it rather than the browser
+            crushing a column to fit. */}
+        <table className="data-table w-full min-w-[1680px]">
           <thead>
             <tr>
               <th className="w-16 whitespace-nowrap">SL NO</th>
@@ -513,7 +752,7 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              // Editable only until the first quantity is picked/rejected — matches the
+              // Editable only until the first quantity is actually picked — matches the
               // backend rule (a picking note with processed qty flips status off Pending).
               const hasPicking = issueHasProcessed(r.status);
               const lockedToOther = !!r.assigned_to_user_id && r.assigned_to_user_id !== me?.id && !isAdmin;
@@ -528,15 +767,25 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                 <tr key={r.id} data-testid={`in-row-${r.in_no}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="text-slate-700" data-testid={`in-type-${r.in_no}`}>{r.stock_out_type || "—"}</td>
-                  <td className="font-mono text-slate-700">{fmtDate(r.in_date)}</td>
+                  <td className="font-mono text-slate-700 whitespace-nowrap">{fmtDate(r.in_date)}</td>
                   <td>
                     <button onClick={() => onOpen(r)} className="font-mono font-semibold text-blue-700 hover:underline" data-testid={`in-open-${r.in_no}`}>
                       {r.in_no}
                     </button>
                   </td>
                   <td className="text-slate-700 max-w-[220px] truncate" title={r.reference_doc_name || ""}>{r.reference_doc_name || "—"}</td>
-                  <td className="font-mono text-slate-700">{r.reference_doc_date ? fmtDate(r.reference_doc_date) : "—"}</td>
+                  <td className="font-mono text-slate-700 whitespace-nowrap">{r.reference_doc_date ? fmtDate(r.reference_doc_date) : "—"}</td>
                   <td className="font-mono text-slate-700">{r.reference_doc_no || "—"}</td>
+                  <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.issued_qty_total || "—"}</td>
+                  <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.picked_qty_total ?? 0}</td>
+                  <td className={`text-center font-mono font-bold tabular-nums ${(r.rejected_qty_total ?? 0) > 0 ? "text-red-700" : "text-slate-400"}`}>{r.rejected_qty_total ?? 0}</td>
+                  {/* Pending / Extra as one signed number — negative (amber) for what's
+                      still outstanding, positive (emerald) for what went over. */}
+                  <td className={`text-center font-mono font-bold tabular-nums ${
+                    (r.extra_qty_total ?? 0) > 0 ? "text-emerald-700" : ((r.pending_qty_total ?? 0) > 0 ? "text-amber-700" : "text-slate-400")
+                  }`}>
+                    {(r.extra_qty_total ?? 0) > 0 ? `+${r.extra_qty_total}` : ((r.pending_qty_total ?? 0) > 0 ? `−${r.pending_qty_total}` : 0)}
+                  </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`in-status-${r.in_no}`}>{label}</span>
                   </td>
@@ -570,6 +819,9 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
 function IssueNoteDetailDialog({ inn, onClose }) {
   const [history, setHistory] = useState([]);
   const actualLocs = useMemo(() => issueActualLocations(history), [history]);
+  const { picked: pickedByKey, rejected: rejectedByKey } = useMemo(() => issueQtysByKey(history), [history]);
+  const totals = useMemo(() => issueTotals(inn, history), [inn, history]);
+  const writtenOffKeys = useMemo(() => issueWrittenOffKeys(history), [history]);
 
   useEffect(() => {
     if (!inn?.id) {
@@ -604,6 +856,11 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                 } />
               </div>
               <div className="space-y-2">
+                <Detail k="STATUS" v={
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${issueStatusClass(inn.status)}`}>
+                    {issueStatusLabel(inn.status)}
+                  </span>
+                } />
                 <Detail k="CREATED BY" v={inn.created_by || "—"} />
                 <Detail k="CREATED AT" v={inn.created_at ? new Date(inn.created_at).toLocaleString() : "—"} />
                 <div>
@@ -618,35 +875,93 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                 <div className="text-sm text-slate-700 whitespace-pre-wrap">{inn.narration}</div>
               </div>
             )}
+            {/* Note totals, aggregated across every Picking Note raised against this
+                Issue Note. Same five numbers as the print sheet and as each line's
+                columns below, from the same helper — they cannot drift apart. */}
+            <div className="mt-3 grid grid-cols-5 gap-3 bg-slate-50 border border-slate-200 rounded-sm px-4 py-3">
+              <Detail k="ISSUED QTY" v={<span className="font-bold">{totals.issued || "—"}</span>} />
+              <Detail k="PICKED QTY" v={<span className="font-bold">{totals.picked}</span>} />
+              <Detail k="PENDING QTY" v={<span className={`font-bold ${totals.pending > 0 ? "text-amber-700" : "text-slate-500"}`}>{totals.pending}</span>} />
+              <Detail k="REJECTED QTY" v={<span className={`font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>} />
+              <Detail k="EXTRA QTY" v={<span className={`font-bold ${totals.extra > 0 ? "text-emerald-700" : "text-slate-500"}`}>{totals.extra}</span>} />
+            </div>
             <div className="mt-2">
               <div className="label-sm mb-2">Items ({(inn.items || []).length})</div>
               <div className="overflow-x-auto">
                 <table className="data-table w-full">
                   <thead>
                     <tr>
-                      <th className="w-14">SL</th><th className="w-28">MODEL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
+                      <th className="w-14">SL NO</th><th className="w-28">MODEL</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
+                      <th className="text-center">ISSUED QTY</th>
+                      <th className="text-center">PICKED QTY</th>
+                      <th className="text-center">PENDING QTY</th>
+                      <th className="text-center">REJECTED QTY</th>
+                      <th className="text-center">EXTRA QTY</th>
                       <th>GODOWN</th><th>RACK</th><th>BOX</th>
-                      <th className="text-center">QTY</th>
                     </tr>
                   </thead>
                   <tbody>
                     {(inn.items || []).flatMap((it, idx) => {
                       // Same rule as the print: show where stock was actually picked
-                      // from once picking is done, else the planned allocation.
-                      const locs = actualLocs[pickingKey(it)] || it.allocated_locations || [];
+                      // from once picking is done, else the planned allocation. Kept
+                      // apart from the fallback so the Picked column below knows which
+                      // case it's in — a planned/suggested location has no real pick
+                      // yet, so it must never be shown as if it did.
+                      const k = pickingKey(it);
+                      const actual = actualLocs[k];
+                      const isActual = !!(actual && actual.length);
+                      const locs = isActual ? actual : (it.allocated_locations || []);
+                      // The four derived/aggregated quantities for this line, rolled up
+                      // over the whole Picking Note chain. Pending whose follow-up note
+                      // has been closed is flagged, so "still being chased" and "written
+                      // off" never look the same.
+                      const q = stockOutQtys(it.quantity, pickedByKey[k], rejectedByKey[k]);
+                      const closedOut = writtenOffKeys.has(k);
+                      // Pending/Rejected/Extra describe the LINE as a whole, not any one
+                      // shelf, so they print once, on the line's first row.
+                      const lineCells = (
+                        <>
+                          <td className={`text-center font-mono font-bold ${q.pending > 0 ? "text-amber-700" : "text-slate-400"}`}>
+                            {q.pending == null ? "—" : (
+                              <>
+                                {q.pending}
+                                {q.pending > 0 && closedOut && <span className="block text-[9px] font-bold tracking-wide text-slate-500">CLOSED</span>}
+                              </>
+                            )}
+                          </td>
+                          <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
+                            {q.rejected || "—"}
+                          </td>
+                          <td className={`text-center font-mono font-bold ${q.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                            {q.extra > 0 ? (
+                              <>
+                                {q.extra}
+                                <span className="block text-[9px] font-bold tracking-wide">TAKEN</span>
+                              </>
+                            ) : "—"}
+                          </td>
+                        </>
+                      );
+                      // Issued Qty belongs to the LINE, not to any one shelf — it is
+                      // printed once, on the line's first row, even when the quantity is
+                      // spread over several locations (each of which carries its own
+                      // quantity next to its box).
+                      const issueQty = it.quantity == null
+                        ? <span className="text-blue-700">Open</span>
+                        : it.quantity;
                       if (locs.length === 0) {
                         return [(
                           <tr key={`${idx}-none`}>
                             <td className="font-mono text-slate-500">{idx + 1}</td>
                             <td className="text-slate-700">{it.model || "—"}</td>
                             <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
-                            <td>{it.make}</td>
                             <td className="text-slate-700">{it.description_1 || "—"}</td>
+                            <td>{it.make}</td>
+                            <td className="text-center font-mono font-bold">{issueQty}</td>
+                            <td className="text-center font-mono font-bold text-slate-700">{q.picked || "—"}</td>
+                            {lineCells}
                             <td colSpan={3} className="text-slate-400 italic">
                               {it.quantity == null ? "Quantity & location decided at picking" : "No stock currently available"}
-                            </td>
-                            <td className="text-center font-mono font-bold">
-                              {it.quantity == null ? <span className="text-blue-700">Open</span> : it.quantity}
                             </td>
                           </tr>
                         )];
@@ -656,12 +971,25 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                           <td className="font-mono text-slate-500">{idx + 1}{locs.length > 1 ? `.${li + 1}` : ""}</td>
                           <td className="text-slate-700">{li === 0 ? (it.model || "—") : ""}</td>
                           <td>{li === 0 ? <PartNoLink partNo={it.part_no} make={it.make} /> : ""}</td>
-                          <td>{li === 0 ? it.make : ""}</td>
                           <td className="text-slate-700">{li === 0 ? (it.description_1 || "—") : ""}</td>
+                          <td>{li === 0 ? it.make : ""}</td>
+                          <td className="text-center font-mono font-bold">{li === 0 ? issueQty : ""}</td>
+                          {/* Picked — shown on EVERY row, not just the first: each row is
+                              one actual pick at one location (possibly from a different
+                              Picking Note), so each carries its own quantity rather than
+                              the line's aggregate. A planned/suggested location (nothing
+                              picked yet) has no real number here — it prints "—", never a
+                              fabricated one. */}
+                          <td className="text-center font-mono font-bold text-slate-700">
+                            {isActual ? (loc.quantity ?? "—") : "—"}
+                          </td>
+                          {/* Pending/Rejected/Extra belong to the line, so they print on
+                              its first row only — the rows below are extra locations,
+                              not extra lines. */}
+                          {li === 0 ? lineCells : <><td /><td /><td /></>}
                           <td className="font-mono">{loc.godown_name || "—"}</td>
                           <td className="font-mono">{loc.rack_no || "—"}</td>
                           <td className="font-mono">{loc.box_no || "—"}</td>
-                          <td className="text-center font-mono font-bold">{loc.quantity}</td>
                         </tr>
                       ));
                     })}
@@ -670,31 +998,54 @@ function IssueNoteDetailDialog({ inn, onClose }) {
               </div>
             </div>
             <div className="mt-6 border-t border-slate-200 pt-4">
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Picking History</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Picking History Details</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>PN NO</th><th>PARENT PN</th><th className="text-center">REQUESTED</th><th className="text-center">PICKED</th><th>STATUS</th></tr>
+                  <tr>
+                    <th>PARENT PN</th><th>PN NO</th>
+                    <th className="text-center">ISSUED</th><th className="text-center">PICKED</th>
+                    <th className="text-center">PENDING</th><th className="text-center">REJECTED</th>
+                    <th className="text-center">EXTRA</th>
+                    <th>STATUS</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.serial || 0) - (b.serial || 0)).map((pn) => {
-                    const label = pickingNoteStatusLabel(pn.status);
                     const parent = history.find((h) => h.id === pn.parent_picking_note_id);
+                    const t = pickingTotals(pn);
+                    const closed = pickingNoteIsClosed(pn);
                     return (
-                      <tr key={pn.id}>
-                        <td className="font-mono font-semibold">{pn.pn_no}</td>
+                      <tr key={pn.id} className={closed ? "bg-slate-50" : ""}>
                         <td className="font-mono">{parent?.pn_no || "—"}</td>
-                        <td className="text-center font-mono font-bold">{pickingAssignedQty(pn) || "—"}</td>
-                        <td className="text-center font-mono font-bold">{pickingPickedQty(pn)}</td>
+                        <td className="font-mono font-semibold">{pn.pn_no}</td>
+                        <td className="text-center font-mono font-bold">{t.issued || "—"}</td>
+                        <td className="text-center font-mono font-bold">{t.picked}</td>
+                        {/* Pending is what carries into the next Picking Note — except on
+                            a closed note, where the ✕ marks that nobody is chasing it. */}
+                        <td className={`text-center font-mono font-bold ${t.pending > 0 ? (closed ? "text-slate-500" : "text-amber-700") : "text-slate-400"}`}
+                          title={closed && t.pending > 0 ? "Written off — this note was closed"
+                            : (t.pending > 0 ? "Carries forward into the next Picking Note" : "Nothing outstanding on this note")}>
+                          {t.pending}{closed && t.pending > 0 ? " ✕" : ""}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${t.rejected > 0 ? "text-red-700" : "text-slate-400"}`}
+                          title={t.rejected > 0 ? "Refused — no stock moved and no follow-up note is raised for it" : ""}>
+                          {t.rejected}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${t.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}
+                          title={t.extra > 0 ? "Extra taken over the issued quantity" : ""}>
+                          {t.extra}
+                        </td>
                         <td>
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${label === "Completed" ? "bg-green-100 text-green-800" : (label === "Pending" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
-                            {label}
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${pickingNoteStatusClass(pn.status)}`}
+                            title={closed ? (pn.close_reason || "Closed — this quantity will not be picked") : ""}>
+                            {pickingNoteStatusLabel(pn.status)}
                           </span>
                         </td>
                       </tr>
                     );
                   })}
                   {history.length === 0 && (
-                    <tr><td colSpan={5} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
+                    <tr><td colSpan={8} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1306,7 +1657,7 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
       <div className="bg-white border border-slate-200 rounded-sm">
         <div className="flex items-center justify-between p-4 border-b border-slate-200">
           <div>
-            <div className="label-sm">Items Requested</div>
+            <div className="label-sm">Items Issued</div>
             <div className="text-xs text-slate-500 mt-0.5">{items.length} row{items.length !== 1 ? "s" : ""}</div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -1370,7 +1721,9 @@ function IssueNoteForm({ editing, onCancel, onSaved }) {
             <col style={{ width: "84px" }} />
           </colgroup>
           <thead>
-            <tr><th>SL NO</th><th>MODEL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th><th className="!text-center">QUANTITY</th><th>GODOWN PREFERENCE</th><th></th></tr>
+            <tr><th>SL NO</th><th>MODEL</th><th>PART NO</th><th>DESCRIPTION</th><th>MAKE</th>{/* This is the source of Issued Qty — the same number every downstream Stock Out
+                view calls "Issued", named identically here so the trail is obvious. */}
+            <th className="!text-center">ISSUED QTY</th><th>GODOWN PREFERENCE</th><th></th></tr>
           </thead>
           <tbody>
             {items.map((it, idx) => {
@@ -1619,6 +1972,10 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // No Close action: writing a quantity off is now done by REJECTING it on the note
+  // itself — reject the whole outstanding amount and the request is settled, with no
+  // stock movement and no follow-up note. That keeps one way to refuse a quantity
+  // instead of two. Notes CLOSED before this change still display as Closed.
   const handleRecord = async (pn) => {
     if (!window.confirm(`Record ${pn.pn_no} as Stock Out?\n\n${pn.items.length} OUT transaction(s) will be created.`)) return;
     setRecordingId(pn.id);
@@ -1642,8 +1999,13 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     { key: "in_no", label: "ISSUE NOTE NO", value: (r) => r.issue_note_no || "" },
     { key: "parent_assigned_to_name", label: "ASSIGNED TO", value: (r) => r.parent_assigned_to_name || "" },
     { key: "items_count", label: "ITEMS", value: (r) => pickingDisplayCount(r), isQty: true, isNumeric: true },
-    { key: "assigned_qty", label: "ASSIGNED", value: (r) => pickingAssignedQty(r), isQty: true, isNumeric: true },
+    // The list is a working queue, not a report: Issued/Picked/Rejected are what tell an
+    // operator whether a note still needs attention. Available is live stock (it belongs
+    // to the pick itself), and Pending/Extra are derived — all three are on the note's
+    // detail, edit and print views instead of crowding the list.
+    { key: "issued_qty", label: "ISSUED", value: (r) => pickingIssuedQty(r), isQty: true, isNumeric: true },
     { key: "picked_qty", label: "PICKED", value: (r) => pickingPickedQty(r), isQty: true, isNumeric: true },
+    { key: "rejected_qty", label: "REJECTED", value: (r) => pickingRejectedQty(r), isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: (r) => pickingNoteStatusLabel(r.status) },
   ], []);
   const {
@@ -1710,21 +2072,28 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           clipped or abbreviated. The page scrolls normally; only the horizontal
           overflow is handled here. */}
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto" data-testid="pn-scroller">
-        <table className="data-table data-table-fixed w-full min-w-[1450px]">
+        <table className="data-table data-table-fixed w-full min-w-[1500px]">
           <colgroup>
             <col style={{ width: "70px" }} />
             <col style={{ width: "176px" }} />
             <col style={{ width: "160px" }} />
             <col style={{ width: "160px" }} />
             <col style={{ width: "144px" }} />
-            <col />
-            <col style={{ width: "84px" }} />
-            <col style={{ width: "110px" }} />
-            <col style={{ width: "94px" }} />
+            {/* ASSIGNED TO was left unconstrained (`<col />`) — on a fixed table that
+                absorbs whatever is left over, and it collapsed to almost nothing after
+                the table's min-width was trimmed down when Available/Pending/Extra were
+                removed from this list, clipping the header word entirely. Fixed width. */}
+            <col style={{ width: "160px" }} />
+            <col style={{ width: "72px" }} />
+            {/* The three quantity columns — each sized to its full header label. */}
+            <col style={{ width: "88px" }} />
+            <col style={{ width: "88px" }} />
+            <col style={{ width: "100px" }} />
             {/* Wide enough for the "Completed" pill plus its padding, and for the
                 "Recording…" button label at its longest. */}
             <col style={{ width: "116px" }} />
-            <col style={{ width: "156px" }} />
+            {/* Edit + Record side by side. */}
+            <col style={{ width: "132px" }} />
           </colgroup>
           <thead>
             <tr>
@@ -1748,22 +2117,25 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = pickingAssignedQty(r);
-              const pickedQty = pickingPickedQty(r);
+              const t = pickingTotals(r);
               const recorded = r.status === "RECORDED" || r.status === "COMPLETED";
+              const closed = pickingNoteIsClosed(r);
               const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
               const aName = r.parent_assigned_to_name;
               const aEmail = r.parent_assigned_to_email;
               const lockedToOther = !!aId && aId !== me?.id && !isAdmin;
-              const lock = recorded || lockedToOther;
+              // A closed note is as final as a recorded one — nothing about it can change.
+              const lock = recorded || closed || lockedToOther;
               const editTitle = recorded ? "Cannot edit — already recorded"
+                : closed ? "Cannot edit — this note was closed as unpickable"
                 : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : (pending ? "Open Picking" : "Edit"));
               const recordTitle = recorded ? "Already recorded"
+                : closed ? "Closed — nothing to record"
                 : (pending ? "Open Picking and save a draft first" : (lockedToOther ? `Locked — assigned to ${aName || aEmail}` : "Record as Stock Out"));
               const recordDisabled = lock || pending || recordingId === r.id;
               return (
-                <tr key={r.id} data-testid={`pn-row-${r.pn_no}`} className="transition-colors duration-100">
+                <tr key={r.id} data-testid={`pn-row-${r.pn_no}`} className={`transition-colors duration-100 ${closed ? "bg-slate-50" : ""}`}>
                   <td className="font-mono text-slate-500">{idx + 1}</td>
                   <td className="font-mono text-slate-700">{fmtDate(r.pn_date)}</td>
                   <td>
@@ -1773,13 +2145,16 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   <td className="font-mono text-slate-700">{r.issue_note_no || "—"}</td>
                   <td className="text-slate-700 truncate" title={r.parent_assigned_to_name || ""}>{r.parent_assigned_to_name || "—"}</td>
                   <td className="font-mono text-slate-600 tabular-nums text-center">{pickingDisplayCount(r)}</td>
-                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{totalQty || "—"}</td>
-                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{pickedQty}</td>
+                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{t.issued || "—"}</td>
+                  <td className="font-mono font-bold text-slate-900 tabular-nums text-center">{t.picked}</td>
+                  <td className={`font-mono font-bold tabular-nums text-center ${t.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>{t.rejected}</td>
                   <td>
                     {/* inline-block + nowrap keeps the pill a solid, self-contained block
                         so it can never bleed into the neighbouring cell. */}
-                    <span className={`inline-block whitespace-nowrap text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`pn-status-${r.pn_no}`}>
-                      {recorded ? "Completed" : (pending ? "Pending" : "Draft")}
+                    <span className={`inline-block whitespace-nowrap text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${pickingNoteStatusClass(r.status)}`}
+                      title={closed ? (r.close_reason || "Closed — this quantity will not be picked") : ""}
+                      data-testid={`pn-status-${r.pn_no}`}>
+                      {pickingNoteStatusLabel(r.status)}
                     </span>
                   </td>
                   <td>
@@ -1792,7 +2167,7 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                       </button>
                       <Button onClick={() => handleRecord(r)} disabled={recordDisabled} size="sm"
                         title={recordTitle}
-                        className={`rounded-sm h-7 text-[11px] px-2 shrink-0 ${lock ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
+                        className={`rounded-sm h-7 text-[11px] px-2 shrink-0 ${recordDisabled ? "bg-slate-200 text-slate-500 cursor-not-allowed hover:bg-slate-200" : "bg-emerald-700 hover:bg-emerald-800 text-white"}`}
                         data-testid={`pn-record-${r.pn_no}`}>
                         <CheckCircle size={12} weight="bold" className="mr-1" />
                         {recorded ? "Recorded" : (recordingId === r.id ? "Recording…" : "Record")}
@@ -1813,7 +2188,10 @@ function PickingNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
 }
 
 function PickingNoteDetailDialog({ pn, onClose }) {
-  const requestedFor = pn ? pickingRequestedLookup(pn) : () => null;
+  const issuedFor = pn ? pickingRequestedLookup(pn) : () => null;
+  const availableFor = pn ? pickingAvailableLookup(pn) : () => null;
+  const totals = pickingTotals(pn);
+  const available = pickingAvailableQty(pn);
   return (
     <Dialog open={!!pn} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="pn-detail-dialog">
@@ -1836,32 +2214,84 @@ function PickingNoteDetailDialog({ pn, onClose }) {
               <div className="space-y-2">
                 <Detail k="CREATED BY (PICKER)" v={pn.created_by || "—"} />
                 <Detail k="CREATED AT" v={new Date(pn.created_at).toLocaleString()} />
+                <Detail k="ISSUED QTY / AVAILABLE QTY" v={
+                  <span className="font-mono">
+                    {totals.issued || "—"}
+                    <span className="text-slate-400"> / </span>
+                    {available == null ? "—" : available}
+                  </span>
+                } />
+                <Detail k="PICKED QTY" v={<span className="font-mono font-bold">{totals.picked}</span>} />
+                <Detail k="PENDING QTY" v={
+                  <span className={`font-mono font-bold ${totals.pending > 0 ? "text-amber-700" : "text-slate-500"}`}>
+                    {totals.pending}
+                    {totals.pending > 0 && !pickingNoteIsClosed(pn) && <span className="ml-2 text-[10px] font-normal text-slate-500">carries to the next Picking Note</span>}
+                    {totals.pending > 0 && pickingNoteIsClosed(pn) && <span className="ml-2 text-[10px] font-normal text-slate-500">written off — note closed</span>}
+                  </span>
+                } />
+                <Detail k="REJECTED QTY / EXTRA QTY" v={
+                  <span className="font-mono font-bold">
+                    <span className={totals.rejected > 0 ? "text-red-700" : "text-slate-500"}>{totals.rejected}</span>
+                    <span className="text-slate-400"> / </span>
+                    <span className={totals.extra > 0 ? "text-emerald-700" : "text-slate-500"}>{totals.extra}</span>
+                    {totals.extra > 0 && <span className="ml-2 text-[10px] font-normal text-emerald-700">extra taken</span>}
+                  </span>
+                } />
+                {pickingNoteIsClosed(pn) && (
+                  <Detail k="CLOSED" v={
+                    <span className="text-slate-700">
+                      {pn.closed_at ? new Date(pn.closed_at).toLocaleString() : "—"}
+                      {pn.closed_by ? ` · ${pn.closed_by}` : ""}
+                      {pn.close_reason ? <div className="text-xs text-slate-500 mt-0.5">{pn.close_reason}</div> : null}
+                    </span>
+                  } />
+                )}
                 <div>
                   <div className="label-sm">ASSIGNED TO (FROM ISSUE NOTE)</div>
                   <div className="mt-1"><AssigneeBadge name={pn.parent_assigned_to_name} email={pn.parent_assigned_to_email} /></div>
                 </div>
               </div>
             </div>
+            {pn.narration && (
+              <div className="pt-3 pb-1 border-b border-slate-200">
+                <div className="label-sm mb-1">NARRATION</div>
+                <div className="text-sm text-slate-700 whitespace-pre-wrap">{pn.narration}</div>
+              </div>
+            )}
             <div className="mt-2">
               <div className="label-sm mb-2">Items ({pickingDisplayItems(pn).length})</div>
               <div className="overflow-x-auto">
                 <table className="data-table w-full text-xs">
-                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">REQUESTED QTY</th><th className="text-center">PICKED QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
+                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">ISSUED QTY</th><th className="text-center">AVAILABLE QTY</th><th className="text-center">PICKED QTY</th><th className="text-center">PENDING QTY</th><th className="text-center">REJECTED QTY</th><th className="text-center">EXTRA QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
                   <tbody>
-                    {pickingDisplayItems(pn).map((it, idx) => (
+                    {pickingDisplayItems(pn).map((it, idx) => {
+                      const q = stockOutQtys(issuedFor(it), it.picked_qty, it.rejected_qty);
+                      const avail = availableFor(it);
+                      return (
                       <tr key={idx}>
                         <td className="font-mono text-slate-500">{idx + 1}</td>
                         <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                         <td>{it.make}</td>
                         <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
                         <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
-                        <td className="text-center font-mono font-bold text-slate-600">{requestedFor(it) ?? ""}</td>
-                        <td className="text-center font-mono font-bold">{it.quantity}</td>
+                        <td className="text-center font-mono font-bold text-slate-600">{q.issued == null ? <span className="text-blue-700">Open</span> : q.issued}</td>
+                        <td className="text-center font-mono text-slate-600" title="Live stock for this item">{avail == null ? "—" : avail}</td>
+                        <td className="text-center font-mono font-bold">{q.picked}</td>
+                        <td className={`text-center font-mono font-bold ${q.pending > 0 ? "text-amber-700" : "text-slate-400"}`}>
+                          {q.pending == null ? "—" : q.pending}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
+                          {q.rejected || "—"}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${q.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                          {q.extra || "—"}
+                        </td>
                         <td className="font-mono">{it.godown_name || "—"}</td>
                         <td className="font-mono">{it.rack_no || "—"}</td>
                         <td className="font-mono">{it.box_no || "—"}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1886,6 +2316,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   const [selectedInId, setSelectedInId] = useState("");
   const [assignedToName, setAssignedToName] = useState("");
   const [items, setItems] = useState([]);
+  const [narration, setNarration] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -1894,12 +2325,14 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
       setPnDate(editing.pn_date);
       setSelectedInId(editing.issue_note_id);
       setAssignedToName(editing.parent_assigned_to_name || "");
+      setNarration(editing.narration || "");
       setPendingIns([{ id: editing.issue_note_id, in_no: editing.issue_note_no, in_date: editing.issue_note_date, assigned_to_name: editing.parent_assigned_to_name }]);
       api.get(`/picking-notes/prepare/${editing.issue_note_id}`, { params: { exclude_pn_id: editing.id } })
         .then((r) => {
           setItems(buildPickingEditItems(editing, r.data.items || []));
         }).catch(() => setItems((editing.items || []).map((it) => ({
           ...it, ...locSelKeys(it), pending_qty: 0, requested_qty: 0, allocated_qty: it.quantity || 0,
+          rejected_qty: it.rejected_qty ?? 0, available_qty: 0,
           // Prepare failed — fall back to a single-option location list so the
           // dropdown/qty editing still works using the row's already-stored location.
           available_locations: it.godown_id ? [{
@@ -1923,7 +2356,7 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     setAssignedToName(inn?.assigned_to_name || "");
     try {
       const { data } = await api.get(`/picking-notes/prepare/${id}`);
-      setItems((data.items || []).map((it) => ({ ...it, ...locSelKeys(it), row_status: "Assigned" })));
+      setItems((data.items || []).map((it) => ({ ...it, ...locSelKeys(it), rejected_qty: 0, row_status: "Assigned" })));
     } catch (err) { toast.error(formatApiError(err.response?.data?.detail) || "Could not prepare items"); }
   };
 
@@ -2045,11 +2478,11 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   };
   const removeLocationRow = (i) => setItems((prev) => prev.filter((_, idx) => idx !== i));
 
-  // What the Issue Note asked for on THIS row's line — reference only, and per line so
-  // two lines of the same part keep their own 15 and 5 instead of sharing one number. It
-  // is a target, not a limit: the picker may take more or less. `null` = open line (the
-  // office left the quantity to the store incharge), displayed blank.
-  const rowRequested = (row) => (row.open_quantity ? null : (row.requested_qty ?? null));
+  // Issued Qty for THIS row's line — read-only, and per line so two lines of the same
+  // part keep their own 15 and 5 instead of sharing one number. It is a target, not a
+  // limit: the picker may take more (an Extra). `null` = open line (the office left the
+  // quantity to the store incharge), displayed blank.
+  const rowIssued = (row) => (row.open_quantity ? null : (row.requested_qty ?? null));
   // Live "available here" per row, netting out what other rows in this same form
   // already claim at the identical location (server does the authoritative check).
   const availableAtRow = (row, idx) => {
@@ -2062,14 +2495,68 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     return Math.max(0, (loc.current_qty || 0) - claimedElsewhere);
   };
 
+  // Rows created by "+ Split" share their Issue Note line with the row they came from,
+  // so Issued is a budget for the LINE, not for one row. Everything below is therefore
+  // computed over all rows of the same line.
+  const lineKey = (row) => (row.line_no != null ? `L${row.line_no}` : `K${pickingKey(row)}`);
+  const linePicked = (rows, row) => rows.reduce(
+    (sum, r) => (lineKey(r) === lineKey(row) ? sum + (parseInt(r.quantity) || 0) : sum), 0,
+  );
+  // Rejecting is a decision about the LINE, not about one shelf, so it is entered once
+  // (on the line's first row) and summed the same way picking is.
+  const lineRejected = (rows, row) => rows.reduce(
+    (sum, r) => (lineKey(r) === lineKey(row) ? sum + (parseInt(r.rejected_qty) || 0) : sum), 0,
+  );
+  // The line's whole arithmetic in one place — the same function every other view uses.
+  const lineQtys = (rows, row) => stockOutQtys(rowIssued(row), linePicked(rows, row), lineRejected(rows, row));
+
+  // Pending, Rejected and Extra describe the LINE, so they are shown once per line — on
+  // its first row — rather than repeated identically on every split row of the same line.
+  const lineHeadIdx = useMemo(() => {
+    const m = {};
+    items.forEach((r, i) => {
+      const k = r.line_no != null ? `L${r.line_no}` : `K${pickingKey(r)}`;
+      if (!(k in m)) m[k] = i;
+    });
+    return m;
+  }, [items]);
+
   // Picked Qty is clamped to what is physically at the chosen location — the picker may
-  // freely go above or below the requested quantity, but never above real stock.
+  // freely go above or below the issued quantity, but never above real stock. Under
+  // leaves a Pending quantity that rolls into a follow-up note; over is an Extra and
+  // simply stands.
+  //
+  // Raising Picked above Issued also clears any Rejected on the line: Reject is only
+  // legal while Extra is 0, and silently leaving a stale number behind for the server to
+  // refuse would be worse than resetting the field the rule has just disabled.
   const onPickedQtyChange = (idx, raw) => {
-    if (raw === "") { updateItem(idx, { quantity: "" }); return; }
-    const n = parseInt(raw, 10);
-    if (isNaN(n) || n < 0) return;
+    const n = raw === "" ? null : parseInt(raw, 10);
+    if (raw !== "" && (isNaN(n) || n < 0)) return;
     const cap = availableAtRow(items[idx], idx);
-    updateItem(idx, { quantity: String(Math.min(n, cap)) });
+    const next = raw === "" ? "" : String(Math.min(n, cap));
+    const row = items[idx];
+    const after = items.map((r, i) => (i === idx ? { ...r, quantity: next } : r));
+    if (lineQtys(after, row).extra > 0) {
+      const lk = lineKey(row);
+      setItems(after.map((r) => (lineKey(r) === lk ? { ...r, rejected_qty: 0 } : r)));
+      return;
+    }
+    updateItem(idx, { quantity: next });
+  };
+
+  // Rejected Qty — the second and only other input. Bounded by what is still outstanding
+  // on the line (Issued − Picked), because rejecting is refusing the remainder, not
+  // refusing stock that has already been picked. Blocked outright once the line is over-
+  // picked; an open line has no target to measure against, so only the stock rules apply.
+  const onRejectedQtyChange = (idx, raw) => {
+    const n = raw === "" ? null : parseInt(raw, 10);
+    if (raw !== "" && (isNaN(n) || n < 0)) return;
+    const row = items[idx];
+    const q = lineQtys(items, row);
+    if (q.extra > 0) return;   // input is disabled in this state; ignore stray writes
+    if (raw === "") { updateItem(idx, { rejected_qty: "" }); return; }
+    const outstanding = q.issued == null ? n : Math.max(0, q.issued - q.picked);
+    updateItem(idx, { rejected_qty: String(Math.min(n, outstanding)) });
   };
 
   const save = async () => {
@@ -2078,13 +2565,28 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     // Every Issue Note line is sent, including any picked as 0 — a 0 is a real answer
     // ("this line was covered elsewhere / not taken") and the row must survive the save
     // instead of collapsing away. Only empty manual split rows are dropped as noise.
-    const pickRows = items.filter((it) => (parseInt(it.quantity) || 0) > 0 || !it.manual);
-    if (!items.some((it) => (parseInt(it.quantity) || 0) > 0)) { toast.error("Enter at least one Picked Qty"); return; }
+    const pickRows = items.filter((it) => (parseInt(it.quantity) || 0) > 0 || (parseInt(it.rejected_qty) || 0) > 0 || !it.manual);
+    // Rejecting the whole quantity is a valid answer — it settles the request without
+    // stock moving — so a note that only rejects is a legitimate note to save.
+    if (!items.some((it) => (parseInt(it.quantity) || 0) > 0 || (parseInt(it.rejected_qty) || 0) > 0)) {
+      toast.error("Enter a Picked Qty or a Rejected Qty on at least one row");
+      return;
+    }
+    // Reject is only legal while Extra is 0. The input is disabled in that state, so this
+    // is the belt-and-braces check against a stale value surviving an edit.
+    for (const it of items) {
+      const q = lineQtys(items, it);
+      if (q.extra > 0 && q.rejected > 0) {
+        toast.error(`${it.part_no} / ${it.make}: Rejected Qty must be 0 — ${q.picked} was picked against ${q.issued} issued`);
+        return;
+      }
+    }
     for (let i = 0; i < pickRows.length; i++) {
       const rowNo = items.indexOf(pickRows[i]) + 1;
       const it = pickRows[i];
       const q = parseInt(it.quantity) || 0;
       if (q < 0) { toast.error(`Row ${rowNo}: quantity cannot be negative`); return; }
+      if ((parseInt(it.rejected_qty) || 0) < 0) { toast.error(`Row ${rowNo}: Rejected Qty cannot be negative`); return; }
       if (q === 0) continue;   // nothing leaves the shelf — no location needed
       // All three levels must be settled, but "settled" means chosen from what actually
       // exists: a godown with no racking settles its rack/box as "none", which is a valid
@@ -2105,9 +2607,11 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
     try {
       const payload = {
         issue_note_id: selectedInId,
+        narration,
           items: pickRows.map((it) => ({
           part_no: it.part_no, make: it.make, line_no: it.line_no ?? null,
           quantity: parseInt(it.quantity) || 0,
+          rejected_qty: parseInt(it.rejected_qty) || 0,
           model: it.model || "", old_part_no: it.old_part_no || "", make_part_no: it.make_part_no || "",
           description_1: it.description_1 || "", description_2: it.description_2 || "",
           remarks_oem: it.remarks_oem || "", remarks_others: it.remarks_others || "",
@@ -2165,29 +2669,57 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
           <Label className="label-sm">Assigned To</Label>
           <Input value={assignedToName} disabled className="mt-2 rounded-sm bg-slate-50" data-testid="pn-assigned-to" />
         </div>
+        {/* The picker's own note — why a line came up short, whose shelf the stock was
+            really found on, who approved an over-pick. Kept separate from the Issue
+            Note's narration, which is the office's instruction and is never overwritten. */}
+        <div className="col-span-2 lg:col-span-4">
+          <Label className="label-sm">Narration</Label>
+          <textarea
+            value={narration}
+            onChange={(e) => setNarration(e.target.value)}
+            rows={2}
+            placeholder="Anything worth recording about this pick — shortages, substitutions, who authorised an over-pick…"
+            className="mt-2 w-full rounded-sm border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+            data-testid="pn-narration-input"
+          />
+        </div>
       </div>
 
       {items.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
           <div className="px-4 pt-3 text-xs text-slate-500">
-            Godown, Rack and Box are pre-filled with the Issue Note's suggested location (marked <span className="font-bold text-blue-700">Suggested</span>) —
-            all three are required, and all three can be changed to any location currently holding stock.
-            Use <span className="font-bold">+ Split</span> to take the remainder from another location.
-            Requested Qty is what the office asked for; pick more or less as the shelf actually allows.
+            Enter <span className="font-bold">Picked</span> and <span className="font-bold text-red-700">Rejected</span> only — the rest is worked out.
+            Picking is capped at <span className="font-bold">Available</span>.
+            <span className="font-bold text-amber-700"> −qty</span> is pending and rolls into a new Picking Note;
+            <span className="font-bold text-emerald-700"> +qty</span> is extra taken.
           </div>
-          <table className="data-table data-table-fixed w-full text-xs min-w-[1384px]">
+          {/* `data-table-wrap-head` (index.css): the plain fixed-table rules clip any
+              header wider than its column instead of showing it, which is what hid
+              "PENDING / EXTRA" and "SL NO" outright. It lets long labels wrap and adds
+              the spacing between columns. */}
+          <table className="data-table data-table-fixed data-table-wrap-head w-full text-xs min-w-[1720px]">
             <colgroup>
-              <col style={{ width: "56px" }} />
+              <col style={{ width: "64px" }} />
               <col style={{ width: "100px" }} />
               <col style={{ width: "118px" }} />
               <col style={{ width: "92px" }} />
-              <col />
+              {/* Fixed rather than auto: an unconstrained `<col />` on a fixed-layout
+                  table absorbs every pixel of slack left over from the other columns,
+                  which is what stretched a huge gap in after Description. Truncation +
+                  the row's `title` attribute still cover a longer description. */}
+              <col style={{ width: "220px" }} />
               <col style={{ width: "112px" }} />
               <col style={{ width: "130px" }} />
               <col style={{ width: "100px" }} />
               <col style={{ width: "100px" }} />
-              <col style={{ width: "142px" }} />
-              <col style={{ width: "112px" }} />
+              {/* The five quantity columns: two read-only, two inputs, one derived.
+                  Each is wide enough for its own header at the padding set above, so
+                  nothing has to be abbreviated to fit. */}
+              <col style={{ width: "104px" }} />
+              <col style={{ width: "120px" }} />
+              <col style={{ width: "108px" }} />
+              <col style={{ width: "120px" }} />
+              <col style={{ width: "140px" }} />
               {/* Two 28px icon buttons (split + delete) plus cell padding — 64px clipped
                   the delete button on added rows. */}
               <col style={{ width: "88px" }} />
@@ -2203,18 +2735,26 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                 <th>GODOWN</th>
                 <th>RACK</th>
                 <th>BOX</th>
-                <th className="!text-center">REQUESTED QTY</th>
-                <th className="!text-center">PICKED QTY</th>
+                <th>ISSUED</th>
+                <th>AVAILABLE</th>
+                <th>PICKED</th>
+                <th>REJECTED</th>
+                <th>PENDING / EXTRA</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const requested = rowRequested(it);
+                const issued = rowIssued(it);
                 const noStockAtAll = (it.available_locations || []).length === 0;
                 const resolved = locationResolved(it);
                 const availHere = availableAtRow(it, idx);
                 const q = parseInt(it.quantity) || 0;
+                // Line-level arithmetic: split rows share one Issue Note line, so Pending,
+                // Rejected and Extra are computed over the whole line and shown (and, for
+                // Rejected, entered) once, on its first row.
+                const lineHead = lineHeadIdx[lineKey(it)] === idx;
+                const line = lineQtys(items, it);
                 return (
                   <tr key={idx} data-testid={`pn-item-row-${idx}`} className={noStockAtAll ? "bg-amber-50" : ""}>
                     <td className="font-mono text-slate-500 align-middle">{idx + 1}</td>
@@ -2286,9 +2826,21 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                         </Select>
                       )}
                     </td>
-                    {/* Requested is reference only — blank when the office left it open. */}
-                    <td className="text-center font-mono font-bold text-slate-700 align-middle" data-testid={`pn-requested-${idx}`}>
-                      {requested == null || requested === 0 ? "" : requested}
+                    {/* Issued — read-only, blank when the office left the line open. */}
+                    <td className="text-left font-mono font-bold text-slate-700 align-middle" data-testid={`pn-issued-${idx}`}>
+                      {issued == null || issued === 0 ? "" : issued}
+                    </td>
+                    {/* Available — read-only and LIVE: the total currently on the shelf for
+                        this part/make, which is the real ceiling on Picked Qty. When it has
+                        dropped below Issued, the picker takes what is there and the rest
+                        stays Pending for a follow-up note. */}
+                    <td className="text-left font-mono align-middle" data-testid={`pn-available-${idx}`}>
+                      <span className={(it.available_qty ?? 0) < (issued ?? 0) ? "font-bold text-amber-700" : "text-slate-600"}
+                        title={(it.available_qty ?? 0) < (issued ?? 0)
+                          ? `Only ${it.available_qty ?? 0} in stock against ${issued} issued — pick what is there; the rest stays Pending`
+                          : "Live stock across every location holding this item"}>
+                        {it.available_qty ?? 0}
+                      </span>
                     </td>
                     <td className="align-middle">
                       <Input type="number" min="0" step="1" max={availHere || undefined} value={it.quantity}
@@ -2296,14 +2848,61 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                         onChange={(e) => onPickedQtyChange(idx, e.target.value)}
                         title={noStockAtAll ? "Nothing on the shelf for this item"
                           : (!resolved ? "Select Godown, Rack and Box first" : `Up to ${availHere} available at this location`)}
-                        className="rounded-sm font-mono h-8 text-center w-full px-1"
+                        className="rounded-sm font-mono h-8 text-left w-full px-2"
                         data-testid={`pn-qty-${idx}`} />
                       {/* Fixed-height hint so rows never change height as quantities change. */}
-                      <div className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-center overflow-hidden whitespace-nowrap text-ellipsis ${
+                      <div className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-left overflow-hidden whitespace-nowrap text-ellipsis ${
                         noStockAtAll ? "invisible" : (!resolved ? "text-slate-400" : (q === availHere && availHere > 0 ? "text-amber-600 font-bold" : "text-slate-500"))
                       }`} data-testid={`pn-avail-hint-${idx}`}>
                         {!resolved ? "Pick location" : (q === availHere && availHere > 0 ? `Max ${availHere}` : `Avail ${availHere}`)}
                       </div>
+                    </td>
+                    {/* Rejected — the picker's second and last input, entered once per
+                        line. Refusing the outstanding quantity settles it with no stock
+                        movement and no follow-up note; rejecting the whole outstanding
+                        amount is how a note that can never be picked is written off.
+                        Disabled the moment the line runs an Extra: there is then nothing
+                        outstanding left to refuse. */}
+                    <td className="text-left align-middle" data-testid={`pn-rejected-${idx}`}>
+                      {!lineHead ? <span className="text-slate-300">·</span> : (
+                        <>
+                          <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
+                            disabled={line.extra > 0}
+                            onChange={(e) => onRejectedQtyChange(idx, e.target.value)}
+                            title={line.extra > 0
+                              ? `Reject unavailable — ${line.picked} picked against ${line.issued} issued leaves nothing outstanding to refuse`
+                              : (line.issued == null ? "Open line — reject as much as is being refused"
+                                : `Up to ${Math.max(0, line.issued - line.picked)} outstanding on this line`)}
+                            className={`rounded-sm font-mono h-8 text-left w-full px-2 ${line.extra > 0 ? "bg-slate-100 text-slate-400" : ""}`}
+                            data-testid={`pn-reject-input-${idx}`} />
+                          <div className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-left overflow-hidden whitespace-nowrap text-ellipsis ${
+                            line.extra > 0 ? "text-slate-400" : "invisible"
+                          }`}>
+                            Extra — N/A
+                          </div>
+                        </>
+                      )}
+                    </td>
+                    {/* Pending / Extra — the two derived quantities in one signed column,
+                        because they are the two directions of a single variance and can
+                        never both be non-zero on a line:
+                            −qty  short of what was issued, and rolls into a new Picking
+                                  Note when this one is recorded (unless it is rejected)
+                            +qty  taken over and above what was issued
+                        Never typed, never negative in the underlying figures — the sign
+                        here is presentation, so one glance says which way the line went. */}
+                    <td className="text-left align-middle" data-testid={`pn-variance-${idx}`}>
+                      {!lineHead ? <span className="text-slate-300">·</span>
+                        : line.extra > 0 ? (
+                          <span className="font-mono font-bold text-emerald-700" title={`Extra — ${line.extra} taken over the ${line.issued} issued`}>
+                            +{line.extra}
+                          </span>
+                        ) : line.pending == null ? <span className="text-slate-400">—</span>
+                        : line.pending > 0 ? (
+                          <span className="font-mono font-bold text-amber-700" title={`Pending — ${line.pending} still outstanding (Issued − Picked − Rejected). Carries into a new Picking Note when this one is recorded`}>
+                            −{line.pending}
+                          </span>
+                        ) : <span className="font-mono text-slate-400" title="Fully settled — nothing pending, nothing extra">0</span>}
                     </td>
                     <td className="align-middle">
                       <div className="flex items-center gap-1 h-8 whitespace-nowrap">
@@ -2315,6 +2914,14 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                             Note's own lines have to stay on the note. */}
                         <button type="button" onClick={() => removeLocationRow(idx)}
                           disabled={!it.manual}
+                          onKeyDown={(e) => {
+                            // End of the last row — the Save button sits above the table
+                            // in DOM order, so forward Tab would otherwise leave the form.
+                            if (e.key === "Tab" && !e.shiftKey && idx === items.length - 1) {
+                              e.preventDefault();
+                              document.querySelector('[data-testid="pn-save-button"]')?.focus();
+                            }
+                          }}
                           title={it.manual ? "Delete this added row" : "Issue Note lines cannot be deleted — set Picked Qty to 0 instead"}
                           className={`p-1.5 rounded-sm shrink-0 ${it.manual ? "hover:bg-red-50 text-red-700" : "text-slate-300 cursor-not-allowed"}`}
                           data-testid={`pn-remove-row-${idx}`}>
