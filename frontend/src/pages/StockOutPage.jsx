@@ -2547,15 +2547,16 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
   // Rejected Qty — the second and only other input. Bounded by what is still outstanding
   // on the line (Issued − Picked), because rejecting is refusing the remainder, not
   // refusing stock that has already been picked. Blocked outright once the line is over-
-  // picked; an open line has no target to measure against, so only the stock rules apply.
+  // picked, and on an open line — there is no issued quantity to reject against, so only
+  // Pick is meaningful there.
   const onRejectedQtyChange = (idx, raw) => {
     const n = raw === "" ? null : parseInt(raw, 10);
     if (raw !== "" && (isNaN(n) || n < 0)) return;
     const row = items[idx];
     const q = lineQtys(items, row);
-    if (q.extra > 0) return;   // input is disabled in this state; ignore stray writes
+    if (q.extra > 0 || q.issued == null) return;   // input is disabled in this state; ignore stray writes
     if (raw === "") { updateItem(idx, { rejected_qty: "" }); return; }
-    const outstanding = q.issued == null ? n : Math.max(0, q.issued - q.picked);
+    const outstanding = Math.max(0, q.issued - q.picked);
     updateItem(idx, { rejected_qty: String(Math.min(n, outstanding)) });
   };
 
@@ -2867,13 +2868,13 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                       {!lineHead ? <span className="text-slate-300">·</span> : (
                         <>
                           <Input type="number" min="0" step="1" value={it.rejected_qty ?? ""}
-                            disabled={line.extra > 0}
+                            disabled={line.extra > 0 || line.issued == null}
                             onChange={(e) => onRejectedQtyChange(idx, e.target.value)}
                             title={line.extra > 0
                               ? `Reject unavailable — ${line.picked} picked against ${line.issued} issued leaves nothing outstanding to refuse`
-                              : (line.issued == null ? "Open line — reject as much as is being refused"
+                              : (line.issued == null ? "Open line — no issued quantity to reject against; pick what is being taken"
                                 : `Up to ${Math.max(0, line.issued - line.picked)} outstanding on this line`)}
-                            className={`rounded-sm font-mono h-8 text-left w-full px-2 ${line.extra > 0 ? "bg-slate-100 text-slate-400" : ""}`}
+                            className={`rounded-sm font-mono h-8 text-left w-full px-2 ${(line.extra > 0 || line.issued == null) ? "bg-slate-100 text-slate-400" : ""}`}
                             data-testid={`pn-reject-input-${idx}`} />
                           <div className={`h-[14px] leading-[14px] text-[10px] mt-0.5 text-left overflow-hidden whitespace-nowrap text-ellipsis ${
                             line.extra > 0 ? "text-slate-400" : "invisible"

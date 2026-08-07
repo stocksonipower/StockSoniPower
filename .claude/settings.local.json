@@ -41,7 +41,8 @@
       "Bash(grep -E '\\\\.\\(js|jsx|ts|tsx|py|java|go|rb|php|css|scss|html\\)$')",
       "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
       "Bash(python3 -c \"import fastapi, uvicorn; print\\('deps ok'\\)\")",
-      "Bash(python3 -c \"import fastapi,uvicorn,motor;print\\('deps ok'\\)\")"
+      "Bash(python3 -c \"import fastapi,uvicorn,motor;print\\('deps ok'\\)\")",
+      "Bash(grep -Ei '\\\\.\\(jsx|tsx|js|ts\\)$')"
     ]
   }
 }
