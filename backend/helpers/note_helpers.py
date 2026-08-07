@@ -96,6 +96,64 @@ def _key(p, m):
     return f"{(p or '').strip()}||{(m or '').strip()}"
 
 
+def note_qty_totals(assigned_items: list, actual_items: list) -> dict:
+    """The five quantities of an execution note, from the only two that are ever stored.
+
+    One implementation for BOTH Stock Out (Issue Note -> Picking Note) and Transfer
+    (Transfer Request -> Transfer Note), because the arithmetic is identical and the two
+    modules must never be able to drift apart:
+
+        requested — what the parent document asked this note for
+                    (blank/open lines contribute 0 and are excluded from the variance)
+        actual    — what was physically picked / moved
+        rejected  — what was deliberately refused (moves no stock, but settles the request)
+        pending   — max(0, requested - actual - rejected), summed per (part, make)
+        extra     — max(0, actual - requested), summed per (part, make)
+
+    Pending and Extra are floored per part/make rather than on the grand total, so a
+    surplus on one item can never mask a shortfall on another. They are NEVER stored or
+    entered — every view, print, export and API response derives them here, which is what
+    makes the screen, the preview, the printed sheet and the API agree.
+
+    Pending and Extra are the two directions of ONE variance and can never both be
+    non-zero for the same part/make: the caller renders them as a single "Pending / Extra"
+    field.
+    """
+    requested_by_key, actual_by_key, rejected_by_key = {}, {}, {}
+    # An OPEN line (quantity left blank for the store incharge to decide) has no target
+    # number. It contributes 0 to Requested, but it must not therefore make the whole note
+    # look like an Extra — there was nothing to exceed. Both Pending and Extra are
+    # undefined for it, so it is skipped in the arithmetic below rather than counted as 0.
+    open_keys = set()
+    for it in assigned_items or []:
+        k = _key(it.get("part_no"), it.get("make"))
+        requested_by_key.setdefault(k, 0.0)
+        if it.get("quantity") is None:
+            open_keys.add(k)
+        else:
+            requested_by_key[k] += float(it.get("quantity") or 0)
+    for it in actual_items or []:
+        k = _key(it.get("part_no"), it.get("make"))
+        actual_by_key[k] = actual_by_key.get(k, 0.0) + float(it.get("quantity") or 0)
+        rejected_by_key[k] = rejected_by_key.get(k, 0.0) + float(it.get("rejected_qty") or 0)
+    pending = extra = 0.0
+    for k in set(requested_by_key) | set(actual_by_key) | set(rejected_by_key):
+        if k in open_keys:
+            continue
+        req = requested_by_key.get(k, 0.0)
+        act = actual_by_key.get(k, 0.0)
+        rej = rejected_by_key.get(k, 0.0)
+        pending += max(0.0, req - act - rej)
+        extra += max(0.0, act - req)
+    return {
+        "requested": sum(requested_by_key.values()),
+        "actual": sum(actual_by_key.values()),
+        "rejected": sum(rejected_by_key.values()),
+        "pending": pending,
+        "extra": extra,
+    }
+
+
 def _ern_rackable_qty(item: dict) -> float:
     """Rackable quantity for one ERN row.
 

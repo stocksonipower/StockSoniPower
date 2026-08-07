@@ -24,6 +24,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 import { buildStandardPrintHtml, openPrintWindow } from "../lib/printDocument";
+import { noteQtys, varianceLabel, varianceValue, varianceClass, varianceTitle } from "../lib/noteQtys";
 
 const PAGE_SIZE = 100;
 const NO_GODOWN = "__NO_GODOWN__";
@@ -199,26 +200,13 @@ function issueActualLocations(pickingHistory = []) {
   return m;
 }
 
-// ---------------------------------------------------------------------------
-// The five Stock Out quantities. Only two of them are ever entered — Picked and
-// Rejected — and the other three follow from them by arithmetic that is identical
-// everywhere: the form, the lists, the detail dialogs, the prints and the backend
-// (`_picking_totals` in routes/stock_out.py).
-//
-//     Pending = max(0, Issued − Picked − Rejected)      never negative, never typed
-//     Extra   = max(0, Picked − Issued)                 never negative, never typed
-//
-// Reject is legal only while Extra is 0: once more came off the shelf than was asked
-// for, there is nothing outstanding left to refuse.
-// ---------------------------------------------------------------------------
+// The five Stock Out quantities, under Stock Out's names. The arithmetic itself lives in
+// lib/noteQtys.js, shared verbatim with the Transfer module and mirroring the backend's
+// `note_qty_totals` — the form, the lists, the detail dialogs, the previews, the prints
+// and the API therefore cannot disagree. Only two are ever entered: Picked and Rejected.
 function stockOutQtys(issued, picked, rejected) {
-  const p = parseFloat(picked) || 0;
-  const r = parseFloat(rejected) || 0;
-  // An OPEN line (the office left the quantity to the store incharge) has no target to
-  // measure against, so Pending is unknown rather than 0 and nothing is ever Extra.
-  if (issued == null || issued === "") return { issued: null, picked: p, rejected: r, pending: null, extra: 0 };
-  const i = parseFloat(issued) || 0;
-  return { issued: i, picked: p, rejected: r, pending: Math.max(0, i - p - r), extra: Math.max(0, p - i) };
+  const q = noteQtys(issued, picked, rejected);
+  return { issued: q.requested, picked: q.actual, rejected: q.rejected, pending: q.pending, extra: q.extra };
 }
 
 // Note-level totals, mirroring the backend exactly: Pending and Extra are floored per
@@ -294,16 +282,6 @@ function pickingIssuedQty(pn)   { return pickingTotals(pn).issued; }
 function pickingPickedQty(pn)   { return pickingTotals(pn).picked; }
 function pickingRejectedQty(pn) { return pickingTotals(pn).rejected; }
 
-// Pending and Extra collapsed into one signed number: they are the two directions of a
-// single variance and can never both be non-zero on the same note, so one column carries
-// both — negative for what's still outstanding (Pending), positive for what went over
-// (Extra). Used wherever the list/summary views show them side by side.
-function varianceValue(pending, extra) {
-  if (extra > 0) return extra;
-  if (pending > 0) return -pending;
-  return 0;
-}
-
 function pickingNoteIsClosed(pn) {
   return (pn?.status || "").toUpperCase() === "CLOSED";
 }
@@ -348,9 +326,11 @@ function pickingAvailableLookup(pn) {
 }
 
 // Picking Note print columns: Sr, Part No, Item, Godown, Rack, Box, Issued Qty,
-// Available Qty, Picked Qty, Pending Qty, Rejected Qty, Extra Qty, Picker.
-// Every number here is produced by `stockOutQtys`, the same function the screen uses —
-// the printed sheet and the application can never disagree.
+// Available Qty, Picked Qty, Pending / Extra, Rejected Qty, Picker.
+// Every number here is produced by `stockOutQtys` and rendered by `varianceLabel`, the
+// same two functions the screen uses — the printed sheet, the preview dialog and the
+// application can never disagree. Pending and Extra share ONE column because they are the
+// two directions of one variance and can never both be non-zero on a line.
 function printPickingNote(pn) {
   const issuedFor = pickingRequestedLookup(pn);
   const availableFor = pickingAvailableLookup(pn);
@@ -368,9 +348,8 @@ function printPickingNote(pn) {
       num(q.issued == null ? "Open" : q.issued),
       num(avail == null ? "—" : avail),
       num(q.picked),
-      num(q.pending == null ? "—" : q.pending),
+      num(varianceLabel(q.pending, q.extra)),
       num(q.rejected),
-      num(q.extra),
       htmlEscape(pn.created_by || "—"),
     ];
   });
@@ -397,8 +376,8 @@ function printPickingNote(pn) {
       { label: "Sr" }, { label: "Part No" }, { label: "Item" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
       { label: "Issued Qty", align: "right" }, { label: "Available Qty", align: "right" },
-      { label: "Picked Qty", align: "right" }, { label: "Pending Qty", align: "right" },
-      { label: "Rejected Qty", align: "right" }, { label: "Extra Qty", align: "right" },
+      { label: "Picked Qty", align: "right" }, { label: "Pending / Extra", align: "right" },
+      { label: "Rejected Qty", align: "right" },
       { label: "Picker" },
     ],
     rows,
@@ -409,7 +388,7 @@ function printPickingNote(pn) {
 }
 
 // Issue Note print columns: Sr, Part Number, Item Name, Make, Godown, Rack, Box,
-// Issued Qty, Picked Qty, Pending Qty, Rejected Qty, Extra Qty. No Available column —
+// Issued Qty, Picked Qty, Pending / Extra, Rejected Qty. No Available column —
 // availability is the store's live concern and belongs to the Picking Note alone.
 function printIssueNote(inn, pickingHistory = []) {
   // Picked and Rejected are derived live from the Picking Notes, so a corrected pick is
@@ -429,8 +408,8 @@ function printIssueNote(inn, pickingHistory = []) {
     const locs = isActual ? actual : (it.allocated_locations || []);
     // A pending quantity nobody is chasing any more reads differently from one that is
     // still on somebody's list, so a closed follow-up is called out rather than hidden.
-    const pendingCell = q.pending == null ? "—"
-      : `${q.pending}${q.pending > 0 && writtenOffKeys.has(k) ? " (closed)" : ""}`;
+    const varianceCell = `${varianceLabel(q.pending, q.extra)}`
+      + (q.pending > 0 && writtenOffKeys.has(k) ? " (closed)" : "");
     const num = (v) => `<span style="text-align:right;display:block">${htmlEscape(v)}</span>`;
     // `rowPicked` is per-row: each row is one actual pick at one location (possibly from
     // a different Picking Note than the row above it), so each carries its own quantity
@@ -444,9 +423,8 @@ function printIssueNote(inn, pickingHistory = []) {
       godownCell, rackCell, boxCell,
       showItem ? num(q.issued == null ? "Open" : q.issued) : "",
       num(isActual ? (rowPicked ?? "—") : (showItem ? q.picked : "")),
-      showItem ? num(pendingCell) : "",
+      showItem ? num(varianceCell) : "",
       showItem ? num(q.rejected) : "",
-      showItem ? num(q.extra) : "",
     ];
     if (locs.length === 0) {
       rows.push(base(true, "—", "—", "—"));
@@ -484,8 +462,7 @@ function printIssueNote(inn, pickingHistory = []) {
       { label: "Sr" }, { label: "Part Number" }, { label: "Item Name" }, { label: "Make" },
       { label: "Godown" }, { label: "Rack" }, { label: "Box" },
       { label: "Issued Qty", align: "right" }, { label: "Picked Qty", align: "right" },
-      { label: "Pending Qty", align: "right" }, { label: "Rejected Qty", align: "right" },
-      { label: "Extra Qty", align: "right" },
+      { label: "Pending / Extra", align: "right" }, { label: "Rejected Qty", align: "right" },
     ],
     rows,
     narration: inn.narration || "",
@@ -779,12 +756,10 @@ function IssueNoteList({ reloadKey, onCreate, onEdit, onOpen }) {
                   <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.issued_qty_total || "—"}</td>
                   <td className="text-center font-mono font-bold text-slate-900 tabular-nums">{r.picked_qty_total ?? 0}</td>
                   <td className={`text-center font-mono font-bold tabular-nums ${(r.rejected_qty_total ?? 0) > 0 ? "text-red-700" : "text-slate-400"}`}>{r.rejected_qty_total ?? 0}</td>
-                  {/* Pending / Extra as one signed number — negative (amber) for what's
-                      still outstanding, positive (emerald) for what went over. */}
-                  <td className={`text-center font-mono font-bold tabular-nums ${
-                    (r.extra_qty_total ?? 0) > 0 ? "text-emerald-700" : ((r.pending_qty_total ?? 0) > 0 ? "text-amber-700" : "text-slate-400")
-                  }`}>
-                    {(r.extra_qty_total ?? 0) > 0 ? `+${r.extra_qty_total}` : ((r.pending_qty_total ?? 0) > 0 ? `−${r.pending_qty_total}` : 0)}
+                  {/* Pending / Extra — one calculated field, worded exactly as it is on
+                      the note, the preview and the printed sheet (see `varianceLabel`). */}
+                  <td className={`text-center font-mono font-bold tabular-nums ${varianceClass(r.pending_qty_total, r.extra_qty_total)}`}>
+                    {varianceLabel(r.pending_qty_total ?? 0, r.extra_qty_total ?? 0)}
                   </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`in-status-${r.in_no}`}>{label}</span>
@@ -878,12 +853,16 @@ function IssueNoteDetailDialog({ inn, onClose }) {
             {/* Note totals, aggregated across every Picking Note raised against this
                 Issue Note. Same five numbers as the print sheet and as each line's
                 columns below, from the same helper — they cannot drift apart. */}
-            <div className="mt-3 grid grid-cols-5 gap-3 bg-slate-50 border border-slate-200 rounded-sm px-4 py-3">
+            <div className="mt-3 grid grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-sm px-4 py-3">
               <Detail k="ISSUED QTY" v={<span className="font-bold">{totals.issued || "—"}</span>} />
               <Detail k="PICKED QTY" v={<span className="font-bold">{totals.picked}</span>} />
-              <Detail k="PENDING QTY" v={<span className={`font-bold ${totals.pending > 0 ? "text-amber-700" : "text-slate-500"}`}>{totals.pending}</span>} />
+              <Detail k="PENDING / EXTRA" v={
+                <span className={`font-bold ${varianceClass(totals.pending, totals.extra)}`}
+                  title={varianceTitle(totals.issued, totals.picked, totals.rejected, totals.pending, totals.extra)}>
+                  {varianceLabel(totals.pending, totals.extra)}
+                </span>
+              } />
               <Detail k="REJECTED QTY" v={<span className={`font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>} />
-              <Detail k="EXTRA QTY" v={<span className={`font-bold ${totals.extra > 0 ? "text-emerald-700" : "text-slate-500"}`}>{totals.extra}</span>} />
             </div>
             <div className="mt-2">
               <div className="label-sm mb-2">Items ({(inn.items || []).length})</div>
@@ -894,9 +873,8 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                       <th className="w-14">SL NO</th><th className="w-28">MODEL</th><th>PART NO</th><th>DESCRIPTION 1</th><th>MAKE</th>
                       <th className="text-center">ISSUED QTY</th>
                       <th className="text-center">PICKED QTY</th>
-                      <th className="text-center">PENDING QTY</th>
+                      <th className="text-center">PENDING / EXTRA</th>
                       <th className="text-center">REJECTED QTY</th>
-                      <th className="text-center">EXTRA QTY</th>
                       <th>GODOWN</th><th>RACK</th><th>BOX</th>
                     </tr>
                   </thead>
@@ -917,28 +895,19 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                       // off" never look the same.
                       const q = stockOutQtys(it.quantity, pickedByKey[k], rejectedByKey[k]);
                       const closedOut = writtenOffKeys.has(k);
-                      // Pending/Rejected/Extra describe the LINE as a whole, not any one
-                      // shelf, so they print once, on the line's first row.
+                      // Pending/Extra and Rejected describe the LINE as a whole, not any
+                      // one shelf, so they print once, on the line's first row. Pending and
+                      // Extra share ONE cell — they are the two directions of a single
+                      // variance and can never both be non-zero on a line.
                       const lineCells = (
                         <>
-                          <td className={`text-center font-mono font-bold ${q.pending > 0 ? "text-amber-700" : "text-slate-400"}`}>
-                            {q.pending == null ? "—" : (
-                              <>
-                                {q.pending}
-                                {q.pending > 0 && closedOut && <span className="block text-[9px] font-bold tracking-wide text-slate-500">CLOSED</span>}
-                              </>
-                            )}
+                          <td className={`text-center font-mono font-bold ${varianceClass(q.pending, q.extra)}`}
+                            title={varianceTitle(q.issued, q.picked, q.rejected, q.pending, q.extra)}>
+                            {varianceLabel(q.pending, q.extra)}
+                            {q.pending > 0 && closedOut && <span className="block text-[9px] font-bold tracking-wide text-slate-500">CLOSED</span>}
                           </td>
                           <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
                             {q.rejected || "—"}
-                          </td>
-                          <td className={`text-center font-mono font-bold ${q.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}>
-                            {q.extra > 0 ? (
-                              <>
-                                {q.extra}
-                                <span className="block text-[9px] font-bold tracking-wide">TAKEN</span>
-                              </>
-                            ) : "—"}
                           </td>
                         </>
                       );
@@ -983,10 +952,10 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                           <td className="text-center font-mono font-bold text-slate-700">
                             {isActual ? (loc.quantity ?? "—") : "—"}
                           </td>
-                          {/* Pending/Rejected/Extra belong to the line, so they print on
-                              its first row only — the rows below are extra locations,
+                          {/* Pending/Extra and Rejected belong to the line, so they print
+                              on its first row only — the rows below are extra locations,
                               not extra lines. */}
-                          {li === 0 ? lineCells : <><td /><td /><td /></>}
+                          {li === 0 ? lineCells : <><td /><td /></>}
                           <td className="font-mono">{loc.godown_name || "—"}</td>
                           <td className="font-mono">{loc.rack_no || "—"}</td>
                           <td className="font-mono">{loc.box_no || "—"}</td>
@@ -1004,8 +973,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                   <tr>
                     <th>PARENT PN</th><th>PN NO</th>
                     <th className="text-center">ISSUED</th><th className="text-center">PICKED</th>
-                    <th className="text-center">PENDING</th><th className="text-center">REJECTED</th>
-                    <th className="text-center">EXTRA</th>
+                    <th className="text-center">PENDING / EXTRA</th><th className="text-center">REJECTED</th>
                     <th>STATUS</th>
                   </tr>
                 </thead>
@@ -1022,18 +990,14 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                         <td className="text-center font-mono font-bold">{t.picked}</td>
                         {/* Pending is what carries into the next Picking Note — except on
                             a closed note, where the ✕ marks that nobody is chasing it. */}
-                        <td className={`text-center font-mono font-bold ${t.pending > 0 ? (closed ? "text-slate-500" : "text-amber-700") : "text-slate-400"}`}
+                        <td className={`text-center font-mono font-bold ${closed && t.pending > 0 ? "text-slate-500" : varianceClass(t.pending, t.extra)}`}
                           title={closed && t.pending > 0 ? "Written off — this note was closed"
-                            : (t.pending > 0 ? "Carries forward into the next Picking Note" : "Nothing outstanding on this note")}>
-                          {t.pending}{closed && t.pending > 0 ? " ✕" : ""}
+                            : varianceTitle(t.issued, t.picked, t.rejected, t.pending, t.extra)}>
+                          {varianceLabel(t.pending, t.extra)}{closed && t.pending > 0 ? " ✕" : ""}
                         </td>
                         <td className={`text-center font-mono font-bold ${t.rejected > 0 ? "text-red-700" : "text-slate-400"}`}
                           title={t.rejected > 0 ? "Refused — no stock moved and no follow-up note is raised for it" : ""}>
                           {t.rejected}
-                        </td>
-                        <td className={`text-center font-mono font-bold ${t.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}
-                          title={t.extra > 0 ? "Extra taken over the issued quantity" : ""}>
-                          {t.extra}
                         </td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${pickingNoteStatusClass(pn.status)}`}
@@ -1045,7 +1009,7 @@ function IssueNoteDetailDialog({ inn, onClose }) {
                     );
                   })}
                   {history.length === 0 && (
-                    <tr><td colSpan={8} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
+                    <tr><td colSpan={7} className="text-center py-6 text-slate-500">No picking notes yet.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -2222,20 +2186,17 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                   </span>
                 } />
                 <Detail k="PICKED QTY" v={<span className="font-mono font-bold">{totals.picked}</span>} />
-                <Detail k="PENDING QTY" v={
-                  <span className={`font-mono font-bold ${totals.pending > 0 ? "text-amber-700" : "text-slate-500"}`}>
-                    {totals.pending}
+                <Detail k="PENDING / EXTRA" v={
+                  <span className={`font-mono font-bold ${varianceClass(totals.pending, totals.extra)}`}
+                    title={varianceTitle(totals.issued, totals.picked, totals.rejected, totals.pending, totals.extra)}>
+                    {varianceLabel(totals.pending, totals.extra)}
                     {totals.pending > 0 && !pickingNoteIsClosed(pn) && <span className="ml-2 text-[10px] font-normal text-slate-500">carries to the next Picking Note</span>}
                     {totals.pending > 0 && pickingNoteIsClosed(pn) && <span className="ml-2 text-[10px] font-normal text-slate-500">written off — note closed</span>}
-                  </span>
-                } />
-                <Detail k="REJECTED QTY / EXTRA QTY" v={
-                  <span className="font-mono font-bold">
-                    <span className={totals.rejected > 0 ? "text-red-700" : "text-slate-500"}>{totals.rejected}</span>
-                    <span className="text-slate-400"> / </span>
-                    <span className={totals.extra > 0 ? "text-emerald-700" : "text-slate-500"}>{totals.extra}</span>
                     {totals.extra > 0 && <span className="ml-2 text-[10px] font-normal text-emerald-700">extra taken</span>}
                   </span>
+                } />
+                <Detail k="REJECTED QTY" v={
+                  <span className={`font-mono font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>
                 } />
                 {pickingNoteIsClosed(pn) && (
                   <Detail k="CLOSED" v={
@@ -2262,7 +2223,7 @@ function PickingNoteDetailDialog({ pn, onClose }) {
               <div className="label-sm mb-2">Items ({pickingDisplayItems(pn).length})</div>
               <div className="overflow-x-auto">
                 <table className="data-table w-full text-xs">
-                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">ISSUED QTY</th><th className="text-center">AVAILABLE QTY</th><th className="text-center">PICKED QTY</th><th className="text-center">PENDING QTY</th><th className="text-center">REJECTED QTY</th><th className="text-center">EXTRA QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
+                  <thead><tr><th>SL</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th><th>STATUS</th><th className="text-center">ISSUED QTY</th><th className="text-center">AVAILABLE QTY</th><th className="text-center">PICKED QTY</th><th className="text-center">PENDING / EXTRA</th><th className="text-center">REJECTED QTY</th><th>GODOWN</th><th>RACK</th><th>BOX</th></tr></thead>
                   <tbody>
                     {pickingDisplayItems(pn).map((it, idx) => {
                       const q = stockOutQtys(issuedFor(it), it.picked_qty, it.rejected_qty);
@@ -2277,14 +2238,12 @@ function PickingNoteDetailDialog({ pn, onClose }) {
                         <td className="text-center font-mono font-bold text-slate-600">{q.issued == null ? <span className="text-blue-700">Open</span> : q.issued}</td>
                         <td className="text-center font-mono text-slate-600" title="Live stock for this item">{avail == null ? "—" : avail}</td>
                         <td className="text-center font-mono font-bold">{q.picked}</td>
-                        <td className={`text-center font-mono font-bold ${q.pending > 0 ? "text-amber-700" : "text-slate-400"}`}>
-                          {q.pending == null ? "—" : q.pending}
+                        <td className={`text-center font-mono font-bold ${varianceClass(q.pending, q.extra)}`}
+                          title={varianceTitle(q.issued, q.picked, q.rejected, q.pending, q.extra)}>
+                          {varianceLabel(q.pending, q.extra)}
                         </td>
                         <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
                           {q.rejected || "—"}
-                        </td>
-                        <td className={`text-center font-mono font-bold ${q.extra > 0 ? "text-emerald-700" : "text-slate-400"}`}>
-                          {q.extra || "—"}
                         </td>
                         <td className="font-mono">{it.godown_name || "—"}</td>
                         <td className="font-mono">{it.rack_no || "—"}</td>
@@ -2893,17 +2852,12 @@ function PickingNoteForm({ editing, onCancel, onSaved }) {
                         Never typed, never negative in the underlying figures — the sign
                         here is presentation, so one glance says which way the line went. */}
                     <td className="text-left align-middle" data-testid={`pn-variance-${idx}`}>
-                      {!lineHead ? <span className="text-slate-300">·</span>
-                        : line.extra > 0 ? (
-                          <span className="font-mono font-bold text-emerald-700" title={`Extra — ${line.extra} taken over the ${line.issued} issued`}>
-                            +{line.extra}
-                          </span>
-                        ) : line.pending == null ? <span className="text-slate-400">—</span>
-                        : line.pending > 0 ? (
-                          <span className="font-mono font-bold text-amber-700" title={`Pending — ${line.pending} still outstanding (Issued − Picked − Rejected). Carries into a new Picking Note when this one is recorded`}>
-                            −{line.pending}
-                          </span>
-                        ) : <span className="font-mono text-slate-400" title="Fully settled — nothing pending, nothing extra">0</span>}
+                      {!lineHead ? <span className="text-slate-300">·</span> : (
+                        <span className={`font-mono font-bold ${varianceClass(line.pending, line.extra)}`}
+                          title={varianceTitle(line.issued, line.picked, line.rejected, line.pending, line.extra)}>
+                          {varianceLabel(line.pending, line.extra)}
+                        </span>
+                      )}
                     </td>
                     <td className="align-middle">
                       <div className="flex items-center gap-1 h-8 whitespace-nowrap">

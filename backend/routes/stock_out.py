@@ -9,7 +9,7 @@ from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enf
 from deps import _module_dep
 from models import *
 from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_total_for, _get_balance, _allocate_locations_for, _stock_locations_for
-from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key
+from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key, note_qty_totals
 from helpers.status_helpers import _recompute_in_status
 from helpers.validation import _validate_txn, _validate_issue_items, _validate_issue_qty_against_stock, _validate_picking_items, _validate_picking_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -337,7 +337,7 @@ def _remaining_assigned_items(assigned_items: list[dict], picked_items: list[dic
 
 
 def _picking_totals(assigned_items: list[dict], picked_items: list[dict]) -> dict:
-    """The five quantities of a Picking Note, from the only two that are ever stored.
+    """The five quantities of a Picking Note, under Stock Out's names.
 
         Issued   — what the Issue Note assigned to this note (blank/open lines count 0)
         Picked   — what physically came off the shelf
@@ -345,42 +345,17 @@ def _picking_totals(assigned_items: list[dict], picked_items: list[dict]) -> dic
         Pending  — max(0, Issued − Picked − Rejected), summed per (part, make)
         Extra    — max(0, Picked − Issued), summed per (part, make)
 
-    Pending and Extra are floored per part/make rather than on the grand total, so a
-    surplus on one item can never mask a shortfall on another. Every view, print,
-    export and API response derives its numbers here, which is what makes them agree.
+    The arithmetic itself lives in `note_qty_totals` — shared verbatim with the Transfer
+    module, so a Picking Note and a Transfer Note can never compute their variance
+    differently. Only the field names differ between the two.
     """
-    issued_by_key, picked_by_key, rejected_by_key = {}, {}, {}
-    # An OPEN line (quantity left blank for the store incharge to decide) has no target
-    # number. It contributes 0 to Issued, but it must not therefore make the whole pick
-    # look like an Extra — there was nothing to exceed. Both Pending and Extra are
-    # undefined for it, so it is skipped in the arithmetic below rather than counted as 0.
-    open_keys = set()
-    for it in assigned_items or []:
-        k = _key(it.get("part_no"), it.get("make"))
-        issued_by_key.setdefault(k, 0.0)
-        if it.get("quantity") is None:
-            open_keys.add(k)
-        else:
-            issued_by_key[k] += float(it.get("quantity") or 0)
-    for it in picked_items or []:
-        k = _key(it.get("part_no"), it.get("make"))
-        picked_by_key[k] = picked_by_key.get(k, 0.0) + float(it.get("quantity") or 0)
-        rejected_by_key[k] = rejected_by_key.get(k, 0.0) + float(it.get("rejected_qty") or 0)
-    pending = extra = 0.0
-    for k in set(issued_by_key) | set(picked_by_key) | set(rejected_by_key):
-        if k in open_keys:
-            continue
-        issued = issued_by_key.get(k, 0.0)
-        picked = picked_by_key.get(k, 0.0)
-        rejected = rejected_by_key.get(k, 0.0)
-        pending += max(0.0, issued - picked - rejected)
-        extra += max(0.0, picked - issued)
+    t = note_qty_totals(assigned_items, picked_items)
     return {
-        "issued_qty_total": sum(issued_by_key.values()),
-        "picked_qty_total": sum(picked_by_key.values()),
-        "rejected_qty_total": sum(rejected_by_key.values()),
-        "pending_qty_total": pending,
-        "extra_qty_total": extra,
+        "issued_qty_total": t["requested"],
+        "picked_qty_total": t["actual"],
+        "rejected_qty_total": t["rejected"],
+        "pending_qty_total": t["pending"],
+        "extra_qty_total": t["extra"],
     }
 
 

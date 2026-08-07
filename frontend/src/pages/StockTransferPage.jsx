@@ -23,6 +23,7 @@ import useExcelTableFilter from "../components/useExcelTableFilter";
 import PartNoLink from "../components/PartNoLink";
 import { exportToExcel } from "../lib/exportExcel";
 import { buildStandardPrintHtml, openPrintWindow, htmlEscape, formatLocationText } from "../lib/printDocument";
+import { noteQtys, varianceLabel, varianceValue, varianceClass, varianceTitle } from "../lib/noteQtys";
 
 const PAGE_SIZE = 100;
 const NO_LOCATION = "__NO_LOCATION__";
@@ -46,20 +47,121 @@ function qtySum(items) {
   return (items || []).reduce((s, it) => s + (parseInt(it.quantity) || 0), 0);
 }
 
-function transferAssignedQty(stn) {
-  return parseInt(stn.assigned_qty_total) || qtySum(stn.assigned_items || []);
+/* ---------------------------------------------------------------------------
+   The five Transfer quantities. Only two are ever entered — Transferred and
+   Rejected — and the other three follow by arithmetic that is identical
+   everywhere: the form, the lists, the detail dialogs, the print previews, the
+   printed sheets and the backend (`_transfer_totals` in routes/transfer.py, over
+   the shared `note_qty_totals`).
+
+       Pending = max(0, Requested − Transferred − Rejected)
+       Extra   = max(0, Transferred − Requested)
+
+   There is deliberately no Short field: a shortfall IS the Pending quantity, and
+   it is carried by an automatically-raised follow-up Transfer Note rather than
+   recorded as a separate number.
+
+   The requested quantity is a TARGET, not a ceiling — the operator may move more
+   than was asked for (an Extra) or less (a Pending). The only hard limit is what
+   is physically on the shelf. Reject is legal only while Extra is 0.
+   --------------------------------------------------------------------------- */
+
+// Null-safe: the detail dialogs stay mounted with a null note until a row is opened.
+function transferAssignedItems(stn) {
+  return (stn?.assigned_items || []).length ? (stn?.assigned_items || []) : (stn?.requested_items || []);
 }
 
-function transferMovedQty(stn) {
-  return parseInt(stn.transferred_qty_total) || qtySum(stn.items || []);
+// Note-level totals. The server sends all five (`_enrich_transfer_note_totals`); they are
+// recomputed here from the note's own items only when a caller passes a row that has not
+// been through that enrichment, so a stale/partial row still shows consistent numbers.
+function transferTotals(stn) {
+  if (stn && stn.pending_qty_total !== undefined) {
+    return {
+      requested: parseFloat(stn.requested_qty_total) || 0,
+      transferred: parseFloat(stn.transferred_qty_total) || 0,
+      rejected: parseFloat(stn.rejected_qty_total) || 0,
+      pending: parseFloat(stn.pending_qty_total) || 0,
+      extra: parseFloat(stn.extra_qty_total) || 0,
+    };
+  }
+  const requestedByKey = {}, movedByKey = {}, rejectedByKey = {};
+  transferAssignedItems(stn).forEach((it) => {
+    const k = transferKey(it);
+    requestedByKey[k] = (requestedByKey[k] || 0) + (parseFloat(it.quantity) || 0);
+  });
+  (stn?.items || []).forEach((it) => {
+    const k = transferKey(it);
+    movedByKey[k] = (movedByKey[k] || 0) + (parseFloat(it.quantity) || 0);
+    rejectedByKey[k] = (rejectedByKey[k] || 0) + (parseFloat(it.rejected_qty) || 0);
+  });
+  // Pending and Extra are floored per part/make and only then summed, exactly as the
+  // backend does, so a surplus on one item can never mask a shortfall on another.
+  let pending = 0, extra = 0;
+  new Set([...Object.keys(requestedByKey), ...Object.keys(movedByKey), ...Object.keys(rejectedByKey)]).forEach((k) => {
+    const q = noteQtys(requestedByKey[k] || 0, movedByKey[k] || 0, rejectedByKey[k] || 0);
+    pending += q.pending;
+    extra += q.extra;
+  });
+  const sum = (m) => Object.values(m).reduce((s, v) => s + v, 0);
+  return { requested: sum(requestedByKey), transferred: sum(movedByKey), rejected: sum(rejectedByKey), pending, extra };
 }
 
+// Single-value accessors for the list columns. Anything needing more than one number
+// calls `transferTotals` once instead, so Pending and Extra have no accessors of their
+// own — the views that show them (form, detail, print) take the whole set.
+function transferRequestedQty(stn) { return transferTotals(stn).requested; }
+function transferMovedQty(stn)     { return transferTotals(stn).transferred; }
 // Rejected qty never moves stock — it records the part of the request the operator
 // closed out as "will not be transferred", which is why it resolves the request without
 // ever counting toward the transferred total.
-function transferRejectedQty(stn) {
-  return parseInt(stn.rejected_qty_total)
-    || (stn.items || []).reduce((s, it) => s + (parseInt(it.rejected_qty) || 0), 0);
+function transferRejectedQty(stn)  { return transferTotals(stn).rejected; }
+
+// Requested qty for one row of a Transfer Note, from the request assignment carried on
+// the note. Pooled per part/make — a line split across several source locations shares
+// one requested quantity, which is exactly the level the backend validates at.
+function transferRequestedLookup(stn) {
+  const byKey = {};
+  transferAssignedItems(stn).forEach((it) => {
+    const k = transferKey(it);
+    byKey[k] = (byKey[k] || 0) + (parseFloat(it.quantity) || 0);
+  });
+  return (row) => byKey[transferKey(row)];
+}
+
+// Live Available Qty per part/make, as served alongside the note
+// (`_enrich_transfer_note_totals`). Keyed the same way the rows are, so a print never has
+// to go back to the API for it.
+function transferAvailableLookup(stn) {
+  const byKey = {};
+  (stn?.available_by_item || []).forEach((a) => { byKey[transferKey(a)] = a.available_qty; });
+  return (row) => byKey[transferKey(row)];
+}
+
+// One normalized row per line of the note, whichever stage it is at. A note with no
+// movement rows yet is shown through its ASSIGNED items — and on those rows `quantity` is
+// the requested quantity, not a transfer, so transferred/rejected are pinned to 0.
+// Without that, a freshly raised note would print "Transferred 10" before anything moved.
+function transferDisplayItems(stn) {
+  if ((stn?.items || []).length) {
+    return (stn?.items || []).map((it) => ({
+      ...it,
+      moved_qty: parseFloat(it.quantity) || 0,
+      rejected_qty: parseFloat(it.rejected_qty) || 0,
+      row_status: transferNoteDone(stn) ? "Transferred" : "Draft",
+    }));
+  }
+  return transferAssignedItems(stn).map((it) => ({
+    ...it,
+    moved_qty: 0,
+    rejected_qty: 0,
+    row_status: stn?.status === "PENDING" ? "Pending" : "Assigned",
+  }));
+}
+
+// Live Available Qty for the note, supplied by the server. Transfer Note only — the
+// Transfer Request is an office document and never shows availability.
+function transferAvailableQty(stn) {
+  return stn?.available_qty_total ?? null;
 }
 
 function transferNoteDone(stn) {
@@ -157,29 +259,52 @@ function locationCellHtml(locs) {
   }).join("<br/><br/>");
 }
 
-// Transfer Request print columns: Sr, Part Number, Item, Make, Source Godown,
-// Destination Godown, Requested Qty, Transferred Qty, Rejected Qty, Status
-function printTransferRequest(s, noteHistory = []) {
-  const processedByKey = {};
-  noteHistory.forEach((stn) => {
-    if (!transferNoteDone(stn)) return;
+// Total Transferred and Rejected per part/make across the request's whole Transfer Note
+// chain — the root note plus every continuation. Derived live rather than snapshotted, so
+// a corrected note shows up on the request, its preview and its print at once. Mirrors
+// `_enrich_transfer_request_totals` on the server, including its CLOSED exclusion.
+function transferQtysByKey(noteHistory = []) {
+  const transferred = {}, rejected = {};
+  (noteHistory || []).forEach((stn) => {
+    if ((stn.status || "").toUpperCase() === "CLOSED") return;
     (stn.items || []).forEach((it) => {
       const k = transferKey(it);
-      const cur = processedByKey[k] || { transferred: 0, rejected: 0 };
-      cur.transferred += parseFloat(it.quantity) || 0;
-      cur.rejected += parseFloat(it.rejected_qty) || 0;
-      processedByKey[k] = cur;
+      transferred[k] = (transferred[k] || 0) + (parseFloat(it.quantity) || 0);
+      rejected[k] = (rejected[k] || 0) + (parseFloat(it.rejected_qty) || 0);
     });
   });
+  return { transferred, rejected };
+}
+
+// The Transfer Request's own five totals, aggregated over its Transfer Notes. Mirrors
+// `_enrich_transfer_request_totals` (and `note_qty_totals` under it): Pending and Extra
+// are floored per part/make before being summed.
+function transferRequestTotals(s, noteHistory = []) {
+  return transferTotals({
+    assigned_items: s?.items || [],
+    items: (noteHistory || [])
+      .filter((stn) => (stn.status || "").toUpperCase() !== "CLOSED")
+      .flatMap((stn) => stn.items || []),
+  });
+}
+
+// Transfer Request print columns: Sr, Part Number, Item, Make, Source Location,
+// Destination Location, Requested Qty, Transferred Qty, Pending / Extra, Rejected Qty,
+// Status. No Available column — availability is the store's live concern and belongs to
+// the Transfer Note alone. Every number comes from `noteQtys`/`varianceLabel`, the same
+// functions the screen uses, so the sheet and the application cannot disagree.
+function printTransferRequest(s, noteHistory = []) {
+  const { transferred: movedByKey, rejected: rejectedByKey } = transferQtysByKey(noteHistory);
   const rows = (s.items || []).map((it, idx) => {
-    const p = processedByKey[transferKey(it)] || { transferred: 0, rejected: 0 };
-    const requested = parseFloat(it.quantity) || 0;
+    const k = transferKey(it);
+    const q = noteQtys(it.quantity, movedByKey[k], rejectedByKey[k]);
     // A rejected quantity resolves its share of the request just as a transferred one
     // does — the line is settled, it simply wasn't moved. Same rule the server's status
     // recompute uses, so the printed row status can never disagree with the document.
-    const resolved = p.transferred + p.rejected;
-    const rowStatus = resolved <= 0 ? "Pending" : (resolved + 1e-6 >= requested ? "Complete" : "In Process");
+    const resolved = q.actual + q.rejected;
+    const rowStatus = resolved <= 0 ? "Pending" : (resolved + 1e-6 >= q.requested ? "Complete" : "In Process");
     const eff = transferEffectiveLocations(it, noteHistory);
+    const num = (v) => `<span style="text-align:right;display:block">${htmlEscape(v)}</span>`;
     return [
       String(idx + 1),
       htmlEscape(it.part_no),
@@ -187,9 +312,10 @@ function printTransferRequest(s, noteHistory = []) {
       htmlEscape(it.make || "—"),
       locationCellHtml(eff.srcLocs),
       locationCellHtml(eff.destLocs),
-      `<span style="text-align:right;display:block">${htmlEscape(requested || "—")}</span>`,
-      `<span style="text-align:right;display:block">${htmlEscape(p.transferred || "—")}</span>`,
-      `<span style="text-align:right;display:block">${htmlEscape(p.rejected || "—")}</span>`,
+      num(q.requested),
+      num(q.actual),
+      num(varianceLabel(q.pending, q.extra)),
+      num(q.rejected),
       htmlEscape(rowStatus),
     ];
   });
@@ -212,7 +338,7 @@ function printTransferRequest(s, noteHistory = []) {
       { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Make" },
       { label: "Source Location" }, { label: "Destination Location" },
       { label: "Requested Qty", align: "right" }, { label: "Transferred Qty", align: "right" },
-      { label: "Rejected Qty", align: "right" },
+      { label: "Pending / Extra", align: "right" }, { label: "Rejected Qty", align: "right" },
       { label: "Status" },
     ],
     rows,
@@ -221,21 +347,33 @@ function printTransferRequest(s, noteHistory = []) {
   if (!openPrintWindow(html)) toast.error("Popup blocked — allow popups for this site to print");
 }
 
-// Transfer Note print columns: Sr, Part Number, Item, Rack, Source, Destination,
-// Transferred Qty, Reject Qty, Receiver
+// Transfer Note print columns: Sr, Part Number, Item, Source, Destination, Requested Qty,
+// Available Qty, Transferred Qty, Pending / Extra, Rejected Qty, Receiver.
+// Every number here is produced by `noteQtys` and rendered by `varianceLabel` — the same
+// two functions the form, the list and the preview dialog use, so the printed sheet and
+// the application can never disagree. Pending and Extra share ONE column: they are the
+// two directions of one variance and can never both be non-zero on a line.
 function printTransferNote(stn) {
-  const displayItems = (stn.items || []).length ? stn.items : (stn.assigned_items || []);
-  const rows = displayItems.map((it, idx) => [
-    String(idx + 1),
-    htmlEscape(it.part_no),
-    htmlEscape(it.description_1 || ""),
-    htmlEscape(it.src_rack_no || "—"),
-    htmlEscape([it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "—"),
-    htmlEscape([it.dest_godown_name, it.dest_rack_no, it.dest_box_no].filter(Boolean).join(" / ") || "—"),
-    `<span style="text-align:right;display:block">${htmlEscape(it.quantity ?? "—")}</span>`,
-    `<span style="text-align:right;display:block">${htmlEscape(parseInt(it.rejected_qty) || "—")}</span>`,
-    htmlEscape(stn.created_by || "—"),
-  ]);
+  const requestedFor = transferRequestedLookup(stn);
+  const availableFor = transferAvailableLookup(stn);
+  const rows = transferDisplayItems(stn).map((it, idx) => {
+    const q = noteQtys(requestedFor(it), it.moved_qty, it.rejected_qty);
+    const avail = availableFor(it);
+    const num = (v) => `<span style="text-align:right;display:block">${htmlEscape(v)}</span>`;
+    return [
+      String(idx + 1),
+      htmlEscape(it.part_no),
+      htmlEscape(it.description_1 || it.make || ""),
+      htmlEscape([it.src_godown_name, it.src_rack_no, it.src_box_no].filter(Boolean).join(" / ") || "—"),
+      htmlEscape([it.dest_godown_name, it.dest_rack_no, it.dest_box_no].filter(Boolean).join(" / ") || "—"),
+      num(q.requested == null ? "—" : q.requested),
+      num(avail == null ? "—" : avail),
+      num(q.actual),
+      num(varianceLabel(q.pending, q.extra)),
+      num(q.rejected),
+      htmlEscape(stn.created_by || "—"),
+    ];
+  });
   const html = buildStandardPrintHtml({
     docTitle: "Transfer Note",
     docNo: stn.stn_no,
@@ -247,17 +385,18 @@ function printTransferNote(stn) {
       ["Execution Attempt", stn.execution_attempt || 1],
       ["Status", transferNoteStatusLabel(stn.status)],
     ],
+    // Quantities live only in the table below, not duplicated up here — one place to read
+    // them, and no risk of the header block and the table showing different numbers.
     fieldsRight: [
       ["Assigned To", stn.parent_assigned_to_name || stn.parent_assigned_to_email || "—"],
       ["Receiver / Created By", stn.created_by || "—"],
-      ["Transferred Qty", transferMovedQty(stn)],
-      ["Reject Qty", transferRejectedQty(stn)],
     ],
     columns: [
-      { label: "Sr" }, { label: "Part Number" }, { label: "Item" }, { label: "Rack" },
+      { label: "Sr" }, { label: "Part Number" }, { label: "Item" },
       { label: "Source" }, { label: "Destination" },
-      { label: "Transferred Qty", align: "right" },
-      { label: "Reject Qty", align: "right" },
+      { label: "Requested Qty", align: "right" }, { label: "Available Qty", align: "right" },
+      { label: "Transferred Qty", align: "right" }, { label: "Pending / Extra", align: "right" },
+      { label: "Rejected Qty", align: "right" },
       { label: "Receiver" },
     ],
     rows,
@@ -360,9 +499,13 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
     { key: "str_no", label: "TRANSFER REQUEST NO", value: (r) => r.str_no || "" },
     { key: "purpose", label: "PURPOSE", value: (r) => r.purpose || "" },
     { key: "items_count", label: "ITEMS", value: (r) => (r.items || []).length},
-    { key: "qty_total", label: "REQUESTED", value: (r) => parseInt(r.requested_qty_total) || qtySum(r.items)},
-    { key: "progress", label: "TRANSFERRED", value: (r) => `${parseInt(r.transferred_qty_total) || 0} / ${parseInt(r.requested_qty_total) || qtySum(r.items)}`},
-    { key: "rejected_qty", label: "REJECTED", value: (r) => parseInt(r.rejected_qty_total) || 0},
+    // The four quantities the request aggregates from its Transfer Notes. Pending and
+    // Extra are one calculated column — numeric here so it still sorts and filters, and
+    // rendered as the same signed number the cell below (and the print) shows.
+    { key: "qty_total", label: "REQUESTED", value: (r) => r.requested_qty_total ?? qtySum(r.items), isQty: true, isNumeric: true },
+    { key: "moved_qty", label: "TRANSFERRED", value: (r) => r.transferred_qty_total ?? 0, isQty: true, isNumeric: true },
+    { key: "rejected_qty", label: "REJECTED", value: (r) => r.rejected_qty_total ?? 0, isQty: true, isNumeric: true },
+    { key: "variance_qty", label: "PENDING / EXTRA", value: (r) => varianceValue(r.pending_qty_total ?? 0, r.extra_qty_total ?? 0), isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: statusLabel },
   ], []);
   const {
@@ -449,9 +592,9 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const totalQty = parseInt(r.requested_qty_total) || qtySum(r.items);
-              const movedQty = parseInt(r.transferred_qty_total) || 0;
-              const rejectedQty = parseInt(r.rejected_qty_total) || 0;
+              const totalQty = r.requested_qty_total ?? qtySum(r.items);
+              const movedQty = r.transferred_qty_total ?? 0;
+              const rejectedQty = r.rejected_qty_total ?? 0;
               // Editable only until the first quantity is transferred/rejected — matches
               // the backend rule (a transfer note with processed qty flips status off Pending).
               const hasNotes = transferRequestHasProcessed(r.status);
@@ -474,9 +617,15 @@ function TransferRequestList({ reloadKey, onCreate, onEdit, onOpen }) {
                   </td>
                   <td className="text-slate-700 max-w-[280px] truncate">{r.purpose || "—"}</td>
                   <td className="text-left font-mono text-slate-600">{(r.items || []).length}</td>
-                  <td className="text-left font-mono font-bold text-slate-900">{totalQty}</td>
-                  <td className="text-left font-mono font-bold text-slate-900">{movedQty} / {totalQty}</td>
-                  <td className={`text-left font-mono font-bold ${rejectedQty > 0 ? "text-amber-700" : "text-slate-400"}`}>{rejectedQty}</td>
+                  <td className="text-left font-mono font-bold text-slate-900 tabular-nums">{totalQty || "—"}</td>
+                  <td className="text-left font-mono font-bold text-slate-900 tabular-nums">{movedQty}</td>
+                  <td className={`text-left font-mono font-bold tabular-nums ${rejectedQty > 0 ? "text-red-700" : "text-slate-400"}`}>{rejectedQty}</td>
+                  {/* Pending / Extra — one calculated field, worded exactly as it is on the
+                      note, the preview and the printed sheet (see `varianceLabel`). */}
+                  <td className={`text-left font-mono font-bold tabular-nums ${varianceClass(r.pending_qty_total, r.extra_qty_total)}`}
+                    title={varianceTitle(totalQty, movedQty, rejectedQty, r.pending_qty_total, r.extra_qty_total)}>
+                    {varianceLabel(r.pending_qty_total ?? 0, r.extra_qty_total ?? 0)}
+                  </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${cls}`} data-testid={`str-status-${r.str_no}`}>{label}</span>
                   </td>
@@ -520,6 +669,11 @@ function TransferRequestDetailDialog({ s, onClose }) {
       .catch(() => setHistory([]));
   }, [s?.id]);
 
+  // Both derived from the SAME roll-up the print uses, so the dialog and the printed
+  // sheet are literally the same document with the same numbers.
+  const totals = transferRequestTotals(s, history);
+  const { transferred: movedByKey, rejected: rejectedByKey } = transferQtysByKey(history);
+
   return (
     <Dialog open={!!s} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="str-detail-dialog">
@@ -548,6 +702,20 @@ function TransferRequestDetailDialog({ s, onClose }) {
                 </div>
               </div>
             </div>
+            {/* Request totals, aggregated across every Transfer Note raised against this
+                request. Same four numbers as the print sheet and as each line's columns
+                below, from the same helper — they cannot drift apart. */}
+            <div className="mt-3 grid grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-sm px-4 py-3 text-sm">
+              <Detail k="REQUESTED QTY" v={<span className="font-bold">{totals.requested || "—"}</span>} />
+              <Detail k="TRANSFERRED QTY" v={<span className="font-bold">{totals.transferred}</span>} />
+              <Detail k="PENDING / EXTRA" v={
+                <span className={`font-bold ${varianceClass(totals.pending, totals.extra)}`}
+                  title={varianceTitle(totals.requested, totals.transferred, totals.rejected, totals.pending, totals.extra)}>
+                  {varianceLabel(totals.pending, totals.extra)}
+                </span>
+              } />
+              <Detail k="REJECTED QTY" v={<span className={`font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>} />
+            </div>
             <div className="mt-2">
               <div className="label-sm mb-2">Items ({(s.items || []).length})</div>
               <div className="overflow-x-auto">
@@ -555,19 +723,36 @@ function TransferRequestDetailDialog({ s, onClose }) {
                   <thead>
                     <tr>
                       <th>SL NO.</th><th>PART NO</th><th>MAKE</th><th>DESCRIPTION</th>
-                      <th className="text-center">QTY</th><th>SOURCE LOCATION</th><th>DESTINATION LOCATION</th>
+                      <th className="text-center">REQUESTED QTY</th>
+                      <th className="text-center">TRANSFERRED QTY</th>
+                      <th className="text-center">PENDING / EXTRA</th>
+                      <th className="text-center">REJECTED QTY</th>
+                      <th>SOURCE LOCATION</th><th>DESTINATION LOCATION</th>
                     </tr>
                   </thead>
                   <tbody>
                     {(s.items || []).map((it, idx) => {
                       const eff = transferEffectiveLocations(it, history);
+                      // Transferred and Rejected are derived live from the Transfer Notes,
+                      // so a corrected note is reflected here the next time the request is
+                      // opened — nothing is snapshotted.
+                      const k = transferKey(it);
+                      const q = noteQtys(it.quantity, movedByKey[k], rejectedByKey[k]);
                       return (
                         <tr key={idx}>
                           <td className="font-mono text-slate-500">{idx + 1}</td>
                           <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                           <td>{it.make}</td>
                           <td className="text-slate-700 max-w-[260px] truncate">{it.description_1 || "—"}</td>
-                          <td className="text-center font-mono font-bold">{it.quantity}</td>
+                          <td className="text-center font-mono font-bold">{q.requested}</td>
+                          <td className="text-center font-mono font-bold">{q.actual}</td>
+                          <td className={`text-center font-mono font-bold ${varianceClass(q.pending, q.extra)}`}
+                            title={varianceTitle(q.requested, q.actual, q.rejected, q.pending, q.extra)}>
+                            {varianceLabel(q.pending, q.extra)}
+                          </td>
+                          <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
+                            {q.rejected || "—"}
+                          </td>
                           <td className="text-slate-600">{locationCellText(eff.srcLocs)}</td>
                           <td className="text-slate-600">{locationCellText(eff.destLocs)}</td>
                         </tr>
@@ -581,20 +766,29 @@ function TransferRequestDetailDialog({ s, onClose }) {
               <div className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-2 pb-1 border-b border-slate-200">Transfer Note History</div>
               <table className="data-table w-full text-xs">
                 <thead>
-                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-center">ASSIGNED</th><th className="text-center">TRANSFERRED</th><th className="text-center">REJECTED</th><th>STATUS</th></tr>
+                  <tr><th>STN NO</th><th>ATTEMPT</th><th>PARENT STN</th><th className="text-center">REQUESTED</th><th className="text-center">TRANSFERRED</th><th className="text-center">PENDING / EXTRA</th><th className="text-center">REJECTED</th><th>STATUS</th></tr>
                 </thead>
                 <tbody>
                   {[...history].sort((a, b) => (a.execution_attempt || 1) - (b.execution_attempt || 1)).map((stn) => {
                     const parent = history.find((h) => h.id === stn.parent_transfer_note_id);
                     const done = transferNoteDone(stn);
+                    const t = transferTotals(stn);
                     return (
                       <tr key={stn.id}>
                         <td className="font-mono font-semibold">{stn.stn_no}</td>
                         <td className="font-mono">{stn.execution_attempt || 1}</td>
                         <td className="font-mono">{parent?.stn_no || "—"}</td>
-                        <td className="text-center font-mono font-bold">{transferAssignedQty(stn)}</td>
-                        <td className="text-center font-mono font-bold">{transferMovedQty(stn)}</td>
-                        <td className={`text-center font-mono font-bold ${transferRejectedQty(stn) > 0 ? "text-amber-700" : "text-slate-400"}`}>{transferRejectedQty(stn)}</td>
+                        <td className="text-center font-mono font-bold">{t.requested || "—"}</td>
+                        <td className="text-center font-mono font-bold">{t.transferred}</td>
+                        {/* Pending is what carries into the next Transfer Note. */}
+                        <td className={`text-center font-mono font-bold ${varianceClass(t.pending, t.extra)}`}
+                          title={varianceTitle(t.requested, t.transferred, t.rejected, t.pending, t.extra)}>
+                          {varianceLabel(t.pending, t.extra)}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${t.rejected > 0 ? "text-red-700" : "text-slate-400"}`}
+                          title={t.rejected > 0 ? "Refused — no stock moved and no follow-up note is raised for it" : ""}>
+                          {t.rejected}
+                        </td>
                         <td>
                           <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${done ? "bg-green-100 text-green-800" : (stn.status === "PENDING" ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`}>
                             {transferNoteStatusLabel(stn.status)}
@@ -603,7 +797,7 @@ function TransferRequestDetailDialog({ s, onClose }) {
                       </tr>
                     );
                   })}
-                  {history.length === 0 && <tr><td colSpan={7} className="text-center py-6 text-slate-500">No transfer notes yet.</td></tr>}
+                  {history.length === 0 && <tr><td colSpan={8} className="text-center py-6 text-slate-500">No transfer notes yet.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -845,8 +1039,11 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
       const it = items[i];
       if (!it.part_no.trim()) { toast.error(`Row ${i + 1}: Part No required`); return; }
       if (!it.make.trim()) { toast.error(`Row ${i + 1}: Make required`); return; }
+      // 0 is a legitimate request: it names the item and where it should end up and
+      // leaves the quantity to the operator, who records whatever actually moves as an
+      // Extra on the Transfer Note. Only a blank or negative number is meaningless.
       const q = parseInt(it.quantity);
-      if (isNaN(q) || q <= 0) { toast.error(`Row ${i + 1}: Quantity > 0`); return; }
+      if (isNaN(q) || q < 0) { toast.error(`Row ${i + 1}: Quantity cannot be negative`); return; }
       if (it.src_godown_id) {
         const locAvail = it.location_available_qty || 0;
         if (q > locAvail + 1e-6) {
@@ -1024,7 +1221,7 @@ function TransferRequestForm({ editing, onCancel, onSaved }) {
                       </Select>
                     </td>
                     <td>
-                      <Input type="number" min="1" step="1" value={it.quantity} disabled={!it.make}
+                      <Input type="number" min="0" step="1" value={it.quantity} disabled={!it.make}
                         max={effAvail || undefined}
                         onChange={(e) => onReqQtyChange(idx, e.target.value, effAvail)}
                         title={it.make ? `Up to ${effAvail} available` : undefined}
@@ -1246,9 +1443,12 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
     { key: "stn_no", label: "STN NO", value: (r) => r.stn_no || "" },
     { key: "str_no", label: "REQUEST NO", value: (r) => r.transfer_request_no || "" },
     { key: "items_count", label: "ITEMS", value: (r) => (r.assigned_items || r.items || []).length},
-    { key: "assigned_qty", label: "ASSIGNED", value: transferAssignedQty},
-    { key: "moved_qty", label: "TRANSFERRED", value: transferMovedQty},
-    { key: "rejected_qty", label: "REJECTED", value: transferRejectedQty},
+    { key: "requested_qty", label: "REQUESTED", value: transferRequestedQty, isQty: true, isNumeric: true },
+    { key: "moved_qty", label: "TRANSFERRED", value: transferMovedQty, isQty: true, isNumeric: true },
+    { key: "rejected_qty", label: "REJECTED", value: transferRejectedQty, isQty: true, isNumeric: true },
+    // Pending and Extra are one calculated column — numeric so it still sorts and filters,
+    // and rendered as the same signed number the cell, the preview and the print show.
+    { key: "variance_qty", label: "PENDING / EXTRA", value: (r) => { const t = transferTotals(r); return varianceValue(t.pending, t.extra); }, isQty: true, isNumeric: true },
     { key: "status", label: "STATUS", value: (r) => transferNoteStatusLabel(r.status) },
   ], []);
   const {
@@ -1315,7 +1515,9 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           wrapping onto a second line inside their cell. Each column is sized to hold its
           value on one line, with the table scrolling horizontally instead. */}
       <div className="bg-white border border-slate-200 rounded-sm overflow-x-auto">
-        <table className="data-table data-table-fixed w-full min-w-[1250px]">
+        {/* One <col> per column, in order: SL, STN Date, STN No, Request No, Items,
+            Requested, Transferred, Rejected, Pending/Extra, Status, Actions. */}
+        <table className="data-table data-table-fixed data-table-wrap-head w-full min-w-[1400px]">
           <colgroup>
             <col style={{ width: "60px" }} />
             <col style={{ width: "116px" }} />
@@ -1323,8 +1525,9 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
             <col style={{ width: "150px" }} />
             <col style={{ width: "80px" }} />
             <col style={{ width: "108px" }} />
-            <col style={{ width: "128px" }} />
-            <col style={{ width: "110px" }} />
+            <col style={{ width: "118px" }} />
+            <col style={{ width: "108px" }} />
+            <col style={{ width: "140px" }} />
             <col style={{ width: "110px" }} />
             <col style={{ width: "230px" }} />
           </colgroup>
@@ -1350,9 +1553,7 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
           </thead>
           <tbody>
             {filteredRows.map((r, idx) => {
-              const assignedQty = transferAssignedQty(r);
-              const movedQty = transferMovedQty(r);
-              const rejectedQty = transferRejectedQty(r);
+              const t = transferTotals(r);
               const recorded = transferNoteDone(r);
               const pending = r.status === "PENDING";
               const aId = r.parent_assigned_to_user_id;
@@ -1372,9 +1573,15 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
                   </td>
                   <td className="font-mono text-slate-700">{r.transfer_request_no || "—"}</td>
                   <td className="text-left font-mono text-slate-600">{(r.assigned_items || r.items || []).length}</td>
-                  <td className="text-left font-mono font-bold text-slate-900">{assignedQty}</td>
-                  <td className="text-left font-mono font-bold text-slate-900">{movedQty}</td>
-                  <td className={`text-left font-mono font-bold ${rejectedQty > 0 ? "text-amber-700" : "text-slate-400"}`}>{rejectedQty}</td>
+                  <td className="text-left font-mono font-bold text-slate-900 tabular-nums">{t.requested || "—"}</td>
+                  <td className="text-left font-mono font-bold text-slate-900 tabular-nums">{t.transferred}</td>
+                  <td className={`text-left font-mono font-bold tabular-nums ${t.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>{t.rejected}</td>
+                  {/* Pending / Extra — one calculated field, identical on the note, the
+                      preview dialog and the printed sheet (see `varianceLabel`). */}
+                  <td className={`text-left font-mono font-bold tabular-nums ${varianceClass(t.pending, t.extra)}`}
+                    title={varianceTitle(t.requested, t.transferred, t.rejected, t.pending, t.extra)}>
+                    {varianceLabel(t.pending, t.extra)}
+                  </td>
                   <td>
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${recorded ? "bg-green-100 text-green-800" : (pending ? "bg-blue-50 text-blue-800" : "bg-amber-50 text-amber-700")}`} data-testid={`stn-status-${r.stn_no}`}>
                       {transferNoteStatusLabel(r.status)}
@@ -1416,6 +1623,12 @@ function TransferNoteList({ reloadKey, onEdit, onOpen, onRecorded }) {
 }
 
 function TransferNoteDetailDialog({ stn, onClose }) {
+  // Every number in this dialog comes from the same three helpers the print sheet uses,
+  // so the preview and the printed document can never disagree.
+  const totals = transferTotals(stn);
+  const available = transferAvailableQty(stn);
+  const requestedFor = transferRequestedLookup(stn);
+  const availableFor = transferAvailableLookup(stn);
   return (
     <Dialog open={!!stn} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-7xl max-h-[92vh] overflow-y-auto rounded-sm" data-testid="stn-detail-dialog">
@@ -1437,12 +1650,29 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                 } />
               </div>
               <div className="space-y-2">
-                <Detail k="ASSIGNED" v={transferAssignedQty(stn)} />
-                <Detail k="TRANSFERRED" v={transferMovedQty(stn)} />
-                <Detail k="REJECTED" v={transferRejectedQty(stn)} />
-                {/* Rejected qty resolves its share of the request, so it leaves nothing
-                    outstanding — it comes off Remaining exactly as a transfer does. */}
-                <Detail k="REMAINING" v={Math.max(0, transferAssignedQty(stn) - transferMovedQty(stn) - transferRejectedQty(stn))} />
+                <Detail k="REQUESTED QTY / AVAILABLE QTY" v={
+                  <span className="font-mono">
+                    {totals.requested || "—"}
+                    <span className="text-slate-400"> / </span>
+                    {available == null ? "—" : available}
+                  </span>
+                } />
+                <Detail k="TRANSFERRED QTY" v={<span className="font-mono font-bold">{totals.transferred}</span>} />
+                {/* Pending and Extra are ONE calculated field — the two directions of a
+                    single variance, which can never both be non-zero. A Pending quantity
+                    is what carries into an automatically-raised follow-up Transfer Note;
+                    a Rejected one settles the request with no follow-up at all. */}
+                <Detail k="PENDING / EXTRA" v={
+                  <span className={`font-mono font-bold ${varianceClass(totals.pending, totals.extra)}`}
+                    title={varianceTitle(totals.requested, totals.transferred, totals.rejected, totals.pending, totals.extra)}>
+                    {varianceLabel(totals.pending, totals.extra)}
+                    {totals.pending > 0 && <span className="ml-2 text-[10px] font-normal text-slate-500">carries to the next Transfer Note</span>}
+                    {totals.extra > 0 && <span className="ml-2 text-[10px] font-normal text-emerald-700">extra moved</span>}
+                  </span>
+                } />
+                <Detail k="REJECTED QTY" v={
+                  <span className={`font-mono font-bold ${totals.rejected > 0 ? "text-red-700" : "text-slate-500"}`}>{totals.rejected}</span>
+                } />
                 <Detail k="CREATED BY" v={stn.created_by || "—"} />
                 <div>
                   <div className="label-sm">ASSIGNED TO (FROM REQUEST)</div>
@@ -1451,26 +1681,40 @@ function TransferNoteDetailDialog({ stn, onClose }) {
               </div>
             </div>
             <div className="mt-2">
-              <div className="label-sm mb-2">Items ({((stn.items || []).length ? stn.items : (stn.assigned_items || [])).length})</div>
+              <div className="label-sm mb-2">Items ({transferDisplayItems(stn).length})</div>
               <div className="overflow-x-auto">
                 <table className="data-table w-full text-xs">
                   <thead>
                     <tr>
-                      <th>SL NO.</th><th>PART NO</th><th>MAKE</th><th className="text-center">TRANSFERRED QTY</th>
-                      <th className="text-center">REJECT QTY</th>
+                      <th>SL NO.</th><th>PART NO</th><th>MAKE</th><th>STATUS</th>
+                      <th className="text-center">REQUESTED QTY</th>
+                      <th className="text-center">AVAILABLE QTY</th>
+                      <th className="text-center">TRANSFERRED QTY</th>
+                      <th className="text-center">PENDING / EXTRA</th>
+                      <th className="text-center">REJECTED QTY</th>
                       <th>SOURCE GODOWN</th><th>SOURCE RACK</th><th>SOURCE BOX</th>
                       <th>DEST GODOWN</th><th>DEST RACK</th><th>DEST BOX</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {((stn.items || []).length ? stn.items : (stn.assigned_items || [])).map((it, idx) => (
+                    {transferDisplayItems(stn).map((it, idx) => {
+                      const q = noteQtys(requestedFor(it), it.moved_qty, it.rejected_qty);
+                      const avail = availableFor(it);
+                      return (
                       <tr key={idx}>
                         <td className="font-mono text-slate-500">{idx + 1}</td>
                         <td><PartNoLink partNo={it.part_no} make={it.make} /></td>
                         <td>{it.make}</td>
-                        <td className="text-center font-mono font-bold">{it.quantity}</td>
-                        <td className={`text-center font-mono font-bold ${(parseInt(it.rejected_qty) || 0) > 0 ? "text-amber-700" : "text-slate-400"}`}>
-                          {parseInt(it.rejected_qty) || 0}
+                        <td className="font-mono text-slate-600">{it.row_status || "—"}</td>
+                        <td className="text-center font-mono font-bold text-slate-600">{q.requested == null ? "—" : q.requested}</td>
+                        <td className="text-center font-mono text-slate-600" title="Live stock for this item">{avail == null ? "—" : avail}</td>
+                        <td className="text-center font-mono font-bold">{q.actual}</td>
+                        <td className={`text-center font-mono font-bold ${varianceClass(q.pending, q.extra)}`}
+                          title={varianceTitle(q.requested, q.actual, q.rejected, q.pending, q.extra)}>
+                          {varianceLabel(q.pending, q.extra)}
+                        </td>
+                        <td className={`text-center font-mono font-bold ${q.rejected > 0 ? "text-red-700" : "text-slate-400"}`}>
+                          {q.rejected || "—"}
                         </td>
                         <td className="font-mono">{it.src_godown_name || "—"}</td>
                         <td className="font-mono">{it.src_rack_no || "—"}</td>
@@ -1479,7 +1723,8 @@ function TransferNoteDetailDialog({ stn, onClose }) {
                         <td className="font-mono">{it.dest_rack_no || "—"}</td>
                         <td className="font-mono">{it.dest_box_no || "—"}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1528,12 +1773,16 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
             return {
               ...it, available_locations: p.available_locations || [],
               pending_qty: p.pending_qty ?? 0, requested_qty: p.requested_qty ?? 0,
+              // Availability is always the CURRENT number, never what it was when the
+              // draft was saved: the whole point of the field is that the shelf moves
+              // underneath the note.
+              available_qty: p.available_qty ?? 0,
               // A saved 0 comes back as an empty input, not a literal "0" the operator
               // has to clear before typing.
               rejected_qty: (parseInt(it.rejected_qty) || 0) || "",
             };
           }));
-        }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, available_locations: [], pending_qty: 0, requested_qty: 0 }))));
+        }).catch(() => setItems((editing.items || []).map((it) => ({ ...it, available_locations: [], pending_qty: 0, requested_qty: 0, available_qty: 0 }))));
     } else {
       api.get("/transfer-notes/next-no").then((r) => { setStnNo(r.data.next_stn_no); setStnDate(r.data.stn_date); })
         .catch(() => toast.error("Could not preview transfer-note number"));
@@ -1647,7 +1896,11 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       setItems((prev) => prev.map((r) => {
         const p = byItem[`${r.part_no}||${r.make}`];
         if (!p) return r;
-        return { ...r, available_locations: p.available_locations || [], requested_qty: p.requested_qty ?? r.requested_qty };
+        return {
+          ...r, available_locations: p.available_locations || [],
+          requested_qty: p.requested_qty ?? r.requested_qty,
+          available_qty: p.available_qty ?? r.available_qty,
+        };
       }));
       toast.success("Availability updated");
     } catch (err) {
@@ -1669,8 +1922,9 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
   );
 
   // A request line can be split across several source locations, so Requested is a budget
-  // for the part/make, not for one row — every reject figure below is computed over all
-  // rows that draw on the same requested line.
+  // for the LINE (part/make), not for one row — Pending, Extra and Reject are therefore
+  // all computed over every row that draws on the same requested line, and shown (and,
+  // for Reject, entered) once, on the line's first row.
   const rowsOfLine = (rows, row) => rows.filter((r) => transferKey(r) === transferKey(row));
   const lineTotals = (rows, row, skipIdx = -1) => rows.reduce((acc, r, ri) => {
     if (transferKey(r) !== transferKey(row)) return acc;
@@ -1683,6 +1937,11 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     const first = rowsOfLine(rows, row)[0];
     return parseInt(first?.requested_qty) || 0;
   };
+  // The line's whole arithmetic in one place — the same function every other view uses.
+  const lineQtys = (rows, row) => {
+    const t = lineTotals(rows, row, -1);
+    return noteQtys(lineRequested(rows, row), t.transferred, t.rejected);
+  };
 
   // Reject Quantity closes out the part of the request that will NOT be moved, so it is
   // bounded by what is still outstanding on the line:
@@ -1693,30 +1952,38 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     const t = lineTotals(rows, row, idx);
     return Math.max(0, requested - t.transferred - t.rejected);
   };
-  // Rule 5/6: rejection is only possible while the line is genuinely under-transferred.
+  // Reject is legal only while Extra is 0: once more has moved than was asked for, there
+  // is nothing outstanding left to refuse. The same rule the server enforces
+  // (`_validate_reject_rules`), so a note the form accepts is a note the server accepts.
   const rejectDisabledReason = (row, rows = items) => {
     const requested = lineRequested(rows, row);
-    if (requested <= 0) return "Reject Qty needs a requested quantity on this line";
+    if (requested <= 0) return "Reject needs a requested quantity on this line — nothing was asked for, so anything moved is extra";
     const moved = lineTotals(rows, row, -1).transferred;
     if (moved > requested) {
-      return "Reject Quantity cannot be entered because the actual quantity exceeds the requested quantity.";
+      return `Reject unavailable — ${moved} moved against ${requested} requested leaves nothing outstanding to refuse`;
     }
     if (moved === requested) return "Nothing to reject — the full requested quantity has been transferred";
     return "";
   };
 
-  // Transferred Qty is clamped to what the source actually holds — an impossible number
-  // can never be typed, so there is no "over" state to warn about. Changing it re-derives
-  // Remaining, so any Reject Qty on the same line that no longer fits is clamped down (to
-  // 0 once the line is fully transferred) rather than being left as a total that silently
-  // breaks transferred + rejected = requested.
+  // Transferred Qty is clamped to what the SOURCE actually holds — real stock is the only
+  // ceiling. The requested quantity is a target, not a limit: moving less leaves a Pending
+  // quantity that rolls into an automatically-raised follow-up note, moving more is an
+  // Extra and simply stands.
+  //
+  // Pushing the line into Extra also clears any Rejected on it: Reject is only legal while
+  // Extra is 0, and silently leaving a stale number behind for the server to refuse would
+  // be worse than resetting the field the rule has just disabled. Below that, Reject is
+  // re-clamped to whatever is still outstanding.
   const onTransferQtyChange = (i, raw, cap) => {
     const n = raw === "" ? null : parseInt(raw, 10);
     if (raw !== "" && (isNaN(n) || n < 0)) return;
     setItems((prev) => {
       const next = prev.map((r, ri) => (ri === i ? { ...r, quantity: raw === "" ? "" : String(Math.min(n, cap)) } : r));
+      const overPicked = lineQtys(next, next[i]).extra > 0;
       return next.map((r, ri) => {
         if (transferKey(r) !== transferKey(next[i])) return r;
+        if (overPicked) return { ...r, rejected_qty: "" };
         const cur = parseInt(r.rejected_qty) || 0;
         if (!cur) return r;
         const allowed = maxRejectAtRow(r, ri, next);
@@ -1732,9 +1999,18 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
     if (raw === "") { updateItem(i, { rejected_qty: "" }); return; }
     const n = parseInt(raw, 10);
     if (isNaN(n) || n < 0) return;
+    if (rejectDisabledReason(items[i])) return;   // input is disabled here; ignore stray writes
     const cap = maxRejectAtRow(items[i], i);
     updateItem(i, { rejected_qty: String(Math.min(n, cap)) });
   };
+
+  // Pending / Extra and Reject describe the LINE, so they are rendered once — on its first
+  // row — rather than repeated identically on every split row of the same line.
+  const lineHeadIdx = useMemo(() => {
+    const m = {};
+    items.forEach((r, i) => { if (!(transferKey(r) in m)) m[transferKey(r)] = i; });
+    return m;
+  }, [items]);
 
   const onLocChange = async (i, side, kind, value) => {
     // side: "src" | "dest"; kind: "godown" | "rack" | "box"
@@ -1781,8 +2057,8 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       toast.error("Enter a Transferred Qty or a Rejected Qty on at least one row"); return;
     }
     // Reject rules, checked per requested line exactly as the server does: rejection is
-    // only possible while the line is under-transferred, and never beyond what is left
-    // over (transferred + rejected = requested).
+    // only possible while the line is under-transferred (Extra must be 0), and never
+    // beyond what is left over (transferred + rejected <= requested).
     const seenLines = new Set();
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -1794,7 +2070,7 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
       seenLines.add(k);
       const t = lineTotals(items, it, -1);
       if (t.transferred > requested) {
-        toast.error(`Row ${i + 1}: Reject Quantity cannot be entered because the actual quantity exceeds the requested quantity.`); return;
+        toast.error(`${it.part_no} / ${it.make}: Rejected Qty must be 0 — ${t.transferred} was transferred against ${requested} requested`); return;
       }
       if (t.transferred === requested) {
         toast.error(`Row ${i + 1}: Reject Qty must be 0 — the full requested quantity of ${requested} was transferred`); return;
@@ -1932,19 +2208,28 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
             </Button>
           </div>
           <div className="px-4 pt-3 text-xs text-slate-500">
+            Enter <span className="font-bold">Transferred</span> and <span className="font-bold text-red-700">Rejected</span> only — the rest is worked out.
+            Transferring is capped at <span className="font-bold">Available</span>.
+            <span className="font-bold text-amber-700"> −qty</span> is outstanding and rolls into a new Transfer Note;
+            <span className="font-bold text-emerald-700"> +qty</span> is extra moved.
             Use <span className="font-bold text-blue-700">+</span> to draw the same item from another source location —
             the destination carries over. A requested item always keeps at least one row: to move nothing,
             set its Transferred Qty to 0 rather than deleting the row.
           </div>
           <div className="overflow-x-auto">
-            <table className="data-table w-full text-xs">
+            {/* `data-table-wrap-head` (index.css) lets a header wider than its column wrap
+                instead of being clipped — "PENDING / EXTRA" needs it. */}
+            <table className="data-table data-table-wrap-head w-full text-xs">
               <thead>
                 <tr>
                   <th className="w-16">SL NO.</th>
                   <th>PART / MAKE</th>
-                  <th className="text-center w-32">REQUESTED QTY</th>
+                  {/* The five quantity columns: two read-only, two inputs, one derived. */}
+                  <th className="text-center w-28">REQUESTED QTY</th>
+                  <th className="text-center w-28">AVAILABLE QTY</th>
                   <th className="text-center w-32">TRANSFERRED QTY</th>
                   <th className="text-center w-28">REJECT QTY</th>
+                  <th className="text-center w-28">PENDING / EXTRA</th>
                   <th>SOURCE</th>
                   <th>DESTINATION</th>
                   {/* Two 28px icon buttons (split + delete) plus cell padding. */}
@@ -1967,6 +2252,11 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                   const rejectBlocked = rejectDisabledReason(it);
                   const maxReject = maxRejectAtRow(it, idx);
                   const canRemoveRow = rowCountForItem(it) > 1;
+                  // Line-level arithmetic: split rows share one requested line, so
+                  // Pending/Extra and Reject are computed over the whole line and shown
+                  // (and, for Reject, entered) once, on its first row.
+                  const lineHead = lineHeadIdx[transferKey(it)] === idx;
+                  const line = lineQtys(items, it);
                   return (
                     <tr key={idx} data-testid={`stn-item-row-${idx}`} className={shortNow ? "align-top bg-amber-50" : "align-top"}>
                       <td className="font-mono text-slate-500 pt-3">{idx + 1}</td>
@@ -1975,8 +2265,22 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                         <div className="text-slate-600">{it.make}</div>
                         <div className="text-[10px] text-slate-500 mt-0.5">{it.description_1 || ""}</div>
                       </td>
+                      {/* Requested — read-only. A target, not a limit: the operator may
+                          move more (an Extra) or less (a Pending). */}
                       <td className="text-center pt-3 font-mono font-bold text-slate-700" data-testid={`stn-requested-${idx}`}>
                         {requested || "—"}
+                      </td>
+                      {/* Available — read-only and LIVE: the total currently on the shelf
+                          for this part/make, which is the real ceiling on Transferred Qty.
+                          When it has dropped below Requested, the operator moves what is
+                          there and the rest stays Pending for a follow-up note. */}
+                      <td className="text-center pt-3 font-mono" data-testid={`stn-available-${idx}`}>
+                        <span className={(it.available_qty ?? 0) < requested ? "font-bold text-amber-700" : "text-slate-600"}
+                          title={(it.available_qty ?? 0) < requested
+                            ? `Only ${it.available_qty ?? 0} in stock against ${requested} requested — move what is there; the rest stays outstanding`
+                            : "Live stock across every location holding this item"}>
+                          {it.available_qty ?? 0}
+                        </span>
                       </td>
                       <td className="text-center pt-3">
                         <Input type="number" min="0" step="1" value={it.quantity}
@@ -2002,21 +2306,44 @@ function TransferNoteForm({ editing, onCancel, onSaved }) {
                           </div>
                         )}
                       </td>
-                      {/* Reject Qty — audit only. It never moves stock; it closes out the
-                          untransferred remainder so no follow-up Transfer Note is raised. */}
-                      <td className="text-center pt-3">
-                        <Input type="number" min="0" step="1" max={maxReject || undefined}
-                          value={it.rejected_qty ?? ""}
-                          disabled={!!rejectBlocked}
-                          onChange={(e) => onRejectQtyChange(idx, e.target.value)}
-                          title={rejectBlocked || `Up to ${maxReject} can be rejected on this line`}
-                          className="rounded-sm font-mono h-9 text-center text-base w-20 mx-auto disabled:bg-slate-50"
-                          data-testid={`stn-reject-${idx}`} />
-                        <div className={`font-mono text-[11px] whitespace-nowrap mt-1 ${
-                          rejectBlocked ? "text-slate-400" : ((parseInt(it.rejected_qty) || 0) > 0 ? "text-amber-700 font-bold" : "text-slate-500")
-                        }`} data-testid={`stn-reject-hint-${idx}`}>
-                          {rejectBlocked ? "Not allowed" : `Rem ${maxReject}`}
-                        </div>
+                      {/* Reject Qty — the operator's second and last input, entered once
+                          per line. It never moves stock; it closes out the untransferred
+                          remainder so no follow-up Transfer Note is raised for it.
+                          Disabled the moment the line runs an Extra: there is then nothing
+                          outstanding left to refuse. */}
+                      <td className="text-center pt-3" data-testid={`stn-rejected-${idx}`}>
+                        {!lineHead ? <span className="text-slate-300">·</span> : (
+                          <>
+                            <Input type="number" min="0" step="1" max={maxReject || undefined}
+                              value={it.rejected_qty ?? ""}
+                              disabled={!!rejectBlocked}
+                              onChange={(e) => onRejectQtyChange(idx, e.target.value)}
+                              title={rejectBlocked || `Up to ${maxReject} outstanding on this line`}
+                              className="rounded-sm font-mono h-9 text-center text-base w-20 mx-auto disabled:bg-slate-100 disabled:text-slate-400"
+                              data-testid={`stn-reject-${idx}`} />
+                            <div className={`font-mono text-[11px] whitespace-nowrap mt-1 ${
+                              rejectBlocked ? "text-slate-400" : ((parseInt(it.rejected_qty) || 0) > 0 ? "text-red-700 font-bold" : "text-slate-500")
+                            }`} data-testid={`stn-reject-hint-${idx}`}>
+                              {line.extra > 0 ? "Extra — N/A" : (rejectBlocked ? "Not allowed" : `Rem ${maxReject}`)}
+                            </div>
+                          </>
+                        )}
+                      </td>
+                      {/* Pending / Extra — the two derived quantities in one column,
+                          because they are the two directions of a single variance and can
+                          never both be non-zero on a line:
+                              −qty  short of what was requested, and rolls into a new
+                                    Transfer Note when this one is recorded (unless rejected)
+                              +qty  moved over and above what was requested
+                          Never typed, never negative in the underlying figures — the sign
+                          here is presentation, so one glance says which way the line went. */}
+                      <td className="text-center pt-3" data-testid={`stn-variance-${idx}`}>
+                        {!lineHead ? <span className="text-slate-300">·</span> : (
+                          <span className={`font-mono font-bold ${varianceClass(line.pending, line.extra)}`}
+                            title={varianceTitle(line.requested, line.actual, line.rejected, line.pending, line.extra)}>
+                            {varianceLabel(line.pending, line.extra)}
+                          </span>
+                        )}
                       </td>
                       <td className="space-y-1 pt-2">
                         <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider"><MapPin size={10} weight="bold" className="inline mr-0.5" /> From</div>

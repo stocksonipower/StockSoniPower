@@ -6,9 +6,9 @@ from pymongo.errors import DuplicateKeyError
 
 from deps import db, get_current_user, now_iso, _notify, _resolve_assignee, _enforce_assignee
 from models import *
-from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_locations_for, _get_balance
+from helpers.stock_helpers import _enrich_items, _enrich_note_items, _stock_locations_for, _get_balance, _stock_total_for
 from helpers.stock_helpers import _enrich_with_parent_assignee
-from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key
+from helpers.note_helpers import current_fy_label, note_date_key, _next_serial, _key, note_qty_totals
 from helpers.status_helpers import _recompute_str_status, _transfer_other_qty, _transfer_other_src_loc_qty
 from helpers.validation import _validate_transfer_request_items, _validate_transfer_request_qty, _validate_transfer_note_items, _validate_transfer_note_constraints, _box_id_required_for_rack
 from services.unit_of_work import unit_of_work
@@ -36,6 +36,95 @@ def _transfer_src_lock_key(it: dict) -> str:
         it.get("src_rack_id", ""),
         it.get("src_box_id", ""),
     ])
+
+
+def _transfer_totals(assigned_items: list[dict], transferred_items: list[dict]) -> dict:
+    """The five quantities of a Transfer Note, under Transfer's names.
+
+        Requested   — what the Transfer Request assigned to this note
+        Transferred — what physically moved
+        Rejected    — what was deliberately refused
+        Pending     — max(0, Requested − Transferred − Rejected), per (part, make)
+        Extra       — max(0, Transferred − Requested), per (part, make)
+
+    The arithmetic itself lives in `note_qty_totals`, shared verbatim with Stock Out's
+    `_picking_totals` — the two modules cannot compute their variance differently.
+    """
+    t = note_qty_totals(assigned_items, transferred_items)
+    return {
+        "requested_qty_total": t["requested"],
+        "transferred_qty_total": t["actual"],
+        "rejected_qty_total": t["rejected"],
+        "pending_qty_total": t["pending"],
+        "extra_qty_total": t["extra"],
+    }
+
+
+async def _enrich_transfer_note_totals(rows: list[dict]) -> None:
+    """Expose the requested quantities, the five derived totals, and live availability.
+
+    Mirrors `_enrich_picking_requested_items` on the Stock Out side. `transfer_notes.items`
+    holds actual source/destination movements; a PENDING note has none yet, but the list
+    and detail views still need the requested quantity — so `assigned_items` (falling back
+    to the parent Transfer Request) is the source for Requested either way.
+    """
+    if not rows:
+        return
+    str_ids = sorted({r.get("transfer_request_id") for r in rows if r.get("transfer_request_id")})
+    by_id = {}
+    if str_ids:
+        requests = await db.transfer_requests.find(
+            {"id": {"$in": str_ids}}, {"_id": 0, "id": 1, "items": 1},
+        ).to_list(len(str_ids))
+        by_id = {s["id"]: s for s in requests}
+    # Live Available Qty per part/make, fetched once for every part on the page.
+    avail_cache: dict[tuple, float] = {}
+    for row in rows:
+        requested_items = row.get("assigned_items") or by_id.get(row.get("transfer_request_id"), {}).get("items", []) or []
+        row["requested_items"] = requested_items
+        row["requested_items_count"] = len(requested_items)
+        row.update(_transfer_totals(requested_items, row.get("items") or []))
+        # Kept under its historical name too — existing callers/exports read it.
+        row["assigned_qty_total"] = row["requested_qty_total"]
+        available_by_item = []
+        for it in requested_items:
+            ck = (it.get("part_no") or "", it.get("make") or "")
+            if ck not in avail_cache:
+                avail_cache[ck] = float(await _stock_total_for(ck[0], ck[1]) or 0)
+            available_by_item.append({
+                "part_no": ck[0], "make": ck[1], "available_qty": avail_cache[ck],
+            })
+        row["available_by_item"] = available_by_item
+        # Grand total of what is on the shelf for the DISTINCT parts on this note —
+        # summing per line would count the same shelf twice for two lines of one part.
+        row["available_qty_total"] = sum(
+            avail_cache[k] for k in {(it.get("part_no") or "", it.get("make") or "") for it in requested_items}
+        )
+
+
+async def _enrich_transfer_request_totals(rows: list[dict]) -> None:
+    """Roll every related Transfer Note up onto the Transfer Request.
+
+    The Transfer Request states what was REQUESTED; its Transfer Notes are the only record
+    of what actually moved and what was rejected against it. So Transferred and Rejected
+    are summed live across the whole chain (the root note plus every continuation) rather
+    than snapshotted — a corrected note shows up on the request, its print and its export
+    immediately. Same rule, and the same CLOSED exclusion, as `_enrich_issue_note_totals`.
+
+    Pending and Extra are then the same arithmetic used everywhere else, applied to the
+    request's own quantities — which is what keeps the two documents in step.
+    """
+    str_ids = sorted({r.get("id") for r in rows if r.get("id")})
+    if not str_ids:
+        return
+    moved_by_str: dict[str, list] = {}
+    async for stn in db.transfer_notes.find(
+        {"transfer_request_id": {"$in": str_ids}, "status": {"$ne": "CLOSED"}},
+        {"_id": 0, "transfer_request_id": 1, "items": 1},
+    ):
+        moved_by_str.setdefault(stn["transfer_request_id"], []).extend(stn.get("items") or [])
+    for row in rows:
+        row.update(_transfer_totals(row.get("items") or [], moved_by_str.get(row["id"], [])))
 
 
 def _sum_transfer_like_items(items: list[dict]) -> dict:
@@ -255,16 +344,7 @@ async def list_transfer_requests(
     skip = (page - 1) * page_size
     rows = await db.transfer_requests.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
-    for row in rows:
-        requested = sum(float(it.get("quantity") or 0) for it in row.get("items", []))
-        moved = 0
-        rejected = 0
-        async for stn in db.transfer_notes.find({"transfer_request_id": row["id"], "status": {"$in": ["COMPLETED", "RECORDED"]}}, {"_id": 0, "items": 1}):
-            moved += sum(float(it.get("quantity") or 0) for it in stn.get("items", []))
-            rejected += sum(float(it.get("rejected_qty") or 0) for it in stn.get("items", []))
-        row["requested_qty_total"] = requested
-        row["transferred_qty_total"] = moved
-        row["rejected_qty_total"] = rejected
+    await _enrich_transfer_request_totals(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -278,15 +358,7 @@ async def get_transfer_request(str_id: str, user=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Transfer request not found")
     await _enrich_note_items([doc])
-    requested = sum(float(it.get("quantity") or 0) for it in doc.get("items", []))
-    moved = 0
-    rejected = 0
-    async for stn in db.transfer_notes.find({"transfer_request_id": doc["id"], "status": {"$in": ["COMPLETED", "RECORDED"]}}, {"_id": 0, "items": 1}):
-        moved += sum(float(it.get("quantity") or 0) for it in stn.get("items", []))
-        rejected += sum(float(it.get("rejected_qty") or 0) for it in stn.get("items", []))
-    doc["requested_qty_total"] = requested
-    doc["transferred_qty_total"] = moved
-    doc["rejected_qty_total"] = rejected
+    await _enrich_transfer_request_totals([doc])
     return doc
 
 
@@ -422,9 +494,7 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
         make = it.get("make", "")
         requested_qty = it.get("quantity", 0) or 0
         already = other_sums.get(_key(part_no, make), 0)
-        pending = requested_qty - already
-        if pending <= 0:
-            continue
+        pending = max(0, requested_qty - already)
         master = await db.stock_master.find_one({"part_no": part_no, "make": make}, {"_id": 0}) or {}
         locs = await _stock_locations_for(part_no, make)
         for L in locs:
@@ -432,9 +502,16 @@ async def prepare_transfer_note(str_id: str, exclude_stn_id: Optional[str] = Non
 
         common = {
             "part_no": part_no, "make": make,
+            # Requested = what THIS transfer note is being asked for (already the frozen
+            # remainder on a continuation note, never the original full request).
             "requested_qty": requested_qty,
             "already_transferred_qty": already,
             "pending_qty": pending,
+            # Live Available Qty across every location holding this part/make — the real
+            # ceiling on Transferred Qty, and the number the form shows read-only. Derived
+            # from the same locations the operator chooses from, so the total and the
+            # per-location amounts can never disagree.
+            "available_qty": sum(L.get("current_qty") or 0 for L in locs),
             "model": master.get("model", ""),
             "old_part_no": master.get("old_part_no", ""),
             "make_part_no": master.get("make_part_no", ""),
@@ -617,10 +694,7 @@ async def list_transfer_notes(
     rows = await db.transfer_notes.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     await _enrich_note_items(rows)
     await _enrich_with_parent_assignee(rows, "transfer_requests", "transfer_request_id")
-    for row in rows:
-        row["assigned_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("assigned_items") or []))
-        row["transferred_qty_total"] = sum(float(it.get("quantity") or 0) for it in (row.get("items") or []))
-        row["rejected_qty_total"] = sum(float(it.get("rejected_qty") or 0) for it in (row.get("items") or []))
+    await _enrich_transfer_note_totals(rows)
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Page"] = str(page)
     response.headers["X-Page-Size"] = str(page_size)
@@ -635,9 +709,7 @@ async def get_transfer_note(stn_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Transfer note not found")
     await _enrich_note_items([doc])
     await _enrich_with_parent_assignee([doc], "transfer_requests", "transfer_request_id")
-    doc["assigned_qty_total"] = sum(float(it.get("quantity") or 0) for it in (doc.get("assigned_items") or []))
-    doc["transferred_qty_total"] = sum(float(it.get("quantity") or 0) for it in (doc.get("items") or []))
-    doc["rejected_qty_total"] = sum(float(it.get("rejected_qty") or 0) for it in (doc.get("items") or []))
+    await _enrich_transfer_note_totals([doc])
     return doc
 
 
@@ -672,17 +744,10 @@ async def update_transfer_note(stn_id: str, payload: TransferNoteCreate, user=De
 
 @router.delete("/transfer-notes/{stn_id}")
 async def delete_transfer_note(stn_id: str, user=Depends(get_current_user)):
-    existing = await db.transfer_notes.find_one({"id": stn_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Transfer note not found")
-    if existing.get("status") in ("RECORDED", "COMPLETED", "PROCESSING"):
-        raise HTTPException(status_code=409, detail="Cannot delete — already recorded as Stock Transfer")
-    parent = await db.transfer_requests.find_one({"id": existing.get("transfer_request_id")}, {"_id": 0}) or {}
-    _enforce_assignee(parent, user, "delete this transfer note")
-    await db.transfer_notes.delete_one({"id": stn_id})
-    if existing.get("transfer_request_id"):
-        await _recompute_str_status(existing["transfer_request_id"])
-    return {"ok": True}
+    # Transfer Notes can never be deleted — a note is the record of an execution attempt
+    # against its request, and that history must never disappear. Only Edit / Preview /
+    # Print remain available. Same rule as Picking Notes (see delete_picking_note).
+    raise HTTPException(status_code=403, detail="Transfer Notes cannot be deleted — edit instead")
 
 
 @router.post("/transfer-notes/{stn_id}/record")
@@ -845,8 +910,26 @@ async def record_transfer_note(stn_id: str, user=Depends(get_current_user)):
         child_stn = await _create_followup_transfer_note(stn, remaining_items, user)
     if stn.get("transfer_request_id"):
         await _recompute_str_status(stn["transfer_request_id"])
-    total_qty = sum(int(it.get("quantity") or 0) for it in items)
-    total_rejected = sum(int(it.get("rejected_qty") or 0) for it in items)
-    rejected_note = f", rejected {total_rejected}" if total_rejected else ""
-    await _notify(actor=user, type="stock_transfer.recorded", module="stock_transfer", title=f"Stock Transfer completed ({stn['stn_no']})", message=f"{user.get('email')} transferred {len(tx_docs) // 2} item(s), total qty {total_qty}{rejected_note}, from {stn.get('transfer_request_no') or 'STR'}.", audience="module", ref_collection="transfer_notes", ref_id=stn_id)
+    totals = _transfer_totals(assigned_items or [], items)
+    # The variance is the whole story of a transfer, so it belongs in the notification
+    # rather than only on screen: an extra moved, a rejection refused part of the request
+    # outright, and anything still pending is somebody's follow-up to chase.
+    parts = []
+    if totals["extra_qty_total"] > 1e-6:
+        parts.append(f"extra {totals['extra_qty_total']:g} moved")
+    if totals["rejected_qty_total"] > 1e-6:
+        parts.append(f"rejected {totals['rejected_qty_total']:g}")
+    if totals["pending_qty_total"] > 1e-6:
+        parts.append(f"pending {totals['pending_qty_total']:g}")
+    variance = (", " + ", ".join(parts)) if parts else ""
+    followup = f" Remaining {child_stn['stn_no']} raised." if child_stn else ""
+    await _notify(
+        actor=user, type="stock_transfer.recorded", module="stock_transfer",
+        title=f"Stock Transfer completed ({stn['stn_no']})",
+        message=(
+            f"{user.get('email')} transferred {len(tx_docs) // 2} item(s), total qty "
+            f"{totals['transferred_qty_total']:g}{variance}, from {stn.get('transfer_request_no') or 'STR'}.{followup}"
+        ),
+        audience="module", ref_collection="transfer_notes", ref_id=stn_id,
+    )
     return {"ok": True, "transactions_created": len(tx_docs), "remaining_transfer_note": child_stn}

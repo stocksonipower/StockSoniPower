@@ -417,6 +417,14 @@ async def _validate_issue_qty_against_stock(items, exclude_in_id: Optional[str] 
 
 
 def _validate_transfer_request_items(items):
+    """A Transfer Request line may legitimately ask for 0.
+
+    The requester often knows WHICH item has to move and where it should end up, but not
+    how much — the operator settles that at the shelf. A 0 line names the item and the
+    destination and leaves the quantity to the Transfer Note, where anything moved against
+    it simply reads as an EXTRA (0 requested, n transferred). It is not "nothing to do",
+    which is why the line is kept rather than rejected. Negative is still meaningless.
+    """
     if not items:
         raise HTTPException(status_code=400, detail="At least one item is required")
     for idx, it in enumerate(items, start=1):
@@ -424,8 +432,8 @@ def _validate_transfer_request_items(items):
             raise HTTPException(status_code=400, detail=f"Row {idx}: Part No is required")
         if not it.make.strip():
             raise HTTPException(status_code=400, detail=f"Row {idx}: Make is required")
-        if it.quantity is None or it.quantity <= 0:
-            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity must be > 0")
+        if it.quantity is None or it.quantity < 0:
+            raise HTTPException(status_code=400, detail=f"Row {idx}: Quantity cannot be negative")
 
 
 async def _validate_transfer_request_qty(items, exclude_str_id: Optional[str] = None):
@@ -571,6 +579,20 @@ async def _validate_transfer_note_items(items):
 
 
 async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id: Optional[str] = None, assigned_items: Optional[list] = None):
+    """The Transfer Note counterpart of `_validate_picking_constraints`, and deliberately
+    the same rules.
+
+    The REQUESTED quantity is a target, not a ceiling: the operator may move more than the
+    request asked for (a package rarely breaks down exactly the way the requester assumed).
+    The surplus is an EXTRA and simply stands. Moving less leaves a PENDING quantity that
+    rolls into a follow-up Transfer Note — unless it is REJECTED, which closes it out with
+    no follow-up. Pending and Extra are pure arithmetic and are never entered; Transferred
+    and Rejected are the only two inputs, and Reject is legal only while Extra is 0.
+
+    The one hard limit is real stock: nothing may be transferred that isn't physically on
+    the shelf, at the exact source location it is being drawn from, and no more in total
+    than the live Available Qty for that part/make.
+    """
     from helpers.stock_helpers import _stock_locations_for
     s = await db.transfer_requests.find_one({"id": str_id}, {"_id": 0})
     if not s:
@@ -583,41 +605,35 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
     other_sums = {} if assigned_items is not None else await _transfer_other_qty(str_id, exclude_stn_id)
     other_loc_sums = await _transfer_other_src_loc_qty(exclude_stn_id)
 
-    new_sums = {}
+    new_item_sums = {}
     new_loc_sums = {}
     reject_groups = {}
     for it in items:
         k = _key(it.part_no, it.make)
         rejected = getattr(it, "rejected_qty", 0) or 0
-        new_sums[k] = new_sums.get(k, 0) + (it.quantity or 0) + rejected
+        new_item_sums[(it.part_no, it.make)] = new_item_sums.get((it.part_no, it.make), 0) + (it.quantity or 0)
         if (it.quantity or 0) > 0:
             loc_key = f"{it.part_no}||{it.make}||{it.src_godown_id or ''}||{it.src_rack_id or ''}||{it.src_box_id or ''}"
             new_loc_sums[loc_key] = new_loc_sums.get(loc_key, 0) + (it.quantity or 0)
         if k not in requested:
             raise HTTPException(status_code=400, detail=f"{it.part_no} / {it.make} is not on the linked transfer request")
         # Pooled per part+make, and measured against what is still outstanding after any
-        # other note for this request — the same basis the cumulative cap below uses.
+        # other note for this request — the same level `_remaining_assigned_items` and the
+        # request's status recompute resolve at, so a note that passes here is exactly a
+        # note those two can account for.
         g = reject_groups.setdefault(f"{it.part_no} / {it.make}", {
             "requested": max(0, requested.get(k, 0) - other_sums.get(k, 0)),
             "actual": 0, "rejected": 0,
         })
         g["actual"] += it.quantity or 0
         g["rejected"] += rejected
-    # Reject-specific rules first, so an over-reject reports the rule it actually broke
-    # rather than the generic combined-total message below.
+    # Reject bounds first: "Transferred exceeds Requested, so Reject must be 0" is the
+    # rule the user actually broke, and it reads better than a downstream stock message.
     _validate_reject_rules(reject_groups, "Transferred")
 
-    # Cumulative qty cap vs request — transferred + rejected together cannot exceed requested
-    for k, new_q in new_sums.items():
-        recv = requested.get(k, 0)
-        used = other_sums.get(k, 0)
-        if used + new_q > recv + 1e-6:
-            part, make = k.split("||", 1)
-            raise HTTPException(status_code=400, detail=(
-                f"Transferred + Rejected exceeds transfer request for {part} / {make}: "
-                f"requested {recv}, already accounted for elsewhere {used}, this note {new_q} "
-                f"(total {used + new_q} > {recv})"
-            ))
+    # NO cumulative cap against the requested quantity: moving more than was asked for is
+    # an EXTRA, which is legal by design (see this function's docstring). Real stock is the
+    # only ceiling, checked per source location below and in total further down.
 
     # Per-source-location stock check
     loc_cache = {}
@@ -635,4 +651,19 @@ async def _validate_transfer_note_constraints(str_id: str, items, exclude_stn_id
             raise HTTPException(status_code=400, detail=(
                 f"{part_no} / {make}: trying to transfer {new_q} but only {available} available at "
                 f"{loc.get('godown_name')}/{loc.get('rack_no')}/{loc.get('box_no') or '—'}"
+            ))
+
+    # Total Available Qty ceiling. The per-location checks above already imply this, but
+    # stated explicitly it produces the message the operator needs — "you asked for 10 and
+    # only 8 exist" — instead of a location-by-location one that never names the real
+    # constraint. Transferring is bounded by live availability, never by the requested qty.
+    for (part_no, make), moved_total in new_item_sums.items():
+        if moved_total <= 0:
+            continue
+        if (part_no, make) not in loc_cache:
+            loc_cache[(part_no, make)] = await _stock_locations_for(part_no, make)
+        total_available = sum(L.get("current_qty") or 0 for L in loc_cache[(part_no, make)])
+        if moved_total > total_available + 1e-6:
+            raise HTTPException(status_code=400, detail=(
+                f"{part_no} / {make}: cannot transfer {moved_total} — only {total_available} available in stock"
             ))

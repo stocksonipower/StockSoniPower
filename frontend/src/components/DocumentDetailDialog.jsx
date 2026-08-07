@@ -8,6 +8,7 @@ import { useAuth } from "../lib/auth";
 import { useStockInNav } from "../lib/stockInNav";
 import { toast } from "sonner";
 import { buildStandardPrintHtml, openPrintWindow, formatLocationText } from "../lib/printDocument";
+import { varianceLabel, varianceClass, varianceTitle } from "../lib/noteQtys";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -369,13 +370,17 @@ function PickingBody({ d }) {
           (`_enrich_picking_requested_items`) rather than recomputed here — this dialog is
           reached from the transaction ledger and must report exactly what the Stock Out
           screens report. Pending = Issued − Picked − Rejected; Extra = Picked − Issued. */}
-      <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
+      <div className="grid grid-cols-3 lg:grid-cols-5 gap-4 text-sm border-b border-slate-200 pb-4 mb-4">
         <Detail k="Issued Qty" v={d.issued_qty_total ?? "—"} />
         <Detail k="Available Qty" v={d.available_qty_total ?? "—"} />
         <Detail k="Picked Qty" v={d.picked_qty_total ?? 0} />
-        <Detail k="Pending Qty" v={d.pending_qty_total ?? 0} />
+        <Detail k="Pending / Extra" v={
+          <span className={varianceClass(d.pending_qty_total, d.extra_qty_total)}
+            title={varianceTitle(d.issued_qty_total, d.picked_qty_total, d.rejected_qty_total, d.pending_qty_total, d.extra_qty_total)}>
+            {varianceLabel(d.pending_qty_total ?? 0, d.extra_qty_total ?? 0)}
+          </span>
+        } />
         <Detail k="Rejected Qty" v={d.rejected_qty_total ?? 0} />
-        <Detail k="Extra Qty" v={d.extra_qty_total ?? 0} />
       </div>
       <div className="overflow-x-auto">
         <table className="data-table w-full text-xs">
